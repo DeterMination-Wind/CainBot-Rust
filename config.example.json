@@ -1,0 +1,103 @@
+{
+  "napcat": {
+    "baseUrl": "http://127.0.0.1:3000",
+    "eventBaseUrl": "http://127.0.0.1:3000",
+    "eventPath": "/_events",
+    "requestTimeoutMs": 20000,
+    "forwardThresholdChars": 300,
+    "maxConcurrentEvents": 24,
+    "uploadRetryAttempts": 6,
+    "uploadRetryDelayMs": 2500,
+    "uploadStableWaitMs": 1500,
+    "webUiConfigPath": "../NapCat.Shell/config/webui.json",
+    "headers": {
+      "Authorization": "Bearer REPLACE_WITH_ONEBOT_TOKEN"
+    }
+  },
+  "bot": {
+    "ownerUserId": "2712706502",
+    "displayName": "[Bot]Cain",
+    "groupNickname": "[Bot]Cain",
+    "stateFile": "./data/state.json",
+    "runtimeConfigFile": "./data/runtime-config.json",
+    "logLevel": "info"
+  },
+  "codexBridge": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 3186,
+    "token": ""
+  },
+  "ai": {
+    "baseUrl": "http://127.0.0.1:15721/v1",
+    "apiKey": "YOUR_API_KEY"
+  },
+  "translation": {
+    "enabled": true,
+    "model": "gpt-5.4-mini",
+    "targetLanguage": "简体中文",
+    "temperature": 0.2,
+    "promptFile": "./prompts/translation-system-prompt.txt"
+  },
+  "qa": {
+    "enabled": true,
+    "enabledGroupIds": [
+      "123456789"
+    ],
+    "passHintText": "如果此问题无人回答，可以试试 at 我再问，或者输入 /chat 来询问 bot。",
+    "requestTimeoutMs": 90000,
+    "retryAttempts": 3,
+    "retryDelayMs": 1500,
+    "failureCooldownMs": 60000,
+    "filter": {
+      "model": "gpt-5.4-mini",
+      "promptFile": "./prompts/qa-filter-prompt.txt"
+    },
+    "promptReview": {
+      "model": "gpt-5.4-mini",
+      "promptFile": "./prompts/qa-prompt-review.txt"
+    },
+    "answer": {
+      "model": "gpt-5.4-mini",
+      "temperature": 0.4,
+      "maxContextChars": 80000,
+      "maxToolRounds": 4,
+      "sessionTtlMs": 86400000,
+      "maxTimelineMessages": 80,
+      "contextWindowMessages": 30,
+      "promptFile": "./prompts/chat-system-prompt.txt",
+      "codexRoot": "../codex",
+      "memoryFile": "./data/cain-longterm-memory.txt",
+      "enableCodexReadonlyTools": true,
+      "github": {
+        "enabled": true,
+        "apiBaseUrl": "https://api.github.com",
+        "token": "",
+        "requestTimeoutMs": 15000
+      },
+      "rag": {
+        "enabled": true,
+        "autoInject": true,
+        "timeoutMs": 2500,
+        "maxResults": 6,
+        "maxPathResults": 4,
+        "maxContentResults": 6,
+        "maxFileSizeBytes": 1048576,
+        "maxPromptChars": 4200,
+        "roots": [
+          {
+            "alias": "codex",
+            "path": "../codex"
+          }
+        ]
+      }
+    },
+    "topicClosure": {
+      "model": "gpt-5.4-mini",
+      "temperature": 0.2,
+      "idleMinutes": 15,
+      "messageWindow": 30,
+      "promptFile": "./prompts/qa-topic-closure.txt"
+    }
+  }
+}

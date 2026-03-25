@@ -1,0 +1,4 @@
+config.json
+data/state.json
+data/downloads/
+*.log

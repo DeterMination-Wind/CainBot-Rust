@@ -1,0 +1,1595 @@
+   1: import fs from 'node:fs/promises';
+   2: import path from 'node:path';
+   3: import { fileURLToPath } from 'node:url';
+   4: 
+   5: import { loadConfig } from './config.mjs';
+   6: import { ChatSessionManager } from './chat-session-manager.mjs';
+   7: import { CodexReadonlyTools } from './codex-readonly-tools.mjs';
+   8: import { DisguiseReadonlyTools } from './disguise-readonly-tools.mjs';
+   9: import { DailyReportManager } from './daily-report-manager.mjs';
+  10: import { FileBindingManager } from './file-sync.mjs';
+  11: import { GroupDisguiseManager } from './group-disguise-manager.mjs';
+  12: import { Logger } from './logger.mjs';
+  13: import { NapCatClient } from './napcat-client.mjs';
+  14: import { MsavMapAnalyzer } from './msav-map-analyzer.mjs';
+  15: import { OpenAiChatClient } from './openai-chat-client.mjs';
+  16: import { OpenAiTranslator } from './openai-translator.mjs';
+  17: import { ReleaseMonitorManager } from './release-monitor-manager.mjs';
+  18: import { RuntimeConfigStore } from './runtime-config-store.mjs';
+  19: import { StateStore } from './state-store.mjs';
+  20: import { readTextFilesFromMessage } from './message-attachment-reader.mjs';
+  21: import {
+  22:   escapeRegExp,
+  23:   extractImageSegments,
+  24:   extractReplyId,
+  25:   imageSegmentToOpenAiContent,
+  26:   isNonEmptyString,
+  27:   normalizeMessageSegments,
+  28:   parseOptionTokens,
+  29:   pathExists,
+  30:   plainTextFromMessage,
+  31:    public float triggerMargin = 12f;
+  32:    protected static final int threadedSortMinRequests = Math.max(1024, Integer.getInteger("mdtx.render.sort.parallelMin", 2048));
+  33:    public static void create(Team team, Color color, float damage, float x, float y, float targetAngle, int length){
+  34:    "node-info.purpose.health": "影响最大生命与耐久计算",
+  35:    "node-info.purpose.armor": "影响护甲减伤计算",
+  36:    "node-info.purpose.damage": "影响伤害输出计算",
+  37:    "node-info.purpose.speed": "影响移动/弹道速度计算",
+  38:    "node-info.purpose.reload": "影响装填间隔与持续时长计算",
+  39:    "node-info.purpose.range": "影响有效距离/半径判定",
+  40:         inited = true;
+  41: 
+  42:    "node-info.purpose.power": "影响电力相关计算",
+  43: 
+  44:         Events.on(EventType.ClientLoadEvent.class, e -> {
+  45:    public float liquidPad = 2f;
+  46:    public float consumeLiquidAmount = 100f;
+  47:        public float droneProgress, droneWarmup, totalDroneProgress;
+  48:        boolean materialSortEnabled = RenderExt.renderSort || (autoMaterialSortEnabled && numRequests >= autoMaterialSortMinRequests);
+  49:    public boolean hasLiquidBooster;
+  50:            hitCreate.create(null, team, x, y, rotation, damage * (hitter == null ? 1f : hitter.damageMultiplier()), 1f, 1f, hitter);
+  51:        return baseEfficiency + tile.getLinkedTilesAs(this, tempTiles).sumf(other -> other.floor().attributes.get(attribute)) >= minEfficiency;
+  52:     public static void buildSettings(SettingsMenuDialog.SettingsTable table) {
+  53:         table.checkPref(keyEnabled, false);
+  54: 
+  55:             if (validConstruct || validAction) {
+  56:         table.checkPref(GithubUpdateCheck.showDialogKey(), true);
+  57:                 Tile moveTile = reqTile != null ? reqTile : world.tile(req.x, req.y);
+  58:                 if (moveTile != null) {
+  59: 
+  60:     if (remain <= 0) voteLockCount.remove(uuid) else voteLockCount[uuid] = remain
+  61:                    boolean insideBuildRange = distance <= maxBuildRange;
+  62:                    boolean directBuildAtDefaultGap = buildGapTiles == 0 && insideBuildRange;
+  63:     }
+  64:                     }
+  65:                 }
+  66:    protected static int encodeMaterial(Texture texture, Blending blending){
+  67:        stats.add(Stat.speedIncrease, "+" + (int)(speedBoost * 100f - 100) + "%");
+  68:                Lightning.create(Bullets.damageLightningGround, team, lightningColor, damage, x, y, Mathf.random(360f), length);
+  69:        float sum = tile.getLinkedTilesAs(this, tempTiles).sumf(t -> canPump(t) ? baseEfficiency + (attribute != null ? t.floor().attributes.get(attribute) : 0f) : 0f);
+  70:        addBar("progress", (LaunchPadBuild build) -> new Bar(() -> Core.bundle.get("bar.launchcooldown"), () -> Pal.ammo, () -> Mathf.clamp(build.launchCounter / launchTime)));
+  71:     private static void refreshSettings() {
+  72:         enabled = Core.settings.getBool(keyEnabled, false);
+  73:        int gapTiles = parseGapTiles(Core.settings.getString(keyBuildGapTiles, String.valueOf(defaultBuildGapTiles)));
+  74:        PlayerPlanBuilderAI.setBuildGapTiles(gapTiles);
+  75:     }
+  76: 
+  77:    private static int parseGapTiles(String rawValue) {
+  78:         int parsed = defaultBuildGapTiles;
+  79:         if (rawValue != null) {
+  80:        addBar("boost", (OverdriveBuild entity) -> new Bar(() -> Core.bundle.format("bar.boost", Mathf.round(Math.max((entity.realBoost() * 100 - 100), 0))), () -> Pal.accent, () -> entity.realBoost() / (hasBoost ? speedBoost + speedBoostPhase : speedBoost)));
+  81:    "node-info.impact": "影响对象：{0}",
+  82:    "node-info.impact.scope.block": "该方块本体（工作逻辑、生产/射击、受击与配置表现）",
+  83:    "node-info.impact.scope.unit": "该单位本体（移动、索敌、开火、能力触发与 AI 行为）",
+  84:    "node-info.impact.scope.item": "所有引用该物品的炮塔、工厂、消耗器与库存相关逻辑",
+  85:    "node-info.impact.scope.liquid": "所有引用该液体的液体炮塔、冷却/消耗与温度燃烧逻辑",
+  86:    "node-info.impact.scope.weather": "天气系统对单位/方块施加的环境影响与画面效果",
+  87:    "node-info.impact.scope.sector": "该星区相关的进攻、防守、资源或规则流程",
+  88:    "node-info.impact.scope.generic": "该节点所属对象在运行时的判定、计算与表现流程",
+  89:    "node-info.impact.block.consume": "该方块的消耗节奏、持续运行时间与材料/电力开销",
+  90:    "node-info.impact.block.target": "该方块的索敌/作用半径、命中覆盖范围与目标判定",
+  91:    "node-info.impact.block.combat": "该方块造成或承受的战斗效果（伤害/治疗/子弹相关）",
+  92:    "node-info.impact.block.logic": "该方块是否执行对应逻辑（开火、旋转、消耗、目标切换等）",
+  93:    "node-info.impact.category.weapon": "使用该武器配置的单位/炮塔：射击节奏、弹道与实战 DPS",
+  94:    "node-info.impact.category.bullet": "引用该子弹模板的武器：命中表现、范围伤害与状态施加",
+  95:    "node-info.impact.category.shoot": "使用该开火模式的武器：每轮发数、延迟链和散布形状",
+  96:    "node-info.impact.category.consume": "该方块运行时的资源需求与“是否能继续工作”的判定",
+  97:    "node-info.impact.category.ability": "拥有该能力配置的单位：触发频率、范围和效果强度",
+  98:    "node-info.impact.category.draw": "该对象渲染出来的贴图层次、动画参数与可见表现",
+  99:    "node-info.note": "备注：{0}",
+ 100:    "node-info.wiki": "源码注释（英文）：{0}",
+ 101:        public float scl;
+ 102:                float m = filterItem.efficiencyMultiplier(this);
+ 103:                if(m > 0) efficiencyMultiplier = m;
+ 104:            if(instability > flashThreshold){
+ 105:                float m = filterLiquid.efficiencyMultiplier(this);
+ 106:            for(int i = 0; i < offloadSpeed; i++){
+ 107:                Fill.square(x, y, size * tilesize/2f - liquidPad);
+ 108:        Tmp.v1.set(length - size/2f, (width + size/2f)).rotate(rotation * 90).add(x, y);
+ 109:                LiquidBlock.drawTiledFrames(block.size, x, y, liquidPad, liquidPad, liquidPad, liquidPad, drawLiquid, liquids.get(drawLiquid) / liquidCapacity);
+ 110:                totalProgress += edelta();
+ 111:        public int link = -1;
+ 112:        public float heat, statusLerp;
+ 113:        public boolean didRegen = false;
+ 114:                    Drawf.construct(this, droneType.fullIcon, Pal.accent, 0f, droneProgress, droneWarmup, totalDroneProgress, 14f);
+ 115:        public int link = -1;
+ 116:    private void sortZBlockMaterial(DrawRequest[] arr, int from, int to, RadixScratch scratch){
+ 117:                case displayWidth, displayHeight -> displaySize;
+ 118:             new Bar(() -> Core.bundle.format("bar.drillspeed", Strings.fixed(e.lastDrillSpeed * 60 * e.timeScale(), 2)), () -> Pal.ammo, () -> e.warmup));
+ 119:             "T4工厂，T5工厂，每建造一个+40分，最多80分",
+ 120:    "node-info.item.radioactivity.effect": "调整该物品的放射性强度",
+ 121:    "node-info.item.radioactivity.impact": "放射性物品消耗器（ConsumeItemRadioactive）以及按放射性筛选的补丁逻辑",
+ 122:    "node-info.item.radioactivity.judge": "放射性消耗器是否接收该物品，以及其倍率强度",
+ 123:    "node-info.item.radioactivity.note": "不会直接改变 ItemTurret 子弹属性",
+ 124:    "node-info.item.flammability.effect": "调整该物品的可燃性强度",
+ 125:    "node-info.item.flammability.impact": "可燃物消耗器、库存物品引发的起火计算、单位/建筑被毁时与燃烧相关的爆炸效果",
+ 126:    "node-info.item.flammability.judge": "是否容易被可燃消耗逻辑接收，以及库存时的起火/爆炸副作用",
+ 127:    "node-info.item.flammability.note": "可燃性高于约 0.3 时，通常可被“可燃物”消耗器/过滤器识别",
+ 128:    "node-info.item.explosiveness.effect": "调整该物品的爆炸性强度",
+ 129:    "node-info.item.explosiveness.impact": "爆炸物消耗器、反应堆爆炸判定（ConsumeItemExplode）、以及载体/建筑被毁时的爆炸强度",
+ 130:    "node-info.item.explosiveness.judge": "爆炸风险与爆炸伤害波强度",
+ 131:    "node-info.item.charge.effect": "调整该物品的电性强度",
+ 132:    "node-info.item.charge.impact": "带电物品消耗器（ConsumeItemCharged）以及建筑/单位被毁时爆炸里的电力项",
+ 133:    "node-info.item.charge.judge": "带电消耗器是否接收，以及爆炸电力贡献强度",
+ 134:    "node-info.item.cost.effect": "调整该物品的基础材料成本",
+ 135:    "node-info.item.cost.impact": "参与该物品需求的方块默认建造时间、以及工厂里的单位建造时间计算",
+ 136:    "node-info.item.cost.judge": "使用该物品作为需求时的建造/生产耗时",
+ 137:    "node-info.item.healthScaling.effect": "调整该物品对方块默认生命倍率的附加值",
+ 138:    "node-info.item.healthScaling.impact": "构建需求包含该物品的方块默认最大生命值",
+ 139:    "node-info.item.healthScaling.judge": "需求列表里各物品 healthScaling 累加后的总生命倍率",
+ 140:    "node-info.item.selectionSize.effect": "调整物品选择 UI 中该物品按钮尺寸",
+ 141:        return sanitizeHint(text);
+ 142:        if(isWeakFieldHint(text)) return null;
+ 143:    "node-info.item.selectionSize.note": "仅 UI 变化；不直接影响战斗、炮塔弹药或生产数值",
+ 144:        public float liquidRemoved;
+ 145:            //increment launchCounter then launch when full and base conditions are met
+ 146:            if((launchCounter += edelta()) >= launchTime && items.total() >= itemCapacity){
+ 147:            if(!any || damage <= 0) return 0f;
+ 148:    "node-info.item.buildable.note": "不会直接改变炮塔弹药属性，主要影响仓储/规则逻辑",
+ 149:            && (!checkDouble || ((ItemBridgeBuild)other.build).link != tile.pos());
+ 150:            write.s(offset);
+ 151:                if(!waitingShooters.isEmpty() && (itemCapacity - items.total() >= minDistribute)){
+ 152:            liquidRemoved = 0f;
+ 153:                    didRegen = true;
+ 154:        public int blendbits, xscl = 1, yscl = 1, blending;
+ 155:                Draw.color(Tmp.c1.set(Pal.darkMetal).lerp(team.color, statusLerp), Pal.darkMetal, Mathf.absin(Time.time + l*50f, 10f, 1f));
+ 156:                Draw.color(glowColor, glowAlpha * power.status);
+ 157:            Building link = world.build(this.link);
+ 158:            if(any && !isPayload()){
+ 159:                launchCounter = 0f;
+ 160:            map = state.map.name(),
+ 161:            Draw.scl(xscl, yscl);
+ 162:            Draw.scl(scl);
+ 163:                    Lines.stroke(stroke);
+ 164:        if(tile != null && lastBuild != null && linkValid(tile, lastBuild.tile) && lastBuild.tile != tile && lastBuild.link == -1){
+ 165:        public float buildup, radscl, hit, warmup, phaseHeat;
+ 166:                lastX, lastY, strength * efficiency * laserWidth);
+ 167:            targetSize = grabWidth*2f;
+ 168:            write.f(productionEfficiency);
+ 169:        msg = pages[safePage - 1]
+ 170:                if(currentShooter() == null || (itemCapacity - items.total() < minDistribute)){
+ 171:            if(needsUpdate){
+ 172:    "node-info.selectionSize.effect": "调整选择控件里图标/按钮的显示尺寸",
+ 173:                page = (safePage - 1).coerceAtLeast(1)
+ 174:                 refresh()
+ 175:    "node-info.field-hint.mindustry.ai.BaseRegistry.BasePart.centerX": "BasePart.centerX（int）：决定局部坐标偏移；会直接改变绘制位置、发射点或判定点位。",
+ 176:    "node-info.field-hint.mindustry.ai.BaseRegistry.BasePart.centerY": "BasePart.centerY（int）：决定局部坐标偏移；会直接改变绘制位置、发射点或判定点位。",
+ 177:    "node-info.field-hint.mindustry.ai.BaseRegistry.BasePart.core": "BasePart.core（Block）：决定该方块引用的方块对象；会直接改变可连接目标或行为委托对象。",
+ 178:    "node-info.field-hint.mindustry.ai.BaseRegistry.BasePart.required": "BasePart.required（Content）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 179:    "node-info.field-hint.mindustry.ai.BaseRegistry.BasePart.schematic": "BasePart.schematic（Schematic）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 180:    "node-info.field-hint.mindustry.ai.BaseRegistry.BasePart.tier": "BasePart.tier（float）：决定等级阈值；常用于与硬度、科技层级或解锁条件进行比较。",
+ 181:    "node-info.field-hint.mindustry.ai.BaseRegistry.cores": "BaseRegistry.cores（Seq<BasePart>）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 182:    "node-info.field-hint.mindustry.ai.BaseRegistry.oreFloors": "BaseRegistry.oreFloors（ObjectMap<Item,Floor>）：决定该方块引用的物品对象；会直接改变输入、过滤、配方或弹药来源。",
+ 183:    "node-info.field-hint.mindustry.ai.BaseRegistry.ores": "BaseRegistry.ores（ObjectMap<Item,OreBlock>）：决定该方块引用的物品对象；会直接改变输入、过滤、配方或弹药来源。",
+ 184:    "node-info.field-hint.mindustry.ai.BaseRegistry.parts": "BaseRegistry.parts（Seq<BasePart>）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 185:    "node-info.field-hint.mindustry.ai.BaseRegistry.reqParts": "BaseRegistry.reqParts（ObjectMap<Content,Seq<BasePart>>）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 186:    "node-info.field-hint.mindustry.ai.ItemUnitStance.item": "ItemUnitStance.item（Item）：决定弹药/资源相关数量阈值；会影响每次装填、消耗或处理量。",
+ 187:    "node-info.field-hint.mindustry.ai.UnitCommand.icon": "UnitCommand.icon（String）：决定图标或贴图字符串标识；会直接影响该对象的显示资源绑定。",
+ 188:    "node-info.field-hint.mindustry.ai.PathfindQueue.size": "PathfindQueue.size（int）：决定尺寸或间距参数；会直接改变覆盖范围、判定盒或绘制占位大小。",
+ 189:    "node-info.field-hint.mindustry.ai.PathfindQueue.weights": "PathfindQueue.weights（float[]）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 190:    "node-info.field-hint.mindustry.ai.Pathfinder.Flowfield.completeWeights": "Flowfield.completeWeights（int[]）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 191:    "node-info.field-hint.mindustry.ai.Pathfinder.Flowfield.height": "Flowfield.height（int）：决定范围或贴图尺寸；会直接改变覆盖区域、判定框或渲染大小。",
+ 192:    "node-info.field-hint.mindustry.ai.Pathfinder.Flowfield.resolution": "Flowfield.resolution（int）：决定网格或采样分辨率；越高越精细但计算更重，越低则更粗略。",
+ 193:    "node-info.field-hint.mindustry.ai.Pathfinder.Flowfield.searches": "Flowfield.searches（short[]）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 194:    "node-info.field-hint.mindustry.ai.Pathfinder.Flowfield.weights": "Flowfield.weights（int[]）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 195:    "node-info.field-hint.mindustry.ai.Pathfinder.Flowfield.width": "Flowfield.width（int）：决定标识编号；会被用于查找、配对或路由到对应目标。",
+ 196:    "node-info.field-hint.mindustry.ai.Pathfinder.PositionTarget.position": "PositionTarget.position（Position）：决定坐标或边界参数；会直接改变位置计算、范围判定或路径端点。",
+ 197:    "node-info.field-hint.mindustry.ai.UnitCommand.controller": "UnitCommand.controller（Func<Unit,AIController>）：决定该方块引用的单位对象；会直接改变生产目标、跟随对象或受指令驱动的实体。",
+ 198:    "node-info.field-hint.mindustry.ai.UnitStance.icon": "UnitStance.icon（String）：决定图标或贴图字符串标识；会直接影响该对象的显示资源绑定。",
+ 199:    "node-info.field-hint.mindustry.ai.UnitCommand.exactArrival": "UnitCommand.exactArrival（boolean）：这是运行分支开关；为 false 时该分支会被跳过。",
+ 200:    "node-info.field-hint.m…720637 chars truncated…。",
+ 201:    "node-info.field-hint.mindustry.ai.UnitCommand.keybind": "UnitCommand.keybind（KeyBind）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 202:            link = -1;
+ 203:    "node-info.field-hint.mindustry.ai.UnitCommand.resetTarget": "UnitCommand.resetTarget（boolean）：这是攻击流程开关；关闭后即使有目标也不会进入开火或拦截判定。",
+ 204:    "node-info.field-hint.mindustry.ai.UnitCommand.snapToBuilding": "UnitCommand.snapToBuilding（boolean）：决定坐标或边界参数；会直接改变位置计算、范围判定或路径端点。",
+ 205:    "node-info.field-hint.mindustry.ai.UnitCommand.switchToMove": "UnitCommand.switchToMove（boolean）：决定坐标或边界参数；会直接改变位置计算、范围判定或路径端点。",
+ 206:            payRotation = Angles.moveToward(payRotation, rotdeg(), payloadRotateSpeed * delta());
+ 207:    "node-info.field-hint.mindustry.ai.UnitGroup.originalPositions": "UnitGroup.originalPositions（float[]）：决定坐标或边界参数；会直接改变位置计算、范围判定或路径端点。",
+ 208:    "node-info.field-hint.mindustry.ai.UnitGroup.positions": "UnitGroup.positions（float[]）：决定坐标或边界参数；会直接改变位置计算、范围判定或路径端点。",
+ 209:                LiquidBlock.drawTiledFrames(block.size, x, y, liquidPad, liquidPad, liquidPad, liquidPad, consumeLiquid, liquids.get(consumeLiquid) / liquidCapacity);
+ 210:    "node-info.field-hint.mindustry.ai.UnitGroup.valid": "UnitGroup.valid（boolean）：决定标识编号；会被用于查找、配对或路由到对应目标。",
+ 211:    "node-info.field-hint.mindustry.ai.UnitStance.icon": "UnitStance.icon（String）：决定图标或贴图字符串标识；会直接影响该对象的显示资源绑定。",
+ 212:                }else if(hasLink){ //switch to shooting if there's a valid link.
+ 213:    private final class MaterialSortTask extends RecursiveAction{
+ 214:    "node-info.field-hint.mindustry.ai.UnitStance.keybind": "UnitStance.keybind（KeyBind）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 215:    "node-info.field-hint.mindustry.ai.UnitStance.toggle": "UnitStance.toggle（boolean）：决定坐标或边界参数；会直接改变位置计算、范围判定或路径端点。",
+ 216:    "node-info.field-hint.mindustry.ai.types.AssemblerAI.targetAngle": "AssemblerAI.targetAngle（float）：决定旋转角度或旋转速度；会直接影响朝向、绘制和命中覆盖。",
+ 217:    "node-info.field-hint.mindustry.ai.types.AssemblerAI.targetPos": "AssemblerAI.targetPos（Vec2）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 218:    "node-info.field-hint.mindustry.ai.types.BuilderAI.alwaysFlee": "BuilderAI.alwaysFlee（boolean）：这是运行分支开关；为 false 时该分支会被跳过。",
+ 219:    "node-info.field-hint.mindustry.ai.types.BuilderAI.assistFollowing": "BuilderAI.assistFollowing（Unit）：决定波次相关阈值；会影响胜利条件、刷怪阶段或事件触发时机。",
+ 220:                launchCounter = read.f();
+ 221:            state = stateMove;
+ 222:    "node-info.field-hint.mindustry.ai.types.BuilderAI.following": "BuilderAI.following（Unit）：决定波次相关阈值；会影响胜利条件、刷怪阶段或事件触发时机。",
+ 223:    "node-info.field-hint.mindustry.ai.types.BuilderAI.lastPlan": "BuilderAI.lastPlan（BlockPlan）：记录上一次状态/时间戳；会影响增量计算、防抖判断或刷新触发时机。",
+ 224:    "node-info.field-hint.mindustry.ai.types.BuilderAI.onlyAssist": "BuilderAI.onlyAssist（boolean）：这是运行分支开关；为 false 时该分支会被跳过。",
+ 225:            if(outputRouter && bits[0] == 0 && !blends(tile, rotation, 0) && blends(tile, rotation, 2)) state = stateUnload; // a 0 that faces into none with a conveyor behind it
+ 226:    "node-info.field-hint.mindustry.ai.types.CargoAI.itemTarget": "CargoAI.itemTarget（Item）：决定弹药/资源相关数量阈值；会影响每次装填、消耗或处理量。",
+ 227:                    Tmp.v2.set(length - size/2f, -(shieldRadius + size/2f)).rotate(rot).add(this);
+ 228:                unloadTimer = Math.min(unloadTimer, speed);
+ 229:            if(blockCount == 1 || span < parallelMaterialSortMinSpan){
+ 230:                RadixScratch scratch = workerScratch.get();
+ 231:            smoothLiquid = Mathf.lerpDelta(smoothLiquid, liquids.currentAmount() / liquidCapacity, 0.05f);
+ 232:    "node-info.field-hint.mindustry.ai.types.CommandAI.commandQueue": "CommandAI.commandQueue（Seq<Position>）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 233:    "node-info.field-hint.mindustry.ai.types.CommandAI.group": "CommandAI.group（UnitGroup）：决定分组编号；会影响编组切换、选择集映射与快捷键行为。",
+ 234:    "node-info.field-hint.mindustry.ai.types.CommandAI.groupIndex": "CommandAI.groupIndex（int）：决定分组编号；会影响编组切换、选择集映射与快捷键行为。",
+ 235:    "node-info.field-hint.mindustry.ai.types.CommandAI.readAttackTarget": "CommandAI.readAttackTarget（int）：决定 AI 权重/周期类参数；会直接影响寻路、队列调度或目标选择节奏。",
+ 236:    "node-info.field-hint.mindustry.ai.types.CommandAI.stances": "CommandAI.stances（Bits）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 237:    "node-info.field-hint.mindustry.ai.types.CommandAI.targetPos": "CommandAI.targetPos（Vec2）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 238:    "node-info.field-hint.mindustry.ai.types.CommandAI.unreachableBuildings": "CommandAI.unreachableBuildings（IntSeq）：决定构建版本号或构建计数；会影响兼容读取和版本分支判断。",
+ 239:    "node-info.field-hint.mindustry.ai.types.FlyingFollowAI.following": "FlyingFollowAI.following（Teamc）：决定波次相关阈值；会影响胜利条件、刷怪阶段或事件触发时机。",
+ 240:            new MaterialSortTask(arr, mid, toBlock)
+ 241:    "node-info.field-hint.mindustry.ai.types.LogicAI.boost": "LogicAI.boost（boolean）：决定演出强度或淡入淡出参数；会影响视觉/音效表现节奏。",
+ 242:            yscl = bits[2];
+ 243:        public int dominantItems;
+ 244:    "node-info.field-hint.mindustry.ai.types.LogicAI.controller": "LogicAI.controller（Building）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 245:    "node-info.field-hint.mindustry.ai.types.LogicAI.execCache": "LogicAI.execCache（ObjectMap<Object,Object>）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 246:            totalProgress += warmup * Time.delta;
+ 247:    "node-info.field-hint.mindustry.ai.types.LogicAI.moveRad": "LogicAI.moveRad（float）：决定图形或特效几何参数（半径、长度、偏移、线宽等），主要影响可视表现。",
+ 248:            if(len * itemSpace < 0.9f){
+ 249:            if(state != lastState){
+ 250: [Enabled] DeterMination/hiddenMessage
+ 251:            lastDrillSpeed = (facingAmount * multiplier * timeScale) / drillTime;
+ 252:                Building target = world.build(link);
+ 253: [Enabled] DeterMination/voteMiner
+ 254:            req.material = encodeMaterial(texture, blending);
+ 255:    "node-info.field-hint.mindustry.ai.types.MinerAI.ore": "MinerAI.ore（Tile）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 256:    "node-info.field-hint.mindustry.ai.types.MinerAI.targetItem": "MinerAI.targetItem（Item）：决定弹药/资源相关数量阈值；会影响每次装填、消耗或处理量。",
+ 257:            if(ignoreLiquidFullness){
+ 258:    "node-info.field-hint.mindustry.async.AsyncCore.processes": "AsyncCore.processes（Seq<AsyncProcess>）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 259:            if(len == 0 && Mathf.equal(timeScale, 1f)){
+ 260:                if(loaded){
+ 261:            req.material = encodeMaterial(texture, blending);
+ 262:            return state != stateLoad;
+ 263:    "node-info.field-hint.mindustry.async.PhysicsProcess.PhysicsWorld.PhysicsBody.collided": "PhysicsBody.collided（boolean）：决定标识编号；会被用于查找、配对或路由到对应目标。",
+ 264:            if(!pushUnits || !enabled || (lastInterp == 0f)) return;
+ 265:    "node-info.field-hint.mindustry.async.PhysicsProcess.PhysicsWorld.PhysicsBody.local": "PhysicsBody.local（boolean）：这是运行分支开关；为 false 时该分支会被跳过。",
+ 266: [2026-03-01 | 23:18:30 | ��Ϣ] [ScriptAgent] ֹͣ�ű� wayzer/cmds/voteKick: �����ű�wayzer/vote�ر�: disableAll
+ 267: [2026-03-01 | 23:18:30 | ��Ϣ] [ScriptAgent] ֹͣ�ű� DeterMination/voteMiner: �����ű�wayzer/vote�ر�: disableAll
+ 268:            for(int i = len - 1; i >= 0; i--){
+ 269:                float nextpos = (i == len - 1 ? 100f : ys[i + 1]) - itemSpace;
+ 270:    "node-info.field-hint.mindustry.content.TechTree.TechNode.name": "TechNode.name（String）：决定名称或描述文本键；会直接影响界面显示给玩家的文字。",
+ 271:    "node-info.field-hint.mindustry.audio.SoundControl.bossMusic": "SoundControl.bossMusic（Seq<Music>）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 272:    "node-info.field-hint.mindustry.audio.SoundControl.darkMusic": "SoundControl.darkMusic（Seq<Music>）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 273:            //indicates empty state
+ 274:            if(link == -1) return;
+ 275:                if(ys[i] > 0.5 && i > 0) mid = i - 1;
+ 276:    public class TurretBuild extends ReloadTurretBuild implements ControlBlock{
+ 277:            dominantItems = returnCount;
+ 278:    "node-info.field-hint.mindustry.content.TechTree.TechNode.children": "TechNode.children（Seq<TechNode>）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 279:    "node-info.field-hint.mindustry.content.TechTree.TechNode.content": "TechNode.content（UnlockableContent）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 280:        requirePermission("determination.vote.unanonymous")
+ 281:                 .coerceIn(1, maxRollbackMinutes.coerceAtLeast(1))
+ 282:        public int totalAmmo;
+ 283:    "node-info.field-hint.mindustry.content.TechTree.TechNode.name": "TechNode.name（String）：决定名称或描述文本…36 chars truncated…info.field-hint.mindustry.core.Control.input": "Control.input（InputHandler）：决定输入、输出或消耗路径是否启用；会直接影响该方块能否继续工作。",
+ 284:    "node-info.field-hint.mindustry.content.TechTree.TechNode.objectives": "TechNode.objectives（Seq<Objective>）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 285:    "node-info.field-hint.mindustry.content.TechTree.TechNode.parent": "TechNode.parent（TechNode）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 286:        public int totalShots, barrelCounter;
+ 287:    private static boolean isRequired(EditorNode node){
+ 288:    "node-info.field-hint.mindustry.content.TechTree.TechNode.requiresUnlock": "TechNode.requiresUnlock（boolean）：这是运行分支开关；为 false 时该分支会被跳过。",
+ 289:    "node-info.field-hint.mindustry.content.TechTree.TechNode.researchCostMultipliers": "TechNode.researchCostMultipliers (ObjectFloatMap<Item>): Defines scaling coefficient and proportionally amplifies or reduces related block effects.",
+ 290:    "node-info.field-hint.mindustry.core.Control.indicators": "Control.indicators（AttackIndicators）：决定坐标或边界参数；会直接改变位置计算、范围判定或路径端点。",
+ 291:            if(minitem < itemSpace + (blendbits == 1 ? 0.3f : 0f)){
+ 292:    "node-info.field-hint.mindustry.core.Control.saves": "Control.saves（Saves）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 293:                                float cx = Angles.trnsx(turretRotation, length), cy = Angles.trnsy(turretRotation, length);
+ 294:    "node-info.field-hint.mindustry.core.GameState.afterGameOver": "GameState.afterGameOver（boolean）：这是运行分支开关；为 false 时该分支会被跳过。",
+ 295:                liquidRemoved += toRemove;
+ 296:                 voteDesc = voteTitle("回滚捣乱", target, minutes),
+ 297:    "node-info.field-hint.mindustry.core.GameState.gameOver": "GameState.gameOver（boolean）：这是运行分支开关；为 false 时该分支会被跳过。",
+ 298:    private void addChildButton(Table table, EditorNode node){
+ 299:    "node-info.field-hint.mindustry.core.GameState.mapLocales": "GameState.mapLocales（MapLocales）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 300:    "node-info.field-hint.mindustry.core.GameState.markers": "GameState.markers（MapMarkers）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 301:        sound.sliderPref("musicvol", 100, 0, 100, 1, i -> i + "%");
+ 302:        sound.sliderPref("sfxvol", 100, 0, 100, 1, i -> i + "%");
+ 303:        sound.sliderPref("ambientvol", 100, 0, 100, 1, i -> i + "%");
+ 304:                        e.link = tile.pos();
+ 305:        game.sliderPref("saveinterval", 60, 10, 5 * 120, 10, i -> Core.bundle.format("setting.seconds", i));
+ 306:                        link = -1;
+ 307:     }
+ 308:    "node-info.field-hint.mindustry.core.GameState.updateId": "GameState.updateId（long）：决定标识编号；会被用于查找、配对或路由到对应目标。",
+ 309:     VoteEvent.VoteCommands += CommandInfo(this, "kickGriefers", "投票踢出并回滚某玩家".with()) {
+ 310:                lastDrillSpeed = 0f;
+ 311:    "node-info.field-hint.mindustry.core.GameState.won": "GameState.won（boolean）：这是运行分支开关；为 false 时该分支会被跳过。",
+ 312:    static class DisplayCmdStruct{
+ 313:                Pixmap pix = makePixmap(data, new Pixmap(canvasSize, canvasSize));
+ 314:    "node-info.field-hint.mindustry.core.Renderer.customBackgrounds": "Renderer.customBackgrounds（ObjectMap<String,Runnable>）：决定坐标或边界参数；会直接改变位置计算、范围判定或路径端点。",
+ 315:    "node-info.field-hint.mindustry.core.NetServer.clientCommands": "NetServer.clientCommands（CommandHandler）：决定该字段引用的对象；替换后相关逻辑会指向新的目标实例。",
+ 316:        public boolean wasOccupied = false;
+ 317:    "node-info.field-hint.mindustry.core.NetServer.invalidHandler": "NetServer.invalidHandler（InvalidCommandHandler）：决定标识编号；会被用于查找、配对或路由到对应目标。",
+ 318:        public float droneProgress, totalDroneProgress;
+ 319:    public void renderUpdate(UpdateRenderState tile){
+ 320:    "node-info.field-hint.mindustry.core.Renderer.animateShields": "Renderer.animateShields（boolean）：决定护盾数值或缩放系数；会直接影响护盾强度与生存能力。",
+ 321:    "node-info.field-hint.mindustry.core.Renderer.animateWater": "Renderer.animateWater（boolean）：这是运行分支开关；为 false 时该分支会被跳过。",
+ 322:             )
+ 323:                                payLength = 0f;
+ 324:                                loaded = false;
+ 325:             val online = target.player
+ 326:    "node-info.field-hint.mindustry.core.Renderer.camerascale": "Renderer.camerascale (float): Defines scaling coefficient and proportionally amplifies or reduces related block effects.",
+ 327:    "node-info.field-hint.mindustry.core.Renderer.customBackgrounds": "Renderer.customBackgrounds（ObjectMap<String,Runnable>）：决定坐标或边界参数；会直接改变位置计算、范围判定或路径端点。",
+ 328:             banImpl.ban(target, kickBanMinutes.coerceAtLeast(1), "kickGriefers: $reason", starter)
+ 329:    "node-info.field-hint.mindustry.core.Renderer.drawLight": "Renderer.drawLight（boolean）：决定该元素是否参与绘制；只影响可见表现，不改变战斗数值。",
+ 330:    "node-info.field-hint.mindustry.core.Renderer.drawStatus": "Renderer.drawStatus（boolean）：决定状态值或状态插值参数；会影响状态条变化速度与持续强度。",
+ 331:    "node-info.field-hint.mindustry.core.Renderer.drawWeather": "Renderer.drawWeather（boolean）：决定该元素是否参与绘制；只影响可见表现，不改变战斗数值。",
+ 332:            link = tile.pos();
+ 333:                 quite = true
+ 334:            return Math.min((int)(minitem / itemSpace), amount);
+ 335:                        float fin = (Time.time / sparkLife + rand.random(sparkRecurrence + 1f)) % sparkRecurrence;
+ 336:                            return pix.height - 1 - (int)((ey) / (height / canvasSize));
+ 337:     )
+ 338:            return other instanceof MassDriverBuild entity && other.isValid() && other.efficiency > 0 && entity.block == block && entity.link == pos() && within(other, range);
+ 339:            amount = Math.min(amount, capacity - len);
+ 340:     """
+ 341:                        if(fin <= 1f) Lines.lineAngle(lx + px + or * ddx, ly + py + or * ddy, Angles.angle(px, py), Mathf.slope(fin) * sparkSize);
+ 342:            if(link == -1) return false;
+ 343:            return world.build(this.link) instanceof MassDriverBuild other && other.block == block && other.team == team && within(other, range);
+ 344:            write.f(radscl);
+ 345:    "node-info.field-hint.mindustry.core.Renderer.pixelate": "Renderer.pixelate（boolean）：这是运行分支开关；为 false 时该分支会被跳过。",
+ 346:    "node-info.field-hint.mindustry.core.Renderer.pixelator": "Renderer.pixelator（Pixelator）：决定坐标或边界参数；会直接改变位置计算、范围判定或路径端点。",
+ 347:         [yellow]匹配记录: [white]{matched}[] / 执行: [white]{processed}[]
+ 348:         [green]成功: {success}[] [red]失败: {failed}[]${truncateTip}
+ 349:            return Point2.unpack(link).sub(tile.x, tile.y);
+ 350:        if(tile == link || link == null || !link.block.hasPower || !link.block.connectedPower || tile.team != link.team || (sameBlockConnection && tile.block != link.block)) return false;
+ 351:         "shortId" to target.shortId,
+ 352:    "node-info.field-hint.mindustry.core.Renderer.targetscale": "Renderer.targetscale (float): Defines scaling coefficient and proportionally amplifies or reduces related block effects.",
+ 353:    "node-info.field-hint.mindustry.core.Renderer.weatherAlpha": "Renderer.weatherAlpha（float）：决定透明度倍率；主要影响显示强弱与可见度。",
+ 354:      - `-Dmdtx.render.materialSort.autoMin=<N>`（默认 `4096`）
+ 355:            write.i(link);
+ 356:         "failed" to result.failed
+ 357:     )
+ 358:            return (((direction == 0) && minitem >= itemSpace) || ((direction % 2 == 1) && minitem > 0.7f)) && !(source.block.rotate && next == source);
+ 359:                    Lightning.create(team, lightningColor, lightningDamage, x + Angles.trnsx(a, lightningOffset), y + Angles.trnsy(a, lightningOffset), a, Mathf.random(lightningLengthMin, lightningLengthMax));
+ 360:            game.sliderPref("playerlimit", 16, 2, 32, i -> {
+ 361:     val player = action.player ?: return@registerActionFilter true
+ 362:    public void moveTo(Position target, float circleLength){
+ 363:        moveTo(target, circleLength, 100f);
+ 364:         if (until <= now) {
+ 365:                Drawf.spinSprite(rotatorRegion, x, y, timeDrilled * rotateSpeed);
+ 366:    public void moveTo(Position target, float circleLength, float smooth){
+ 367:        moveTo(target, circleLength, smooth, unit.isFlying(), null);
+ 368:             if (now - lastTip > 1000L) {
+ 369:            Tile other = world.tile(link);
+ 370:    public void moveTo(Position target, float circleLength, float smooth, boolean keepDistance, @Nullable Vec2 offset){
+ 371:        moveTo(target, circleLength, smooth, keepDistance, offset, false);
+ 372:    "node-info.field-hint.mindustry.core.UI.hudGroup": "UI.hudGroup（WidgetGroup）：决定分组编号；会影响编组切换、选择集映射与快捷键行为。",
+ 373:         }
+ 374:    public void moveTo(Position target, float circleLength, float smooth, boolean keepDistance, @Nullable Vec2 offset, boolean arrive){
+ 375: 
+ 376:     if (rollbackInProgress) return@registerActionFilter true
+ 377:     if (action.type != Administration.ActionType.configure) return@registerActionFilter true
+ 378:        graphics.sliderPref("uiscale", 100, 25, 300, 5, s -> {
+ 379:                add(mid);
+ 380:                xs[mid] = x;
+ 381:    "node-info.field-hint.mindustry.core.UI.menuGroup": "UI.menuGroup（WidgetGroup）：决定分组编号；会影响编组切换、选择集映射与快捷键行为。",
+ 382:                ids[mid] = item;
+ 383:     val key = player.uuid() to tile.array()
+ 384:        graphics.sliderPref("screenshake", 4, 0, 8, i -> (i / 4f) + "x");
+ 385:            Tmp.v2.trns(rotation, -Math.max(curSize/2f - grabHeight - length, 0f), 0f);
+ 386:        graphics.sliderPref("bloomintensity", 6, 0, 16, i -> (int)(i/4f * 100f) + "%");
+ 387:        graphics.sliderPref("bloomblur", 2, 1, 16, i -> i + "x");
+ 388:    "node-info.field-hint.mindustry.ctype.Content.ModContentInfo.error": "ModContentInfo.error（String）：决定字符串配置内容；运行时会按该字符串匹配目标、标签或规则。",
+ 389:        graphics.sliderPref("fpscap", 240, 10, 245, 5, s -> {
+ 390:                addNodeInfoIcon(table, child, hasModifier);
+ 391:     VoteEvent.VoteCommands += CommandInfo(this, "rollGriefers", "投票回滚某玩家最近建筑操作".with()) {
+ 392:                case ammo -> totalAmmo;
+ 393:         usage = "<ShortID> [分钟]"
+ 394:    "node-info.field-hint.mindustry.ctype.MappableContent.name": "MappableContent.name（String）：决定名称或描述文本键；会直接影响界面显示给玩家的文字。",
+ 395:                case shootX -> World.conv(targetPos.x);
+ 396:                case shootY -> World.conv(targetPos.y);
+ 397:    "node-info.field-hint.mindustry.ctype.UnlockableContent.credit": "UnlockableContent.credit（String）：决定字符串配置内容；运行时会按该字符串匹配目标、标签或规则。",
+ 398:    "node-info.field-hint.mindustry.ctype.UnlockableContent.databaseCategory": "UnlockableContent.databaseCategory（String）：决定压缩数据或状态编码值；会影响解码后的行为分支与参数读取。",
+ 399:                                float xspace = (getWidth() / canvasSize);
+ 400:    "node-info.field-hint.mindustry.ctype.UnlockableContent.databaseTag": "UnlockableContent.databaseTag（String）：决定压缩数据或状态编码值；会影响解码后的行为分支与参数读取。",
+ 401:        graphics.sliderPref("chatopacity", 100, 0, 100, 5, s -> s + "%");
+ 402:        graphics.sliderPref("lasersopacity", 100, 0, 100, 5, s -> {
+ 403:    private static String boolPurpose(String name, String normalized){
+ 404:    "node-info.field-hint.mindustry.ctype.UnlockableContent.fullOverride": "UnlockableContent.fullOverride（String）：决定标识编号；会被用于查找、配对或路由到对应目标。",
+ 405:     anonNameByUuid.clear()
+ 406:                x + dx * (tilesize / 2f + a * arrowSpacing + arrowOffset),
+ 407:    "node-info.field-hint.mindustry.ctype.MappableContent.name": "MappableContent.name（String）：决定名称或描述文本键；会直接影响界面显示给玩家的文字。",
+ 408:    "node-info.field-hint.mindustry.ctype.UnlockableContent.allDatabaseTabs": "UnlockableContent.allDatabaseTabs（boolean）：决定压缩数据或状态编码值；会影响解码后的行为分支与参数读取。",
+ 409:        graphics.sliderPref("unitlaseropacity", 100, 0, 100, 5, s -> s + "%");
+ 410:        graphics.sliderPref("bridgeopacity", 100, 0, 100, 5, s -> s + "%");
+ 411:    "node-info.field-hint.mindustry.ctype.UnlockableContent.databaseCategory": "UnlockableContent.databaseCategory（String）：决定压缩数据或状态编码值；会影响解码后的行为分支与参数读取。",
+ 412:        graphics.sliderPref("maxmagnificationmultiplierpercent", 100, 100, 200, 25, s -> {
+ 413:    "node-info.field-hint.mindustry.ctype.UnlockableContent.databaseTag": "UnlockableContent.databaseTag（String）：决定压缩数据或状态编码值；会影响解码后的行为分支与参数读取。",
+ 414:         updateNameCompat(it)
+ 415:     }
+ 416:    "node-info.field-hint.mindustry.editor.EditorTool.altModes": "EditorTool.altModes（String[]）：决定字符串配置内容；运行时会按该字符串匹配目标、标签或规则。",
+ 417:    "node-info.field-hint.mindustry.ctype.UnlockableContent.fullOverride": "UnlockableContent.fullOverride（String）：决定标识编号；会被用于查找、配对或路由到对应目标。",
+ 418:         "vote" -> "[yellow]投票通过，已解除匿名(全员)".with()
+ 419:        graphics.sliderPref("minmagnificationmultiplierpercent", 100, 100, 300, 25, s -> {
+ 420:    "node-info.field-hint.mindustry.ctype.UnlockableContent.hideDetails": "UnlockableContent.hideDetails（boolean）：决定标识编号；会被用于查找、配对或路由到对应目标。",
+ 421:         "disable" -> "[yellow]VeilID 已停用，已解除匿名".with()
+ 422:    "node-info.field-hint.mindustry.ctype.UnlockableContent.localizedName": "UnlockableContent.localizedName（String）：决定名称或描述文本键；会直接影响界面显示给玩家的文字。",
+ 423:     }
+ 424:    public static class UpdateRenderState{
+ 425:     operator?.sendMessage("[green]已解除匿名".with())
+ 426: }
+ 427:        public float data;
+ 428:            if(info.ips.contains(ip, false)){
+ 429:    "node-info.field-hint.mindustry.editor.MapEditor.tags": "MapEditor.tags（StringMap）：决定字符串配置内容；运行时会按该字符串匹配目标、标签或规则。",
+ 430:     revealed = false
+ 431: 
+ 432:        protected boolean checkAccept(Building source, Tile link){
+ 433:     clearAllShortIdOverrideCompat()
+ 434:     anonNameByUuid.clear()
+ 435:    "node-info.field-hint.mindustry.editor.MapEditor.drawBlock": "MapEditor.drawBlock（Block）：决定该元素是否参与绘制；只影响可见表现，不改变战斗数值。",
+ 436:    "node-info.field-hint.mindustry.editor.MapEditor.drawTeam": "MapEditor.drawTeam（Team）：决定该元素是否参与绘制；只影响可见表现，不改变战斗数值。",
+ 437:     shuffledNames = loadNames()
+ 438:                if(len == 0) return 0;
+ 439:            table.image(Icon.infoCircle).height(32f).tooltip("@node.mayRequired");
+ 440:    "node-info.field-hint.mindustry.editor.MapEditor.showFloor": "MapEditor.showFloor（boolean）：决定该元素是否参与绘制；只影响可见表现，不改变战斗数值。",
+ 441:    "node-info.field-hint.mindustry.editor.MapEditor.showTerrain": "MapEditor.showTerrain（boolean）：决定该元素是否参与绘制；只影响可见表现，不改变战斗数值。",
+ 442:         updateTeamRecord(it)
+ 443:            table.image(Icon.infoCircle).height(32f).tooltip("@node.multiArray.warn", true);
+ 444:     }
+ 445: 
+ 446:        addNodeInfoIcon(table, child, hasModifier);
+ 447:    "node-info.field-hint.mindustry.editor.MapObjectivesCanvas.ObjectiveTilemap.ObjectiveTile.Mover.lastY": "Mover.lastY（float）：记录上一次状态/时间戳；会影响增量计算、防抖判断或刷新触发时机。",
+ 448:            if (!veilEnabled) returnReply("[red]VeilID 未启用".with())
+ 449:    private void addNodeInfoIcon(Table table, EditorNode child, boolean hasModifier){
+ 450:        String hint = NodeInfoHint.build(child, hasModifier);
+ 451:            if(link == other.pos()){
+ 452:     operator?.sendMessage("[green]已重新启用匿名".with())
+ 453: }
+ 454: 
+ 455: listen<EventType.WorldLoadEvent> {
+ 456:            return source instanceof ItemBridgeBuild && linkValid(source.tile, tile) && ((ItemBridgeBuild)source).link == pos();
+ 457:         roundActive = false
+ 458:            droneWarmup = Mathf.lerpDelta(droneWarmup, units.size < dronesCreated ? powerStatus : 0f, 0.1f);
+ 459:            totalDroneProgress += droneWarmup * delta();
+ 460:         return@listen
+ 461:    "node-info.field-hint.mindustry.editor.WaveGraph.groups": "WaveGraph.groups（Seq<SpawnGroup>）：决定分组编号；会影响编组切换、选择集映射与快捷键行为。",
+ 462:     beginRound()
+ 463: 
+ 464:     Groups.player.forEach { applyAnon(it) }
+ 465:            for(int i = Math.max(o + 1, len); i > o; i--){
+ 466:    "node-info.field-hint.mindustry.entities.Effect.EffectContainer.data": "EffectContainer.data（Object）：决定压缩数据或状态编码值；会影响解码后的行为分支与参数读取。",
+ 467:    "node-info.field-hint.mindustry.entities.Effect.EffectContainer.id": "EffectContainer.id（int）：决定标识编号；会被用于查找、配对或路由到对应目标。",
+ 468:            return link != -1 && world.build(this.link) instanceof PayloadDriverBuild other && other.block == block && other.team == team && within(other, range);
+ 469:            if (!veilEnabled) returnReply("[red]VeilID 未启用".with())
+ 470: 
+ 471:            len++;
+ 472:     // 双保险：某些换图路径下WorldLoad阶段玩家列表为空，Play后重试一次
+ 473:     if (!veilEnabled || !isPvpMode() || !roundActive || revealed) return@listen
+ 474:            return Point2.unpack(link).sub(tile.x, tile.y);
+ 475:            for(int i = o; i < len - 1; i++){
+ 476: 
+ 477: listen<EventType.PlayerJoin> {
+ 478:    forceClearTile(tile)
+ 479:            write.f(liquidRemoved);
+ 480:     applyAnon(it.player)
+ 481:            len--;
+ 482: 
+ 483: listen<EventType.PlayerLeave> {
+ 484:     if (!isPvpMode()) return@listen
+ 485:            write.i(link);
+ 486:    "node-info.field-hint.mindustry.entities.abilities.ArmorPlateAbility.plateSuffix": "ArmorPlateAbility.plateSuffix（String）：决定局部坐标偏移；会直接改变绘制位置、发射点或判定点位。",
+ 487:            return linkValid(tile, world.tile(link)) && enabled;
+ 488: listen(EventType.Trigger.update) {
+ 489:    "node-info.field-hint.mindustry.entities.abilities.ArmorPlateAbility.shineSuffix": "ArmorPlateAbility.shineSuffix（String）：决定局部坐标偏移；会直接改变绘制位置、发射点或判定点位。",
+ 490:         if (roundActive && !revealed) revealAll("worldLoad")
+ 491:            write.bool(loaded);
+ 492:    "node-info.field-hint.mindustry.entities.abilities.Ability.data": "Ability.data（float）：决定压缩数据或状态编码值；会影响解码后的行为分支与参数读取。",
+ 493:     teamColorRefreshTicks += Time.delta
+ 494:     if (teamColorRefreshTicks < 15f) return@listen
+ 495:    "node-info.field-hint.mindustry.entities.abilities.ArmorPlateAbility.drawPlate": "ArmorPlateAbility.drawPlate（boolean）：决定该元素是否参与绘制；只影响可见表现，不改变战斗数值。",
+ 496:    "node-info.field-hint.mindustry.entities.abilities.ArmorPlateAbility.drawShine": "ArmorPlateAbility.drawShine（boolean）：决定该元素是否参与绘制；只影响可见表现，不改变战斗数值。",
+ 497:            float eff = (units.count(u -> ((AssemblerAI)u.controller()).inPosition()) / (float)dronesCreated);
+ 498:            link = read.i();
+ 499:            sameTypeWarmup = Mathf.lerpDelta(sameTypeWarmup, wasOccupied && !visualOccupied ? 0f : 1f, 0.1f);
+ 500:     if (!veilEnabled || !isPvpMode()) return@listen
+ 501: }
+ 502: 
+ 503: function formatDailyReportList(items) {
+ 504:   if (items.length === 0) {
+ 505:     return '当前没有启用群日报的群。';
+ 506:   }
+ 507:   return items.map((item) => formatDailyReportStatus(item)).join('\n\n');
+ 508: }
+ 509: 
+ 510: function formatDisguiseStatus(status) {
+ 511:   return [
+ 512:     `群号: ${status.groupId}`,
+ 513:     `启用: ${status.enabled ? '是' : '否'}`,
+ 514:     `历史整理: ${status.bootstrapStatus}`,
+ 515:     `已整理消息数: ${status.bootstrapFetched}`,
+ 516:     `长期摘要数: ${status.summaries}`,
+ 517:     `待压缩缓冲: ${status.summaryBuffered}`,
+ 518:     `最近原文消息: ${status.recentMessages}`,
+ 519:     `动态跟聊: ${status.dynamicActive ? `开启 (${status.dynamicPhase}, 还需等待 ${status.waitRemaining} 条)` : '关闭'}`,
+ 520:     `最近原因: ${status.lastReason || '(无)'}`
+ 521:   ].join('\n');
+ 522: }
+ 523: 
+ 524: function formatDisguiseList(statuses) {
+ 525:   if (statuses.length === 0) {
+ 526:     return '当前没有启用伪装模式的群。';
+ 527:   }
+ 528:   return statuses.map((item) => formatDisguiseStatus(item)).join('\n\n');
+ 529: }
+ 530: 
+ 531: function getPendingInvites(systemMessages) {
+ 532:   return (Array.isArray(systemMessages?.invited_requests) ? systemMessages.invited_requests : [])
+ 533:     .filter((item) => !item?.checked)
+ 534:     .sort((left, right) => Number(right.request_id ?? 0) - Number(left.request_id ?? 0));
+ 535: }
+ 536: 
+ 537: function normalizeWebUiHost(host) {
+ 538:   const normalized = String(host ?? '').trim();
+ 539:   if (!normalized || normalized === '::' || normalized === '0.0.0.0' || normalized === '::1') {
+ 540:     return '127.0.0.1';
+ 541:   }
+ 542:   return normalized;
+ 543: }
+ 544: 
+ 545: async function readNapCatWebUiInfo(napcatConfig) {
+ 546:   const configPath = napcatConfig?.webUiConfigPath;
+ 547:   if (!configPath || !(await pathExists(configPath))) {
+ 548:     return null;
+ 549:   }
+ 550: 
+ 551:   const payload = JSON.parse(await fs.readFile(configPath, 'utf8'));
+ 552:   if (payload?.disableWebUI) {
+ 553:     return {
+ 554:       disabled: true,
+ 555:       configPath
+ 556:     };
+ 557:   }
+ 558: 
+ 559:   const host = normalizeWebUiHost(payload?.host);
+ 560:   const port = Number(payload?.port ?? 6099) || 6099;
+ 561:   const token = String(payload?.token ?? '').trim();
+ 562:   const baseUrl = `http://${host}:${port}/webui/`;
+ 563: 
+ 564:   return {
+ 565:     disabled: false,
+ 566:     configPath,
+ 567:     host,
+ 568:     port,
+ 569:     token,
+ 570:     baseUrl,
+ 571:     loginUrl: token ? `${baseUrl}web_login?token=${encodeURIComponent(token)}` : baseUrl
+ 572:   };
+ 573: }
+ 574: 
+ 575: async function notifyOwnerWebUiLink(napcatClient, config, logger) {
+ 576:   if (!config.bot.ownerUserId) {
+ 577:     return;
+ 578:   }
+ 579: 
+ 580:   try {
+ 581:     const webUiInfo = await readNapCatWebUiInfo(config.napcat);
+ 582:     const lines = ['Cain 已启动。'];
+ 583: 
+ 584:     if (!webUiInfo) {
+ 585:       lines.push('未读取到 NapCat WebUI 配置。');
+ 586:     } else if (webUiInfo.disabled) {
+ 587:       lines.push('NapCat WebUI 当前已禁用。');
+ 588:     } else {
+ 589:       lines.push(`NapCat WebUI: ${webUiInfo.baseUrl}`);
+ 590:       lines.push(`NapCat WebUI 直达登录: ${webUiInfo.loginUrl}`);
+ 591:     }
+ 592: 
+ 593:     const message = lines.join('\n');
+ 594:     logger.info(message);
+ 595:     await napcatClient.sendPrivateMessage(config.bot.ownerUserId, message);
+ 596:   } catch (error) {
+ 597:     logger.warn(`发送 NapCat WebUI 启动通知失败：${error.message}`);
+ 598:   }
+ 599: }
+ 600: 
+ 601: 
+ 602: function extractInviteLinks(text) {
+ 603:   const urls = String(text ?? '').match(/https?:\/\/[^\s]+/gi) ?? [];
+ 604:   return urls.filter((value) => {
+ 605:     try {
+ 606:       const url = new URL(value);
+ 607:       return /(^|\.)qq\.com$/i.test(url.hostname) && /(?:qun|group|invite|qm)/i.test(`${url.hostname}${url.pathname}${url.search}`);
+ 608:     } catch {
+ 609:       return false;
+ 610:     }
+ 611: [2026-03-01 | 23:25:35 | ��Ϣ] [javalin] (Re)Starting Javalin server...
+ 612:    private static boolean isWeakFieldHint(String text){
+ 613:         if (!veilEnabled) returnReply("[red]VeilID 未启用".with())
+ 614:    public static class PlayerInfo{
+ 615:         if (!revealed) returnReply("[yellow]当前已处于匿名状态".with())
+ 616:        public String lastName = "<unknown>", lastIP = "<unknown>";
+ 617:        public Seq<String> ips = new Seq<>();
+ 618: }
+ 619: 
+ 620: command("realname", "后台指令: 查询真名/真shortid") {
+ 621:            sortRequestsThreaded();
+ 622:     requirePermission("determination.admin.unanonymous")
+ 623:     body {
+ 624:         if (player != null) returnReply("[red]仅后台可用".with())
+ 625:         if (arg.isEmpty()) returnReply("[red]参数错误: /realname <名字/shortid>".with())
+ 626: 
+ 627:    protected void sortRequestsThreaded(){
+ 628:         if (query.isEmpty()) returnReply("[red]参数错误: /realname <名字/shortid>".with())
+ 629:        if(numRequests < 2048){
+ 630:         val byShort = PlayerData.findByShortId(query)?.player?.uuid()
+ 631:         val matched = Groups.player.toList().filter { p ->
+ 632:             val uuid = p.uuid()
+ 633:             val anonName = anonNameByUuid[uuid]
+ 634:            float fulls = areaSize * tilesize/2f;
+ 635:             val display = Strings.stripColors(p.name)
+ 636:        if(numRequests < threadedSortMinRequests){
+ 637:             val realShort = shortIdFromUuid(uuid)
+ 638: 
+ 639:             uuid.equals(query, ignoreCase = true) ||
+ 640:                 display.equals(query, ignoreCase = true) ||
+ 641:                 realName.equals(query, ignoreCase = true) ||
+ 642:                 (anonName?.equals(query, ignoreCase = true) == true) ||
+ 643:                 realShort.equals(query, ignoreCase = true) ||
+ 644:                 (anonShort?.equals(query, ignoreCase = true) == true) ||
+ 645:                 (byShort != null && byShort == uuid)
+ 646:         }
+ 647: 
+ 648:         if (matched.isEmpty()) returnReply("[yellow]未找到目标: {q}".with("q" to query))
+ 649: 
+ 650:         val lines = matched.map { p ->
+ 651:             val uuid = p.uuid()
+ 652:             val anonName = anonNameByUuid[uuid] ?: "-"
+ 653:    "node-info.field-hint.mindustry.entities.abilities.SuppressionFieldAbility.orbSinScl": "SuppressionFieldAbility.orbSinScl (float): Defines scaling coefficient and proportionally amplifies or reduces related block effects.",
+ 654:             val anonShort = anonShortIdByUuid[uuid] ?: "-"
+ 655:             val realShort = shortIdFromUuid(uuid)
+ 656:    public static class SettingsTable extends Table{
+ 657:             "[white]{name}[] [gray](uuid={uuid})[] -> 真名:[accent]{realName}[] 真shortid:[accent]{realShort}[] 当前shortid:[yellow]{nowShort}[] 匿名名:[light_gray]{anonName}[] 匿名shortid:[light_gray]{anonShort}[]".with(
+ 658:        public int timesJoined, timesKicked;
+ 659:        public String[] ips, names;
+ 660:                 "realName" to realName,
+ 661:        public TraceInfo(String ip, String uuid, String locale, boolean modded, boolean mobile, int timesJoined, int timesKicked, String[] ips, String[] names){
+ 662:    "node-info.field-hint.mindustry.entities.bullet.BasicBulletType.backSprite": "BasicBulletType.backSprite（String）：决定图标或贴图字符串标识；会直接影响该对象的显示资源绑定。",
+ 663:            totalAmmo -= ammoPerShot;
+ 664:            totalAmmo = Math.max(totalAmmo, 0);
+ 665:             ).toString()
+ 666:         }
+ 667:            this.timesJoined = timesJoined;
+ 668:    private static String fmt(String key, Object... args){
+ 669:             "[green]查询结果({count})\n{list|joinLines}".with(
+ 670:            this.ips = ips;
+ 671:                 "list" to lines
+ 672:        public SliderSetting sliderPref(String name, int def, int min, int max, StringProcessor s){
+ 673:            return sliderPref(name, def, min, max, 1, s);
+ 674:     }
+ 675: }
+ 676:        public SliderSetting sliderPref(String name, int def, int min, int max, int step, StringProcessor s){
+ 677: command("veilhistory", "管理指令: 查看匿名历史对局") {
+ 678:     aliases = listOf("vh", "匿名历史", "匿历")
+ 679:     requirePermission("determination.admin.veilhistory")
+ 680:     body {
+ 681:         val rounds = readHistoryRoundsSafe()
+ 682:             ?: returnReply(
+ 683:                 "[red]读取匿名历史失败，请重载脚本后重试: [gold]sa load DeterMination/anonymous/veilId --noCache[]".with()
+ 684:             )
+ 685:         if (rounds.isEmpty()) returnReply("[yellow]暂无历史对局记录".with())
+ 686:         val page = arg.firstOrNull()?.toIntOrNull() ?: 1
+ 687:         val textView = renderRoundListPage(rounds, page, 8)
+ 688:         val viewer = player ?: returnReply(
+ 689:             textView.with()
+ 690:         )
+ 691: 
+ 692:         val menuError = runCatching {
+ 693:             MenuV2(viewer) {
+ 694:                 title = "匿名历史对局"
+ 695:                 renderPaged(rounds, initialPage = page, prePage = 1, key = "veilHistory") { round ->
+ 696:        public void textPref(String name, String def){
+ 697:                     option("第${round.id}局 / ${round.players.size}人") { refresh() }
+ 698:                 }
+ 699:                 option("关闭") { close() }
+ 700:             }.send().awaitWithTimeout()
+ 701:         }.exceptionOrNull()
+ 702:        public void textPref(String name, String def, Cons<String> changed){
+ 703:             logger.warning("VeilID: veilhistory menu failed: ${menuError.javaClass.simpleName}: ${menuError.message}")
+ 704:             returnReply(
+ 705:                 "[yellow]菜单打开失败，已切换文本模式\n{text}".with("text" to textView)
+ 706:             )
+ 707:         }
+ 708:     }
+ 709: }
+ 710: 
+ 711: PermissionApi.registerDefault("determination.admin.unanonymous", group = "@admin")
+ 712: PermissionApi.registerDefault("determination.admin.anonymous", group = "@admin")
+ 713: PermissionApi.registerDefault("determination.admin.veilhistory", group = "@admin")
+ 714: PermissionApi.registerDefault("determination.vote.unanonymous", group = "@admin")
+ 715: PermissionApi.registerDefault("determination.vote.anonymous")
+ 716:    "node-info.field-hint.mindustry.entities.bullet.BulletType.despawnUnitCount": "BulletType.despawnUnitCount（int）：决定计数统计值；会直接影响统计展示、条件判定或阶段推进。",
+ 717: onDisable {
+ 718:     // 退出脚本时，确保不残留匿名状态
+ 719:     if (veilEnabled) {
+ 720:         revealed = false
+ 721:         roundActive = true
+ 722:         revealAll("disable")
+ 723:     } else {
+ 724:         clearAllNameOverrideCompat()
+ 725:        private static final int processors = Runtime.getRuntime().availableProcessors() * 8;
+ 726:         Groups.player.forEach { updateNameCompat(it) }
+ 727:     }
+ 728:     // 清理可能遗留的单人覆盖(保险)
+ 729:     Groups.player.forEach {
+ 730:         clearNameOverrideCompat(it.uuid())
+ 731: function estimateContentChars(content) {
+ 732:   if (typeof content === 'string') {
+ 733:     return content.length;
+ 734:   }
+ 735:   if (content == null) {
+ 736:     return 0;
+ 737:   }
+ 738:   try {
+ 739:     return JSON.stringify(content).length;
+ 740:   } catch {
+ 741:     return String(content).length;
+ 742:   }
+ 743: }
+ 744: 
+ 745: function estimateMessageChars(messages) {
+ 746:   return messages.reduce((total, item) => {
+ 747:     const role = String(item?.role ?? '');
+ 748:     return total + role.length + estimateContentChars(item?.content);
+ 749:   }, 0);
+ 750: }
+ 751: 
+ 752: function estimateContextChars(systemPrompt, messages) {
+ 753:   return String(systemPrompt ?? '').length + estimateMessageChars(messages);
+ 754: }
+ 755: 
+ 756: function buildSessionLabel(context) {
+ 757:   if (context.messageType === 'group') {
+ 758:     return `群 ${context.groupId} 用户 ${context.userId}`;
+ 759:   }
+ 760:   return `私聊用户 ${context.userId}`;
+ 761: }
+ 762: 
+ 763: function getDateKeyInShanghai() {
+ 764:   return new Intl.DateTimeFormat('en-CA', {
+ 765:     timeZone: 'Asia/Shanghai',
+ 766:     year: 'numeric',
+ 767:     month: '2-digit',
+ 768:     day: '2-digit'
+ 769:   }).format(new Date());
+ 770: }
+ 771: 
+ 772: export class ChatSessionManager {
+ 773:   constructor(config, chatClient, stateStore, logger, codexTools = null) {
+ 774:     this.config = config;
+ 775:     this.chatClient = chatClient;
+ 776:     this.stateStore = stateStore;
+ 777:     this.logger = logger;
+ 778:     this.codexTools = codexTools;
+ 779:     this.pendingBySession = new Map();
+ 780:   }
+ 781: 
+ 782:   buildSessionKey(context, mode = 'chat') {
+ 783:     if (context.messageType === 'group') {
+ 784:       return `${mode}:group:${context.groupId}:user:${context.userId}`;
+ 785:     }
+ 786:     return `${mode}:private:${context.userId}`;
+ 787:   }
+ 788: 
+ 789:   async clearContext(context) {
+ 790:     const normalSessionKey = this.buildSessionKey(context, 'chat');
+ 791:     const fullSessionKey = this.buildSessionKey(context, 'chat_full');
+ 792:     let cleared = 0;
+ 793: 
+ 794:     if (this.stateStore.getChatSession(normalSessionKey)?.messages?.length || this.stateStore.getChatSession(normalSessionKey)?.updatedAt) {
+ 795:       this.stateStore.clearChatSession(normalSessionKey);
+ 796:       cleared += 1;
+ 797:     } else {
+ 798:       this.stateStore.clearChatSession(normalSessionKey);
+ 799:     }
+ 800: 
+ 801:     if (this.stateStore.getChatSession(fullSessionKey)?.messages?.length || this.stateStore.getChatSession(fullSessionKey)?.remainingResponses != null) {
+ 802:       this.stateStore.clearChatSession(fullSessionKey);
+ 803:       cleared += 1;
+ 804:     } else {
+ 805:       this.stateStore.clearChatSession(fullSessionKey);
+ 806:     }
+ 807: 
+ 808:     await this.stateStore.save();
+ 809:     return {
+ 810:       cleared
+ 811:     };
+ 812:   }
+ 813: 
+ 814:   async chat(context, text) {
+ 815:     return await this.#chatInternal(context, text, { mode: 'normal' });
+ 816:   }
+ 817: 
+ 818:   async chatFull(context, text) {
+ 819:     return await this.#chatInternal(context, text, { mode: 'full' });
+ 820:   }
+ 821: 
+ 822:   async #chatInternal(context, text, options = {}) {
+ 823:     const mode = options.mode === 'full' ? 'full' : 'normal';
+ 824:     const sessionKey = this.buildSessionKey(context, mode === 'full' ? 'chat_full' : 'chat');
+ 825: 
+ 826:     return await this.#runExclusive(sessionKey, async () => {
+ 827:       const session = this.stateStore.getChatSession(sessionKey);
+ 828:       const normalizedInput = this.#normalizeInput(text);
+ 829:       const userText = normalizedInput.historyText;
+ 830:       const systemPrompt = await this.#buildSystemPrompt(mode);
+ 831:       const notices = [];
+ 832: 
+ 833:       const expiredNotice = this.#resetExpiredSessionIfNeeded(context, session, mode);
+ 834:       if (expiredNotice) {
+ 835:         notices.push(expiredNotice);
+ 836:       }
+ 837: 
+ 838:       if (!normalizedInput.historyText) {
+ 839:         throw new Error('聊天内容不能为空');
+ 840:       }
+ 841:     throw new Error(`未找到配置文件：${configPath}\n请先复制 ${examplePath} 为 config.json 后再填写。`);
+ 842:   }
+ 843: }
+ 844: 
+ 845: async function main() {
+ 846:   const configPath = process.env.CAINBOT_CONFIG
+ 847:     ? path.resolve(process.env.CAINBOT_CONFIG)
+ 848:     : path.join(projectRoot, 'config.json');
+ 849: 
+ 850:   await ensureConfigExists(configPath);
+ 851:   const logger = new Logger(config.bot.logLevel);
+ 852:   const stateStore = new StateStore(config.bot.stateFile, logger);
+ 853:   await stateStore.load();
+ 854: 
+ 855:   const runtimeConfigStore = new RuntimeConfigStore(
+ 856:     config.bot.runtimeConfigFile,
+ 857:     configDir,
+ 858:     { defaultNotifyMessageTemplate: config.releaseMonitor.defaultNotifyMessageTemplate },
+ 859:     logger
+ 860:   );
+ 861:   await runtimeConfigStore.load();
+ 862: 
+ 863:   const napcatClient = new NapCatClient({
+ 864:     ...config.napcat,
+ 865:     forwardNickname: config.bot.displayName
+ 866:   }, logger);
+ 867:   const chatClient = new OpenAiChatClient(config.chat, logger);
+ 868:   const dailyReportClient = new OpenAiChatClient(config.dailyReport, logger);
+ 869:   const msavMapAnalyzer = new MsavMapAnalyzer({
+ 870:     projectRoot,
+ 871:     cacheDir: path.join(projectRoot, 'data', 'msav-parser'),
+ 872:     napcatClient,
+ 873:     chatClient,
+ 874:     logger,
+ 875:     model: 'gpt-5.4'
+ 876:   });
+ 877:   const codexReadonlyTools = new CodexReadonlyTools(config.chat, logger, {
+ 878:     promptImageRoot: config.chat.promptImageRoot,
+ 879:     sendPromptImage: async ({ context, imagePath }) => {
+ 880:       await napcatClient.sendContextImage(context, imagePath);
+ 881:     },
+ 882:     readRecentMessages: async ({ context, currentMessageId, currentMessageSeq, count }) => {
+ 883:       const historyCount = Math.min(Math.max(Number(count ?? 20) + 20, 20), 100);
+ 884:       const fetchHistory = async (messageSeq, reverseOrder) => {
+ 885:         const options = {
+ 886:           messageSeq,
+ 887:           count: historyCount,
+ 888:           reverseOrder,
+ 889:           disableGetUrl: true,
+ 890:           parseMultMsg: false,
+ 891:       const historyCount = Math.min(Math.max(Number(count ?? 20) + 20, 20), 100);
+ 892:       const fetchHistory = async (messageSeq, reverseOrder) => {
+ 893:         const options = {
+ 894:           messageSeq,
+ 895:           count: historyCount,
+ 896:           reverseOrder,
+ 897:           disableGetUrl: true,
+ 898:           parseMultMsg: false,
+ 899:           quickReply: false
+ 900:         };
+ 901:         const result = context.messageType === 'group'
+ 902:           ? await napcatClient.getGroupMessageHistory(context.groupId, options)
+ 903:           : await napcatClient.getFriendMessageHistory(context.userId, options);
+ 904:         return Array.isArray(result?.messages) ? result.messages : [];
+ 905:       };
+ 906: 
+ 907:       const anchors = [];
+ 908:       if (currentMessageSeq) {
+ 909:         anchors.push(String(currentMessageSeq));
+ 910:       }
+ 911:       if (currentMessageId && String(currentMessageId) !== String(currentMessageSeq)) {
+ 912:         anchors.push(String(currentMessageId));
+ 913:       }
+ 914: 
+ 915:       for (const anchor of anchors) {
+ 916:         try {
+ 917:           const messages = await fetchHistory(anchor, true);
+ 918:           if (messages.length > 1) {
+ 919:             return messages;
+ 920:           }
+ 921:         } catch {
+ 922:         }
+ 923: 
+ 924:         try {
+ 925:           const messages = await fetchHistory(anchor, false);
+ 926:           if (messages.length > 1) {
+ 927:             return messages;
+ 928:           }
+ 929:         } catch {
+ 930:         }
+ 931:       }
+ 932: 
+ 933:       try {
+ 934:         const messages = await fetchHistory('0', true);
+ 935:         if (messages.length > 0) {
+ 936:           return messages;
+ 937:         }
+ 938:       } catch {
+ 939:       }
+ 940: 
+ 941:       try {
+ 942:         return await fetchHistory('0', false);
+ 943:       } catch {
+ 944:         return [];
+ 945:       }
+ 946:     },
+ 947:     readGroupMessages: async ({ context, currentMessageId, currentMessageSeq, currentTime, count }) => {
+ 948:       return await fetchGroupMessagesBeforeCurrent(napcatClient, context, {
+ 949:         currentMessageId,
+ 950:         currentMessageSeq,
+ 951:         currentTime,
+ 952:         count
+ 953:       });
+ 954:     }
+ 955:   });
+ 956:   const disguiseCodexReadonlyTools = new CodexReadonlyTools({
+ 957:     ...config.chat,
+ 958:     promptImageRoot: ''
+ 959:   }, logger);
+ 960:   const disguiseReadonlyTools = new DisguiseReadonlyTools(config.chat.disguise, logger, {
+ 961:     napcatClient,
+ 962:     codexTools: disguiseCodexReadonlyTools
+ 963:   });
+ 964:   const chatSessionManager = new ChatSessionManager(config.chat, chatClient, stateStore, logger, codexReadonlyTools);
+ 965:   const translator = new OpenAiTranslator(config.translation, logger);
+ 966:   const releaseManager = new ReleaseMonitorManager(config.releaseMonitor, napcatClient, stateStore, logger);
+ 967:   const fileBindingManager = new FileBindingManager([], napcatClient, stateStore, logger);
+ 968:   const disguiseManager = new GroupDisguiseManager(
+ 969:     config.chat.disguise,
+ 970:     chatClient,
+ 971:     napcatClient,
+ 972:     runtimeConfigStore,
+ 973:     stateStore,
+ 974:     logger,
+ 975:     disguiseReadonlyTools
+ 976:   );
+ 977:   const dailyReportManager = new DailyReportManager(
+ 978:     config.dailyReport,
+ 979:     dailyReportClient,
+ 980:     napcatClient,
+ 981:     runtimeConfigStore,
+ 982:     stateStore,
+ 983:     logger
+ 984:   );
+ 985: 
+ 986:   function getTrackedMsavSections(event) {
+ 987:     const replyId = extractReplyId(event?.message, event?.raw_message);
+ 988:     if (!replyId) {
+ 989:       return [];
+ 990:     }
+ 991:     const tracked = msavMapAnalyzer.getReplyContext(replyId);
+ 992:     if (!tracked?.metadataText) {
+ 993:       return [];
+ 994:     }
+ 995:     return [`以下是本地 .msav 地图解析信息：\n${tracked.metadataText}`];
+ 996:   }
+ 997: 
+ 998:   async function buildChatInputWithTrackedMsav(event, command) {
+ 999:     const baseInput = await buildChatInput(napcatClient, event, command);
+1000:     return appendExtraSectionsToChatInput(baseInput, getTrackedMsavSections(event));
+1001:   }
+1002: 
+1003:   async function reloadManagedConfig() {
+1004:     await releaseManager.reload(runtimeConfigStore.getMergedReleaseRepositories(config.releaseMonitor.repositories));
+1005:     await fileBindingManager.replaceBindings(runtimeConfigStore.getMergedFileBindings(config.fileBindings));
+1006:     await disguiseManager.reload();
+1007:     await dailyReportManager.reload();
+1008:   }
+1009: 
+1010:   logger.info('Cain Bot 启动中。');
+1011:   await reloadManagedConfig();
+1012:   await notifyOwnerWebUiLink(napcatClient, config, logger);
+1013: 
+1014:   await napcatClient.startEventLoop(async (event) => {
+1015:     if (!event) {
+1016:       return;
+1017:     }
+1018: 
+1019:     if (event.post_type === 'request' && event.request_type === 'group' && event.sub_type === 'invite') {
+1020:       if (String(event.user_id ?? '') === config.bot.ownerUserId && event.flag != null) {
+1021:         try {
+1022:           await napcatClient.setGroupAddRequest(event.flag, true, '');
+1023:           await napcatClient.sendPrivateMessage(
+1024:             config.bot.ownerUserId,
+1025:             [
+1026:               '已自动同意你发起的加群邀请。',
+1027:               `群号: ${event.group_id ?? '-'}`,
+1028:               `请求标记: ${event.flag}`
+1029:             ].join('\n')
+1030:           );
+1031:         } catch (error) {
+1032:           logger.error('自动同意主人加群邀请失败：', error.message);
+1033:         }
+1034:       }
+1035:       return;
+1036:     }
+1037: 
+1038:     if (event.post_type !== 'message') {
+1039: 
+1040:     try {
+1041:       if (await handleOwnerInviteLinkMessage(napcatClient, context, event, config)) {
+1042:         return;
+1043:       }
+1044:     } catch (error) {
+1045:       logger.error('处理群邀请链接失败：', error.message);
+1046:       await sendLongReply(napcatClient, context, event.message_id, `处理邀请链接失败：${error.message}`);
+1047:       return;
+1048:     }
+1049: 
+1050:     const text = plainTextFromMessage(event.message, event.raw_message);
+1051:     const command = parseIncomingCommand(text, config.bot);
+1052:     if (!command) {
+1053:       if (chatClient.enabled) {
+1054:         try {
+1055:           const msavResult = await msavMapAnalyzer.maybeAnalyzeIncomingMsav(context, event);
+1056:           if (msavResult?.handled) {
+1057:             return;
+1058:           }
+1059:         } catch (error) {
+1060:           logger.warn(`处理 .msav 地图解析失败：${error.message}`);
+1061:         }
+1062: 
+1063:         try {
+1064:           const trackedMsavSections = getTrackedMsavSections(event);
+1065:           if (trackedMsavSections.length > 0) {
+1066:             const chatInput = appendExtraSectionsToChatInput(
+1067:               await buildChatInput(napcatClient, event, {
+1068:                 argument: text,
+1069:                 rawArgs: text
+1070:               }),
+1071:               trackedMsavSections
+1072:             );
+1073:             if (isNonEmptyString(chatInput.historyText)) {
+1074:               const chatResult = await chatSessionManager.chat(context, chatInput);
+1075:             ))
+1076:         }
+1077: 
+1078:         val real = realName(uuid)
+1079:         recoverRequests[uuid] = RecoverRequest(
+1080:             uuid = uuid,
+1081:             requestAt = System.currentTimeMillis(),
+1082:             requestName = real,
+1083:             creditSnapshot = credit,
+1084:             breachSnapshot = playerBreach(uuid)
+1085:         )
+1086:         saveRecoverRequests()
+1087: 
+1088:         reply("[green]已提交恢复申请，等待管理审核。当前信用: {credit}".with("credit" to formatMvp(credit)))
+1089:     }
+1090: }
+1091: 
+1092: command("doRecover", "管理/后台: 查看并处理信用恢复申请") {
+1093:     aliases = listOf("dr", "恢复列表")
+1094:     usage = "[approve/reject <ShortID/UUID> [Num]]"
+1095:     body {
+1096:         val sender = player
+1097:         if (sender != null && !sender.hasPermission(permissionDoRecover)) {
+1098:             returnReply("[red]你没有权限使用该命令".with())
+1099:         }
+1100:    "node-info.field-hint.mindustry.entities.part.FlarePart.innerScl": "FlarePart.innerScl (float): Defines scaling coefficient and proportionally amplifies or reduces related block effects.",
+1101:         val operatorName = sender?.let { normalizedName(it.name) } ?: "Console"
+1102:         val actionResult = handleRecoverActionArgs(arg, operatorName)
+1103:         if (actionResult != null) {
+1104:             reply(actionResult.with())
+1105:             return@body
+1106:         }
+1107: 
+1108:         if (sender == null) {
+1109:             reply(recoverListText().with())
+1110:             return@body
+1111:         }
+1112:    @RegisterStatement("ucontrol")
+1113:         openRecoverMenu(sender, arg.firstOrNull()?.toIntOrNull() ?: 1)
+1114:     }
+1115: }
+1116: onEnable {
+1117:     loadHistoryFromFile()
+1118:     loadCreditFromFile()
+1119:     loadRecoverRequests()
+1120:     resetRoundState()
+1121:     registerDoubtVoteCommand()
+1122: }
+1123: 
+1124: onDisable {
+1125:     unregisterDoubtVoteCommand()
+1126:     saveHistoryToFile()
+1127:     saveCreditToFile()
+1128:     saveRecoverRequests()
+1129: }
+1130: 
+1131: listen<EventType.WorldLoadEvent> {
+1132:     resetRoundState()
+1133:     if (!balancerEnabled) return@listen
+1134:     launch {
+1135:         delay(roundRebalanceDelaySeconds.coerceAtLeast(0) * 1000L)
+1136:         runRoundRebalance()
+1137:     }
+1138: }
+1139: 
+1140: listen<EventType.ResetEvent> {
+1141:     resetRoundState()
+1142: }
+1143: 
+1144: listen<EventType.PlayerJoin> {
+1145:     ensureRoundStat(it.player)
+1146: }
+1147: 
+1148: listen<EventType.PlayerLeave> {
+1149:     ensureRoundStat(it.player)
+1150: }
+1151: 
+1152: listen<EventType.BlockBuildEndEvent> {
+1153:     if (!balancerEnabled || it.breaking) return@listen
+1154:     val player = it.unit?.player ?: return@listen
+1155:     if (player.team() == teams.spectateTeam) return@listen
+1156: 
+1157:     val block = it.tile.block()
+1158:     val rule = classifyBuildRule(block) ?: return@listen
+1159:     val stat = ensureRoundStat(player)
+1160:     applyBuildRule(stat, rule)
+1161: }
+1162: 
+1163: listen(EventType.Trigger.update) {
+1164:     if (!balancerEnabled || state.gameOver) return@listen
+1165:     val threshold2 = activeVelocityThreshold * activeVelocityThreshold
+1166:     Groups.player.forEach { player ->
+1167:         if (player.team() == teams.spectateTeam) return@forEach
+1168:         val unit = player.unit() ?: return@forEach
+1169:    @RegisterStatement("uradar")
+1170:         val velocity2 = unit.vel.len2()
+1171:         if (velocity2 > threshold2) {
+1172:             stat.activeTicks += Time.delta
+1173:         }
+1174:     }
+1175: }
+1176: 
+1177: listen<EventType.GameOverEvent> {
+1178:     if (!balancerEnabled || gameOverHandled) return@listen
+1179:     gameOverHandled = true
+1180:     val winner = settleRoundMvp()
+1181:     broadcastMvpResult(winner)
+1182: }
+1183: 
+1184: listenTo<BetterTeam.AssignTeamEvent>(Event.Priority.After) {
+1185:     if (!balancerEnabled || !state.rules.pvp) return@listenTo
+1186:     if (team == teams.spectateTeam) return@listenTo
+1187: 
+1188:     val allTeams = availablePvpTeams()
+1189:     if (allTeams.isEmpty()) return@listenTo
+1190: 
+1191:    "node-info.field-hint.mindustry.entities.part.RegionPart.xScl": "RegionPart.xScl (float): Defines scaling coefficient and proportionally amplifies or reduces related block effects.",
+1192:         if (old != teams.spectateTeam && old in allTeams) {
+1193:    "node-info.field-hint.mindustry.entities.part.RegionPart.yScl": "RegionPart.yScl (float): Defines scaling coefficient and proportionally amplifies or reduces related block effects.",
+1194:             return@listenTo
+1195:         }
+1196:     }
+1197: 
+1198:     val playerCount = group.count { it.team() != teams.spectateTeam && it.uuid() != player.uuid() } + 1
+1199:     val teamList = teamPoolFor(playerCount, allTeams)
+1200:     if (teamList.isEmpty()) return@listenTo
+1201:     val enforceMinTwo = shouldEnforceMinTwo(playerCount, allTeams.size)
+1202: 
+1203:     val balance = buildTeamBalance(teamList, group, excludeUuid = player.uuid())
+1204:     val target = pickTeamForAssign(balance, enforceMinTwo) ?: return@listenTo
+1205:     team = target
+1206: }
+1207: 
+1208: PermissionApi.registerDefault(permissionAddMvp, group = "@admin")
+1209: PermissionApi.registerDefault(permissionDoRecover, group = "@admin")
+1210: PermissionApi.registerDefault("wayzer.vote.doubt")
+1211:         f"setblock block @shock-mine px py {team_token} 0",
+1212:         "op add px tx 1",
+1213:         "op add py ty -4",
+1214:         f"setblock block @shock-mine px py {team_token} 0",
+1215:         "op add px tx 2",
+1216:         "op add py ty -4",
+1217:         f"setblock block @shock-mine px py {team_token} 0",
+1218:         "op add px tx 3",
+1219:         "op add py ty -4",
+1220:         f"setblock block @shock-mine px py {team_token} 0",
+1221:         "op add px tx 0",
+1222:         "op add py ty -5",
+1223:    "node-info.field-hint.mindustry.entities.pattern.ShootHelix.scl": "ShootHelix.scl (float): Defines scaling coefficient and proportionally amplifies or reduces related block effects.",
+1224:         "set armed false",
+1225:         "write armed cell1 1",
+1226:         "draw:",
+1227:         "jump state_unarmed equal armed false",
+1228:         "set stateText \"已购买\"",
+1229:         "jump state_done always x false",
+1230:    "node-info.field-hint.mindustry.entities.pattern.ShootSine.scl": "ShootSine.scl (float): Defines scaling coefficient and proportionally amplifies or reduces related block effects.",
+1231:         "set stateText \"未购买\"",
+1232:         "state_done:",
+1233:        "print \"[gray]脉冲地雷[]\n价格：\"",
+1234:         "print cost",
+1235:        "print \"中级币\n状态：\"",
+1236:         "print stateText",
+1237:        "print \"\n点击左侧圆点购买，控制上方电弧瞄准后松手确认\"",
+1238:        "printflush message1",
+1239:         "jump loop always x false",
+1240:     ])
+1241:    val afkIdleTicks = afkIdleSeconds.coerceAtLeast(1f) * 60f
+1242: 
+1243: def new_module_tiles(center_x, center_y, team):
+1244:     return [
+1245:         tile_op(center_x - 1, center_y, "world-switch", team),
+1246:            restoreAfkName(player, afkState)
+1247:         tile_op(center_x + 1, center_y, "world-switch", team),
+1248:         tile_op(center_x - 1, center_y + 1, "world-message", team),
+1249:         tile_op(center_x + 1, center_y + 1, "world-cell", team),
+1250:     ]
+1251: 
+1252: 
+1253: def basic_module_links(center_x, center_y):
+1254:     return [
+1255:         {"name": "switch1", "x": center_x - 1, "y": center_y},
+1256:         {"name": "switch2", "x": center_x + 1, "y": center_y},
+1257:         {"name": "message1", "x": center_x - 1, "y": center_y + 1},
+1258:         {"name": "cell1", "x": center_x + 1, "y": center_y + 1},
+1259:     ]
+1260:    "node-info.field-hint.mindustry.entities.units.WeaponMount.barrelCounter": "WeaponMount.barrelCounter（int）：决定计数统计值；会直接影响统计展示、条件判定或阶段推进。",
+1261: 
+1262: def pulse_arc_xy(center_x, center_y):
+1263:     return center_x, center_y - 4
+1264: 
+1265: 
+1266: def module_extra_tiles(center_x, center_y, team_name):
+1267:     lookup_coord = (center_x, center_y) if team_name == "sharded" else (mx(center_x), center_y)
+1268:     kind = YELLOW_MODULES[lookup_coord]
+1269:            liquidCapacity = 60f;
+1270:         arc_x, arc_y = pulse_arc_xy(center_x, center_y)
+1271:            restoreAfkName(player, afkState)
+1272:     return []
+1273: 
+1274: 
+1275:                markAfk(player, afkState)
+1276:     (112, 153): "pulse-mine",
+1277:     (124, 149): "repair-top",
+1278:    "node-info.field-hint.mindustry.entities.units.WeaponMount.totalShots": "WeaponMount.totalShots（int）：决定计数统计值；会直接影响统计展示、条件判定或阶段推进。",
+1279:     (136, 149): "turret-3x3",
+1280:     (136, 153): "ammo-3x3",
+1281:            ThreatMap map = buildThreatMap(cluster.moveUnit, cluster.units, true, cluster.moveFlying, cluster.threatsAir, cluster.threatsGround, passClearance, threatClearance);
+1282:     (148, 153): "ammo-4x4",
+1283: }
+1284: YELLOW_NAMES = {
+1285:    "node-info.field-hint.mindustry.game.CampaignRules.randomWaveAI": "CampaignRules.randomWaveAI（boolean）：决定波次相关阈值；会影响胜利条件、刷怪阶段或事件触发时机。",
+1286:     (124, 149): "上路修复塔购买-黄",
+1287:     (124, 153): "下路修复塔购买-黄",
+1288:     (136, 149): "3x3炮塔选型-黄",
+1289:     (136, 153): "3x3炮塔弹药-黄",
+1290:     (148, 149): "4x4炮塔选型-黄",
+1291:     (148, 153): "4x4炮塔弹药-黄",
+1292: }
+1293: TURRET_3X3 = [("@wave", "波浪"), ("@cyclone", "气旋"), ("@sublimate", "升华"), ("@lancer", "兰瑟")]
+1294: TURRET_4X4 = [("@foreshadow", "预兆"), ("@spectre", "幽灵"), ("@meltdown", "熔毁"), ("@titan", "泰坦")]
+1295: 
+1296:    if (isAfk(player.uuid())) return@listenTo
+1297: def module_logic(center_x, center_y, team_name, team_token, selector_cells, coin_cell):
+1298:    val allTeams = availablePvpTeams()
+1299:     kind = YELLOW_MODULES[lookup_coord]
+1300:     if kind == "pulse-mine":
+1301:         arc_x, arc_y = pulse_arc_xy(center_x, center_y)
+1302:    @RegisterStatement("getblock")
+1303:     if kind == "repair-top":
+1304:         target = (110, 190) if team_name == "sharded" else (239, 190)
+1305:    "node-info.field-hint.mindustry.game.EventType.BuildDamageEvent.build": "BuildDamageEvent.build（Building）：决定构建版本号或构建计数；会影响兼容读取和版本分支判断。",
+1306:     if kind == "repair-bottom":
+1307:    "node-info.field-hint.mindustry.game.EventType.BuildRotateEvent.build": "BuildRotateEvent.build（Building）：决定构建版本号或构建计数；会影响兼容读取和版本分支判断。",
+1308:         return repair_source("下路修复塔", target, team_token), basic_module_links(center_x, center_y) + [{"name": "cell2", "x": coin_cell[0], "y": coin_cell[1]}]
+1309:     if kind == "turret-3x3":
+1310:         target_a = (82, 182) if team_name == "sharded" else (267, 182)
+1311:    "node-info.field-hint.mindustry.game.EventType.BuildSelectEvent.builder": "BuildSelectEvent.builder（Unit）：决定构建版本号或构建计数；会影响兼容读取和版本分支判断。",
+1312:         return selector_source("3x3炮塔", TURRET_3X3, target_a, target_b, team_token), basic_module_links(center_x, center_y)
+1313:     if kind == "turret-4x4":
+1314:    "node-info.field-hint.mindustry.game.EventType.BuildTeamChangeEvent.build": "BuildTeamChangeEvent.build（Building）：决定构建版本号或构建计数；会影响兼容读取和版本分支判断。",
+1315:         target_b = (92, 226) if team_name == "sharded" else (257, 226)
+1316:    "node-info.field-hint.mindustry.game.EventType.BuildingBulletDestroyEvent.build": "BuildingBulletDestroyEvent.build（Building）：决定构建版本号或构建计数；会影响兼容读取和版本分支判断。",
+1317:    val balance = buildTeamBalance(teamList, group, excludeUuid = player.uuid())
+1318:    "node-info.field-hint.mindustry.game.EventType.BuildingCommandEvent.building": "BuildingCommandEvent.building（Building）：决定构建版本号或构建计数；会影响兼容读取和版本分支判断。",
+1319:        val wasAfk = afkState.afk
+1320:         links = basic_module_links(center_x, center_y) + [{"name": "cell2", "x": selector_cells["3x3"][0], "y": selector_cells["3x3"][1]}, {"name": "cell3", "x": coin_cell[0], "y": coin_cell[1]}]
+1321:         return ammo_source("3x3炮塔弹药", TURRET_3X3, [(20, 1), (10, 2), (35, 1), (40, 0)], target_a, target_b, "3x3"), links
+1322:     if kind == "ammo-4x4":
+1323:            if (wasAfk) {
+1324:                reassignAfterAfkRecover(player)
+1325:    Groups.player.forEach { sessionJoinAt.putIfAbsent(it.uuid(), System.currentTimeMillis()) }
+1326:         return ammo_source("4x4炮塔弹药", TURRET_4X4, [(50, 2), (30, 1), (200, 0), (50, 2)], target_a, target_b, "4x4"), links
+1327:     raise ValueError(kind)
+1328: 
+1329: 
+1330: def guess_red_unit_name(lb, unit_id):
+1331:     if lb["y"] in (132, 136, 140):
+1332:    sessionJoinAt.clear()
+1333:     if lb["y"] in (133, 137, 141):
+1334:         return f"红队单位详情-{unit_id}"
+1335:     if lb["y"] in (134, 138, 142) and lb["x"] % 2 == 0:
+1336:         return f"红队单位产线显示-{unit_id}"
+1337:    "node-info.field-hint.mindustry.game.EventType.GameOverEvent.winner": "GameOverEvent.winner（Team）：决定波次相关阈值；会影响胜利条件、刷怪阶段或事件触发时机。",
+1338:    "node-info.field-hint.mindustry.game.EventType.GeneratorPressureExplodeEvent.build": "GeneratorPressureExplodeEvent.build（Building）：决定构建版本号或构建计数；会影响兼容读取和版本分支判断。",
+1339: 
+1340: def main():
+1341:     original = load(ORIGINAL)
+1342:     orig_logic = {(lb["x"], lb["y"]): lb for lb in original["logicBlocks"]}
+1343:    "node-info.field-hint.mindustry.game.EventType.PayloadDropEvent.build": "PayloadDropEvent.build（Building）：决定构建版本号或构建计数；会影响兼容读取和版本分支判断。",
+1344:     if MLP_DIR.exists():
+1345:         shutil.rmtree(MLP_DIR)
+1346:    "node-info.field-hint.mindustry.game.EventType.PickupEvent.build": "PickupEvent.build（Building）：决定构建版本号或构建计数；会影响兼容读取和版本分支判断。",
+1347:         shutil.rmtree(MLOG_DIR)
+1348:     MLP_DIR.mkdir(parents=True, exist_ok=True)
+1349:     MLOG_DIR.mkdir(parents=True, exist_ok=True)
+1350: 
+1351:     phase_a = []
+1352:     phase_b = []
+1353:     names = []
+1354: 
+1355:    sessionJoinAt[player.uuid()] = System.currentTimeMillis()
+1356:         if 89 <= tile["x"] <= 169 and 132 <= tile["y"] <= 142 and tile["block"].startswith("world-"):
+1357:             phase_a.append(tile_op(mx(tile["x"]), tile["y"], tile["block"], "crux", tile.get("rotation", 0)))
+1358: 
+1359:     for lb in original["logicBlocks"]:
+1360:         if not (89 <= lb["x"] <= 169 and 132 <= lb["y"] <= 142):
+1361:               `群: ${result.invite.group_name || '(未命名群)'} (${result.invite.group_id})`,
+1362:               `请求ID: ${result.invite.request_id}`
+1363:             ].join('\n')
+1364:           );
+1365:           break;
+1366:         }
+1367:         case 'group_invite_list': {
+1368:           const systemMessages = await napcatClient.getGroupSystemMessages(100);
+1369:           await sendLongReply(napcatClient, context, event.message_id, formatInviteList(getPendingInvites(systemMessages)));
+1370:           break;
+1371:         }
+1372:         case 'group_invite_accept': {
+1373:           const requestId = String(command.positionals?.[0] ?? '').trim();
+1374:           if (!requestId) {
+1375:             throw new Error('用法：/groupInviteAccept <请求ID>');
+1376:           }
+1377:           const result = await tryAcceptPendingInvite(napcatClient, {
+1378:             requestId,
+1379:             count: 100
+1380:           });
+1381:           if (!result.approved) {
+1382:             throw new Error(`未找到待处理群邀请：${requestId}`);
+1383:           }
+1384:           await napcatClient.replyText(
+1385:             context,
+1386:             event.message_id,
+1387:             [
+1388:               '已同意群邀请。',
+1389:               `群: ${result.invite.group_name || '(未命名群)'} (${result.invite.group_id})`,
+1390:               `请求ID: ${result.invite.request_id}`
+1391:             ].join('\n')
+1392:           );
+1393:           break;
+1394:         }
+1395:         case 'group_invite_reject': {
+1396:           const requestId = String(command.positionals?.[0] ?? '').trim();
+1397:           const reason = String(command.flags?.reason ?? command.positionals?.slice(1).join(' ') ?? '主人拒绝').trim() || '主人拒绝';
+1398:           if (!requestId) {
+1399:             throw new Error('用法：/groupInviteReject <请求ID> [拒绝理由]');
+1400:           }
+1401:           await napcatClient.setGroupAddRequest(requestId, false, reason, 100);
+1402:           await napcatClient.replyText(
+1403:             context,
+1404:             event.message_id,
+1405:             [
+1406:               '已拒绝群邀请。',
+1407:               `请求ID: ${requestId}`,
+1408:               `理由: ${reason}`
+1409:             ].join('\n')
+1410:           );
+1411:           break;
+1412:         }
+1413:         case 'disguise_enable': {
+1414:           const groupId = requireGroupId(command, context);
+1415:           const result = await disguiseManager.enableGroup(groupId);
+1416:           await sendLongReply(
+1417:             napcatClient,
+1418:             context,
+1419:             event.message_id,
+1420:             [
+1421:               result.action === 'created' ? '已启用该群的伪装模式。' : '已更新该群的伪装模式。',
+1422:               '系统会后台整理当前可读取到的群聊历史；超过 100 条的旧消息会按每 50 条压缩成长期上下文。',
+1423:               formatDisguiseStatus(result.status)
+1424:             ].join('\n\n')
+1425:           );
+1426:           break;
+1427:         }
+1428:         case 'disguise_disable': {
+1429:           const groupId = requireGroupId(command, context);
+1430:           const result = await disguiseManager.disableGroup(groupId);
+1431:           if (!result.removed) {
+1432:             throw new Error(`该群未启用伪装模式：${groupId}`);
+1433:           }
+1434:           await napcatClient.replyText(context, event.message_id, '已关闭该群的伪装模式。');
+1435:           break;
+1436:         }
+1437:         case 'disguise_status': {
+1438:           const groupId = requireGroupId(command, context);
+1439:           await sendLongReply(
+1440:             napcatClient,
+1441:             context,
+1442:             event.message_id,
+1443:             formatDisguiseStatus(disguiseManager.getGroupStatus(groupId))
+1444:           );
+1445:           break;
+1446:         }
+1447:         case 'disguise_list': {
+1448:           await sendLongReply(
+1449:             napcatClient,
+1450:             context,
+1451:             event.message_id,
+1452:             formatDisguiseList(disguiseManager.listEnabledGroups())
+1453:           );
+1454:           break;
+1455:         }
+1456:         case 'daily_report_enable': {
+1457:           const groupId = requireGroupId(command, context);
+1458:           const result = await dailyReportManager.enableGroup(groupId);
+1459:           await sendLongReply(
+1460:             napcatClient,
+1461:             context,
+1462:             event.message_id,
+1463:             [
+1464:               result.action === 'created' ? '已启用该群的群日报。' : '已更新该群的群日报配置。',
+1465:               '系统会在每天 0 点后读取前一天的原始群消息，用 gpt-5.4 生成长图日报。',
+1466:               formatDailyReportStatus(result.status)
+1467:             ].join('\n\n')
+1468:           );
+1469:           break;
+1470:         }
+1471:         case 'daily_report_disable': {
+1472:           const groupId = requireGroupId(command, context);
+1473:           const result = await dailyReportManager.disableGroup(groupId);
+1474:           if (!result.removed) {
+1475:             throw new Error(`该群未启用群日报：${groupId}`);
+1476:           }
+1477:           await napcatClient.replyText(context, event.message_id, '已关闭该群的群日报。');
+1478:           break;
+1479:           const groupId = requireGroupId(command, context);
+1480:           const result = await disguiseManager.enableGroup(groupId);
+1481:           await sendLongReply(
+1482:             napcatClient,
+1483:             context,
+1484:             event.message_id,
+1485:             [
+1486:               result.action === 'created' ? '已启用该群的伪装模式。' : '已更新该群的伪装模式。',
+1487:               '系统会后台整理当前可读取到的群聊历史；超过 100 条的旧消息会按每 50 条压缩成长期上下文。',
+1488:               formatDisguiseStatus(result.status)
+1489:             ].join('\n\n')
+1490:           );
+1491:           break;
+1492:         }
+1493:         case 'disguise_disable': {
+1494:           const groupId = requireGroupId(command, context);
+1495:           const result = await disguiseManager.disableGroup(groupId);
+1496:           if (!result.removed) {
+1497:             throw new Error(`该群未启用伪装模式：${groupId}`);
+1498:           }
+1499:           await napcatClient.replyText(context, event.message_id, '已关闭该群的伪装模式。');
+1500:           break;
+1501:         }
+1502:         case 'disguise_status': {
+1503:           const groupId = requireGroupId(command, context);
+1504:           await sendLongReply(
+1505:             napcatClient,
+1506:             context,
+1507:             event.message_id,
+1508:             formatDisguiseStatus(disguiseManager.getGroupStatus(groupId))
+1509:           );
+1510:           break;
+1511:         }
+1512:         case 'disguise_list': {
+1513:           await sendLongReply(
+1514:             napcatClient,
+1515:             context,
+1516:             event.message_id,
+1517:             formatDisguiseList(disguiseManager.listEnabledGroups())
+1518:           );
+1519:           break;
+1520:         }
+1521:             this.effect = effect;
+1522:             this.unit = unit;
+1523:             this.duration = duration;
+1524:         }
+1525: 
+1526:    "node-info.field-hint.mindustry.game.Rules.allowLogicData": "Rules.allowLogicData（boolean）：决定压缩数据或状态编码值；会影响解码后的行为分支与参数读取。",
+1527:         }
+1528: 
+1529:         @Override
+1530:         public void run(LExecutor exec){
+1531:             if(net.client()) return;
+1532:    "node-info.field-hint.mindustry.game.Rules.backgroundScl": "Rules.backgroundScl (float): Defines scaling coefficient and proportionally amplifies or reduces related block effects.",
+1533:             if(unit.obj() instanceof Unit unit && content.statusEffect(effect) != null){
+1534:                 if(clear){
+1535:                     unit.unapply(content.statusEffect(effect));
+1536:                 }else{
+1537:                     unit.apply(content.statusEffect(effect), duration.numf() * 60f);
+1538:                 }
+1539:             }
+1540:         }
+1541:    "node-info.field-hint.mindustry.game.Rules.buildCostMultiplier": "Rules.buildCostMultiplier（float）：决定构建版本号或构建计数；会影响兼容读取和版本分支判断。",
+1542: 
+1543:     public static class SetRuleI implements LInstruction{
+1544:         public LogicRule rule = LogicRule.waveSpacing;
+1545:         public LVar value, p1, p2, p3, p4;
+1546:                     "after" to formatMvp(after),
+1547:                     "limit" to formatMvp(addMvpRejectAbove)
+1548:                 ))
+1549:             }
+1550:         } else {
+1551:             if (after < -EPS) {
+1552:                 returnReply("[red]扣减后MVP将变为负数({after})，拒绝操作".with(
+1553:                     "after" to formatMvp(after)
+1554:        code_op(174, 156, compile_logic("yellow-core-watch", core_watch_source(1, 1, 6))),
+1555:        code_op(175, 156, compile_logic("red-core-watch", core_watch_source(2, 0, 7))),
+1556:        code_op(175, 155, compile_logic("core-cleanup", core_cleanup_source())),
+1557: 
+1558:         setPlayerHistory(target.uuid, after)
+1559:         mvpNameCache[target.uuid] = target.displayName
+1560:            liquidCapacity = 80f;
+1561:         val action = if (delta > 0.0) "增加" else "扣减"
+1562:         reply("[green]已为 {name}[green]({sid}) {action}MVP({delta}): {before} -> {after}".with(
+1563:             "name" to target.realName,
+1564:             "sid" to target.shortId,
+1565:             "action" to action,
+1566:             "delta" to formatMvp(delta),
+1567:             "before" to formatMvp(before),
+1568:    "node-info.field-hint.mindustry.game.Rules.initialWaveSpacing": "Rules.initialWaveSpacing（float）：决定波次相关阈值；会影响胜利条件、刷怪阶段或事件触发时机。",
+1569:    "node-info.field-hint.mindustry.game.Rules.instantBuild": "Rules.instantBuild（boolean）：决定构建版本号或构建计数；会影响兼容读取和版本分支判断。",
+1570:                 }
+1571:                 case ambientLight -> state.rules.ambientLight.fromDouble(value.num());
+1572:                 case solarMultiplier -> state.rules.solarMultiplier = Math.max(value.numf(), 0f);
+1573:                 case dragMultiplier -> state.rules.dragMultiplier = Math.max(value.numf(), 0f);
+1574:                 case ban -> {
+1575:                     Object cont = value.obj();
+1576:        links = [
+1577:                         // Rebuild PlacementFragment if anything has changed
+1578:    "node-info.field-hint.mindustry.game.Rules.logicUnitBuild": "Rules.logicUnitBuild（boolean）：决定构建版本号或构建计数；会影响兼容读取和版本分支判断。",
+1579:                     }else if(cont instanceof UnitType u){
+1580:                         state.rules.bannedUnits.add(u);
+1581:                     }
+1582:                 }
+1583:                 case unban -> {
+1584:                     Object cont = value.obj();
+1585:        links = [
+1586:                         if(state.rules.bannedBlocks.remove(b) && !headless) ui.hudfrag.blockfrag.rebuild();
+1587:                     }else if(cont instanceof UnitType u){
+1588:                         state.rules.bannedUnits.remove(u);
+1589:                     }
+1590:                 }
+1591:                 case unitHealth, unitBuildSpeed, unitMineSpeed, unitCost, unitDamage, blockHealth, blockDamage, buildSpeed, rtsMinSquad, rtsMinWeight -> {
+1592:            liquidCapacity = 80f * 5;
+1593:                            nb.blockName = b.blockName;
+1594:        links = [
+1595:                         switch(rule){
