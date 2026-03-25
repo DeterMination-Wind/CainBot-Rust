@@ -3,6 +3,7 @@
 这是一个基于 NapCat OneBot HTTP + SSE 的本地 QQ 机器人。当前版本只保留以下能力：
 
 - 指定群内的问题过滤 + 自动 AI 回复 + 显式问答
+- DeterMination 名下模组的 bug / 体验问题自动接管修复跟踪
 - `/chat` 与 `@[Bot]Cain` 共享同一群上下文
 - `/e` 修改当前群的过滤 prompt 和聊天 prompt
 - `/tr` 与 `#翻译` 文本/图片翻译
@@ -35,6 +36,7 @@
 7. 如果群里 15 分钟没人发消息，就把最后 30 条消息交给 `ai-5 (gpt-5.4-mini)` 判断话题是否结束；若结束，只清上下文，不发言
 8. 收到 `request_type=group` 且 `sub_type=invite` 的邀请请求时，会自动同意入群
 9. 如果某群启用了“文件下载”功能，Cain 会独立检测类似“有没有156的pc安装包”这类消息；它会先问你是 X端 还是 原版，再按 tag/body 查 release，列出该 tag 下可用文件让你选，随后下载到本地并通过 QQ 群文件发出
+10. 无论群主动回复有没有启用，只要消息被判定为在反馈 `../codex` 下作者包含 `DeterMination` 的模组 bug / 体验问题，Cain 都会先问要不要直接跟进修；确认后会启动 `gpt-5.4-high` 的 Codex 修复会话，按需改代码、构建本地产物、发给提问者测试，直到 AI 判断用户已经确认“可以了”，再把当前产物同步到 `188709300` 群文件对应文件夹并关闭会话
 
 默认过滤标准：
 
@@ -90,6 +92,8 @@
 - `ai.baseUrl`
 - `ai.apiKey`
 - `qa.enabledGroupIds`
+- `issueRepair.publishGroupId`
+- `issueRepair.codexRoot`
 
 `config.example.json` 已经是当前结构。
 

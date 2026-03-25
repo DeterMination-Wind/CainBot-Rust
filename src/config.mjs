@@ -201,6 +201,19 @@ export async function loadConfig(configPath) {
       port: Number(raw?.codexBridge?.port ?? 3186) || 3186,
       token: String(raw?.codexBridge?.token ?? '').trim()
     },
+    issueRepair: {
+      enabled: raw?.issueRepair?.enabled ?? true,
+      ownerName: String(raw?.issueRepair?.ownerName ?? 'DeterMination').trim() || 'DeterMination',
+      codexRoot: resolveMaybeRelative(configDir, raw?.issueRepair?.codexRoot ?? raw?.qa?.answer?.codexRoot ?? '../codex'),
+      codexCommand: String(raw?.issueRepair?.codexCommand ?? 'codex').trim() || 'codex',
+      model: String(raw?.issueRepair?.model ?? 'gpt-5.4-high').trim() || 'gpt-5.4-high',
+      classifyModel: String(raw?.issueRepair?.classifyModel ?? 'gpt-5.4-mini').trim() || 'gpt-5.4-mini',
+      consentModel: String(raw?.issueRepair?.consentModel ?? 'gpt-5.4-mini').trim() || 'gpt-5.4-mini',
+      followupModel: String(raw?.issueRepair?.followupModel ?? 'gpt-5.4-mini').trim() || 'gpt-5.4-mini',
+      satisfactionModel: String(raw?.issueRepair?.satisfactionModel ?? 'gpt-5.4-mini').trim() || 'gpt-5.4-mini',
+      publishGroupId: String(raw?.issueRepair?.publishGroupId ?? '188709300').trim() || '188709300',
+      codexTimeoutMs: raw?.issueRepair?.codexTimeoutMs ?? 30 * 60 * 1000
+    },
     ai: {
       baseUrl: sharedAiBaseUrl,
       apiKey: sharedAiApiKey

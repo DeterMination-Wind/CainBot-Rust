@@ -249,6 +249,30 @@ export class NapCatClient {
     return result;
   }
 
+  async sendLocalFileToContext(context, params = {}, options = {}) {
+    if (context?.messageType === 'group') {
+      return await this.sendLocalFileToGroup({
+        groupId: context.groupId,
+        filePath: params.filePath,
+        fileName: params.fileName,
+        folderName: params.folderName,
+        notifyText: params.notifyText
+      }, options);
+    }
+
+    const filePath = String(params?.filePath ?? '').trim();
+    if (!filePath) {
+      throw new Error('filePath 不能为空');
+    }
+    return await this.sendPrivateMessage(context.userId, [{
+      type: 'file',
+      data: {
+        file: filePath,
+        name: String(params?.fileName ?? '').trim() || undefined
+      }
+    }]);
+  }
+
   async sendContextMessage(context, message) {
     if (context.messageType === 'group') {
       return await this.sendGroupMessage(context.groupId, message);

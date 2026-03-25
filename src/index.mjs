@@ -14,6 +14,7 @@ import { NapCatClient } from './napcat-client.mjs';
 import { MsavMapAnalyzer } from './msav-map-analyzer.mjs';
 import { OpenAiChatClient } from './openai-chat-client.mjs';
 import { OpenAiTranslator } from './openai-translator.mjs';
+import { ModIssueRepairManager } from './mod-issue-repair-manager.mjs';
 import { RuntimeConfigStore } from './runtime-config-store.mjs';
 import { StateStore } from './state-store.mjs';
 import { WebUiSyncStore } from './webui-sync-store.mjs';
@@ -965,6 +966,15 @@ async function main() {
 
   const codexBridgeServer = new CodexBridgeServer(config.codexBridge, napcatClient, logger);
   const codexBridgeInfo = await codexBridgeServer.start();
+  const modIssueRepairManager = new ModIssueRepairManager(
+    config.issueRepair,
+    qaClient,
+    napcatClient,
+    stateStore,
+    logger,
+    codexBridgeInfo
+  );
+  await modIssueRepairManager.initialize();
   const webUiDirectInfo = await buildWebUiDirectInfo(config.napcat.webUiConfigPath);
   if (codexBridgeInfo?.baseUrl && config.bot.ownerUserId) {
     try {
@@ -1398,6 +1408,10 @@ async function main() {
       }
 
       if (context.messageType === 'group' && await groupFileDownloadManager.handleGroupMessage(context, event, text)) {
+        return;
+      }
+
+      if (await modIssueRepairManager.handleIncomingMessage(context, event, text)) {
         return;
       }
 
