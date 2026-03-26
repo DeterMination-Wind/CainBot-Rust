@@ -1,26 +1,5 @@
-import { isNonEmptyString, joinUrl } from './utils.mjs';
-
-function extractAssistantText(payload) {
-  const content = payload?.choices?.[0]?.message?.content;
-  if (typeof content === 'string') {
-    return content.trim();
-  }
-  if (Array.isArray(content)) {
-    return content
-      .map((item) => {
-        if (typeof item === 'string') {
-          return item;
-        }
-        if (item?.type === 'text') {
-          return item.text ?? '';
-        }
-        return '';
-      })
-      .join('')
-      .trim();
-  }
-  return '';
-}
+import { isNonEmptyString } from './utils.mjs';
+import { OpenAiChatClient } from './openai-chat-client.mjs';
 
 function normalizeInput(input) {
   if (typeof input === 'string') {
@@ -41,6 +20,7 @@ export class OpenAiTranslator {
   constructor(config, logger) {
     this.config = config;
     this.logger = logger;
+    this.chatClient = new OpenAiChatClient(config, logger);
   }
 
   get enabled() {
@@ -67,13 +47,6 @@ export class OpenAiTranslator {
       ? this.config.systemPrompt
       : `你是专业翻译助手。请把用户提供的文本或图片中的文字翻译成${this.config.targetLanguage || '简体中文'}，只返回译文。`;
 
-    const headers = {
-      'Content-Type': 'application/json'
-    };
-    if (isNonEmptyString(this.config.apiKey)) {
-      headers.Authorization = `Bearer ${this.config.apiKey}`;
-    }
-
     const userContent = normalized.images.length > 0
       ? [
           {
@@ -84,32 +57,19 @@ export class OpenAiTranslator {
         ]
       : normalized.text;
 
-    const response = await fetch(joinUrl(this.config.baseUrl, 'chat/completions'), {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: this.config.model,
-        temperature: this.config.temperature ?? 0.2,
-        messages: [
-          {
-            role: 'system',
-            content: systemPrompt
-          },
-          {
-            role: 'user',
-            content: userContent
-          }
-        ]
-      })
+    const translated = await this.chatClient.complete([
+      {
+        role: 'system',
+        content: systemPrompt
+      },
+      {
+        role: 'user',
+        content: userContent
+      }
+    ], {
+      model: this.config.model,
+      temperature: this.config.temperature ?? 0.2
     });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`翻译接口返回 HTTP ${response.status}: ${errorText}`);
-    }
-
-    const payload = await response.json();
-    const translated = extractAssistantText(payload);
     if (!translated) {
       throw new Error('翻译接口未返回可用文本');
     }

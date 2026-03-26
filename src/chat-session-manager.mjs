@@ -238,7 +238,7 @@ function summarizeToolRequest(toolRequest) {
     case 'read_group_chat_messages':
       return `${tool} count=${toolRequest?.count ?? (tool === 'read_recent_chat_messages' ? 20 : 100)}`;
     case 'start_group_file_download':
-      return `${tool} repoChoice=${JSON.stringify(String(toolRequest?.repo_choice ?? '').trim())} version=${JSON.stringify(String(toolRequest?.version_query ?? toolRequest?.version ?? '').trim())} platform=${JSON.stringify(String(toolRequest?.platform_hint ?? toolRequest?.platform ?? '').trim())}`;
+      return `${tool} mode=${JSON.stringify(String(toolRequest?.mode ?? '').trim())} repoChoice=${JSON.stringify(String(toolRequest?.repo_choice ?? '').trim())} version=${JSON.stringify(String(toolRequest?.version_query ?? toolRequest?.version ?? '').trim())} commit=${JSON.stringify(String(toolRequest?.commit_hash ?? toolRequest?.commit ?? toolRequest?.sha ?? '').trim())} platform=${JSON.stringify(String(toolRequest?.platform_hint ?? toolRequest?.platform ?? '').trim())}`;
     case 'read_github_repo_releases':
       return `${tool} repo=${JSON.stringify(String(toolRequest?.repo ?? toolRequest?.repository ?? toolRequest?.url ?? '').trim())} maxReleases=${toolRequest?.max_releases ?? 10}`;
     case 'read_github_repo_commits':
@@ -360,6 +360,14 @@ function scoreKnowledgeEntry(entry, tokens) {
   return score;
 }
 
+const ANSWER_QUALITY_GUARD_PROMPT = [
+  '补充硬性规则：',
+  '1. 不要把用户问题换词重复一遍来凑回答。',
+  '2. 用户问“怎么改/怎么做/在哪里/哪个字段”时，回答里必须给出至少一个具体定位：文件、目录、类名、对象名、字段名、命令，或明确的下一步读取目标。',
+  '3. 如果暂时给不出具体定位，就直接说“还没定位到具体位置/改法”，不要说“改对应字段”“看对应对象”“去改相关配置”这类空话。',
+  '4. 宁可明确表示还没定位，也不要输出低信息复述。'
+].join('\n');
+
 function formatJsonSnippet(value, maxChars = 2400) {
   const text = JSON.stringify(value, null, 2);
   if (text.length <= maxChars) {
@@ -381,6 +389,7 @@ export class ChatSessionManager {
     this.mindustryKnowledgeCache = null;
     this.codexFolderGuideCache = null;
     this.correctionMemoryChecked = new Set();
+    this.proactiveFilterHeartbeatCounters = new Map();
   }
 
   buildSessionKey(context) {
@@ -398,17 +407,58 @@ export class ChatSessionManager {
     return this.runtimeConfigStore?.isQaGroupProactiveReplyEnabled(groupId, this.config.enabledGroupIds) === true;
   }
 
+  isGroupFilterHeartbeatEnabled(groupId) {
+    return this.runtimeConfigStore?.isQaGroupFilterHeartbeatEnabled(groupId, this.config.enabledGroupIds) === true;
+  }
+
+  getGroupFilterHeartbeatInterval(groupId) {
+    return Number(this.runtimeConfigStore?.getQaGroupFilterHeartbeatInterval(groupId) ?? 10) || 10;
+  }
+
   getGroupPromptStatus(groupId) {
     const override = this.runtimeConfigStore?.getGroupQaOverride(groupId) ?? null;
     return {
       groupId: String(groupId ?? '').trim(),
       enabled: this.isGroupEnabled(groupId),
       proactiveReplyEnabled: this.isGroupProactiveReplyEnabled(groupId),
+      filterHeartbeatEnabled: this.isGroupFilterHeartbeatEnabled(groupId),
+      filterHeartbeatInterval: this.getGroupFilterHeartbeatInterval(groupId),
       fileDownloadEnabled: this.runtimeConfigStore?.isQaGroupFileDownloadEnabled(groupId) === true,
       fileDownloadFolderName: this.runtimeConfigStore?.getQaGroupFileDownloadFolderName(groupId) || '',
       filterPrompt: override?.filterPrompt || this.config.filter.prompt,
       answerPrompt: override?.answerPrompt || this.config.answer.systemPrompt
     };
+  }
+
+  shouldRunGroupProactiveFilter(groupId) {
+    const normalizedGroupId = String(groupId ?? '').trim();
+    if (!normalizedGroupId) {
+      return { allowed: true, counter: 0, interval: 1 };
+    }
+    if (!this.isGroupFilterHeartbeatEnabled(normalizedGroupId)) {
+      this.proactiveFilterHeartbeatCounters.delete(normalizedGroupId);
+      return { allowed: true, counter: 0, interval: 1 };
+    }
+    const interval = Math.max(1, this.getGroupFilterHeartbeatInterval(normalizedGroupId));
+    if (interval <= 1) {
+      this.proactiveFilterHeartbeatCounters.delete(normalizedGroupId);
+      return { allowed: true, counter: 1, interval };
+    }
+    const nextCount = Number(this.proactiveFilterHeartbeatCounters.get(normalizedGroupId) ?? 0) + 1;
+    if (nextCount >= interval) {
+      this.proactiveFilterHeartbeatCounters.set(normalizedGroupId, 0);
+      return { allowed: true, counter: nextCount, interval };
+    }
+    this.proactiveFilterHeartbeatCounters.set(normalizedGroupId, nextCount);
+    return { allowed: false, counter: nextCount, interval };
+  }
+
+  resetGroupFilterHeartbeat(groupId) {
+    const normalizedGroupId = String(groupId ?? '').trim();
+    if (!normalizedGroupId) {
+      return;
+    }
+    this.proactiveFilterHeartbeatCounters.delete(normalizedGroupId);
   }
 
   async recordIncomingMessage(context, event, options = {}) {
@@ -597,6 +647,7 @@ export class ChatSessionManager {
       throw new Error('runtimeConfigStore 未配置，无法关闭群问答');
     }
     await this.runtimeConfigStore.setQaGroupEnabled(normalizedGroupId, false);
+    this.resetGroupFilterHeartbeat(normalizedGroupId);
     this.stateStore.clearChatSession(this.buildSessionKey({
       messageType: 'group',
       groupId: normalizedGroupId,
@@ -735,7 +786,7 @@ export class ChatSessionManager {
       ? this.runtimeConfigStore?.getGroupQaOverride(context.groupId)
       : null;
     const basePrompt = override?.answerPrompt || this.config.answer.systemPrompt;
-    const parts = [basePrompt];
+    const parts = [basePrompt, ANSWER_QUALITY_GUARD_PROMPT];
     if (this.codexTools?.getAlwaysLoadedMemoryPrompt) {
       const memoryPrompt = await this.codexTools.getAlwaysLoadedMemoryPrompt();
       if (memoryPrompt) {

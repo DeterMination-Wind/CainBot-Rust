@@ -2,13 +2,15 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 import { ensureDir, extractReplyId, nowIso } from './utils.mjs';
 
 const OFFER_TTL_MS = 20 * 60 * 1000;
 const DEFAULT_CODEX_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_RECENT_LINES = 16;
+const execFileAsync = promisify(execFile);
 
 const OUTPUT_SCHEMA = {
   type: 'object',
@@ -46,6 +48,119 @@ function truncate(text, maxChars = 500) {
     return normalized;
   }
   return `${normalized.slice(0, maxChars)}...(已截断)`;
+}
+
+function isTransientChatFailure(error) {
+  const code = normalizeText(error?.code);
+  const message = normalizeText(error?.message ?? error);
+  if (code === 'CHAT_BACKEND_COOLDOWN' || code === 'CHAT_BACKEND_HTTP_ERROR') {
+    return true;
+  }
+  return /fetch failed|und_err_socket|other side closed|timed? out|econnreset|socket|chat backend/i.test(message);
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveSpawnCommand(command) {
+  const normalized = normalizeText(command) || 'codex';
+  if (path.isAbsolute(normalized) || normalized.includes('/') || normalized.includes('\\')) {
+    return normalized;
+  }
+
+  if (process.platform === 'win32') {
+    try {
+      const result = await execFileAsync('where.exe', [normalized], {
+        windowsHide: true,
+        timeout: 10000,
+        maxBuffer: 1024 * 1024
+      });
+      const candidates = String(result?.stdout ?? '')
+        .split(/\r?\n/g)
+        .map((line) => normalizeText(line))
+        .filter(Boolean);
+      const preferred = candidates.find((item) => /\.(cmd|exe|bat)$/i.test(item));
+      if (preferred) {
+        return preferred;
+      }
+      if (candidates[0]) {
+        return candidates[0];
+      }
+    } catch {
+    }
+
+    const npmDir = path.join(process.env.APPDATA || '', 'npm');
+    const localCandidates = [
+      path.join(npmDir, `${normalized}.cmd`),
+      path.join(npmDir, `${normalized}.exe`),
+      path.join(npmDir, `${normalized}.bat`),
+      path.join(npmDir, normalized)
+    ];
+    for (const candidate of localCandidates) {
+      if (await pathExists(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  return normalized;
+}
+
+function isWindowsScriptCommand(command) {
+  return process.platform === 'win32' && /\.(cmd|bat)$/i.test(normalizeText(command));
+}
+
+function quoteForCmd(value) {
+  const text = String(value ?? '');
+  if (text.length === 0) {
+    return '""';
+  }
+  const escaped = text.replace(/"/g, '""');
+  if (/[\s"&<>|^]/.test(escaped)) {
+    return `"${escaped}"`;
+  }
+  return escaped;
+}
+
+function buildSpawnSpec(command, args = []) {
+  const normalizedCommand = normalizeText(command);
+  const normalizedArgs = Array.isArray(args) ? args.map((item) => String(item ?? '')) : [];
+  if (!isWindowsScriptCommand(normalizedCommand)) {
+    return {
+      command: normalizedCommand,
+      args: normalizedArgs,
+      options: {}
+    };
+  }
+
+  const comspec = process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe';
+  const joined = [quoteForCmd(normalizedCommand), ...normalizedArgs.map((item) => quoteForCmd(item))].join(' ');
+  return {
+    command: comspec,
+    args: ['/d', '/s', '/c', joined],
+    options: {
+      windowsVerbatimArguments: false
+    }
+  };
+}
+
+function canOfferIssueRepairInContext(config, context) {
+  const allowedGroupIds = Array.isArray(config?.offerGroupIds)
+    ? config.offerGroupIds.map((item) => normalizeText(item)).filter(Boolean)
+    : [];
+  if (allowedGroupIds.length === 0) {
+    return false;
+  }
+  if (normalizeText(context?.messageType) !== 'group') {
+    return false;
+  }
+  return allowedGroupIds.includes(normalizeText(context?.groupId));
 }
 
 function stripJsonComments(text) {
@@ -376,65 +491,77 @@ export class ModIssueRepairManager {
   }
 
   async handleIncomingMessage(context, event, text) {
-    if (this.config.enabled === false) {
-      return false;
-    }
-    const normalizedText = normalizeText(text);
-    if (!normalizedText) {
-      return false;
-    }
-    await this.refreshModIndex();
+    try {
+      if (this.config.enabled === false) {
+        return false;
+      }
+      const normalizedText = normalizeText(text);
+      if (!normalizedText) {
+        return false;
+      }
+      await this.refreshModIndex();
 
-    const scopeKey = buildScopeKey(context);
-    const offer = this.#findPendingOffer(scopeKey);
-    if (offer && await this.#maybeHandleOfferReply(offer, context, event, normalizedText)) {
+      const scopeKey = buildScopeKey(context);
+      const offer = this.#findPendingOffer(scopeKey);
+      if (offer && await this.#maybeHandleOfferReply(offer, context, event, normalizedText)) {
+        return true;
+      }
+
+      const session = this.#findActiveSession(scopeKey);
+      if (session && await this.#maybeHandleSessionReply(session, context, event, normalizedText)) {
+        return true;
+      }
+
+      if (!canOfferIssueRepairInContext(this.config, context)) {
+        return false;
+      }
+
+      const decision = await this.#classifyCandidate(context, event, normalizedText);
+      if (!decision.shouldOffer) {
+        return false;
+      }
+
+      const modInfo = this.modIndex.find((item) => item.id === decision.projectKey);
+      if (!modInfo) {
+        return false;
+      }
+
+      const createdAt = nowIso();
+      const offerRecord = {
+        id: randomUUID(),
+        scopeKey,
+        context: {
+          messageType: normalizeText(context?.messageType) || 'group',
+          groupId: normalizeText(context?.groupId),
+          userId: normalizeText(context?.userId),
+          selfId: normalizeText(context?.selfId)
+        },
+        targetUserId: normalizeText(context?.userId),
+        sourceMessageId: normalizeText(event?.message_id),
+        modId: modInfo.id,
+        modDisplayName: modInfo.displayName || modInfo.projectFolderName,
+        issueSummary: normalizeIssueSummary(decision.issueSummary),
+        createdAt,
+        updatedAt: createdAt,
+        expiresAt: new Date(Date.now() + OFFER_TTL_MS).toISOString(),
+        botMessageIds: []
+      };
+      const results = await this.napcatClient.replyText(
+        context,
+        event.message_id,
+        `看起来像是 ${offerRecord.modDisplayName} 的 bug / 体验问题。要不要我直接跟进修一下或顺手优化体验？`
+      );
+      offerRecord.botMessageIds = extractMessageIds(results);
+      this.stateStore.setIssueRepairOffer(offerRecord);
+      await this.stateStore.save();
       return true;
+    } catch (error) {
+      if (isTransientChatFailure(error)) {
+        this.logger.warn(`问题修复助手临时跳过当前消息：${error.message}`);
+        return false;
+      }
+      throw error;
     }
-
-    const session = this.#findActiveSession(scopeKey);
-    if (session && await this.#maybeHandleSessionReply(session, context, event, normalizedText)) {
-      return true;
-    }
-
-    const decision = await this.#classifyCandidate(context, event, normalizedText);
-    if (!decision.shouldOffer) {
-      return false;
-    }
-
-    const modInfo = this.modIndex.find((item) => item.id === decision.projectKey);
-    if (!modInfo) {
-      return false;
-    }
-
-    const createdAt = nowIso();
-    const offerRecord = {
-      id: randomUUID(),
-      scopeKey,
-      context: {
-        messageType: normalizeText(context?.messageType) || 'group',
-        groupId: normalizeText(context?.groupId),
-        userId: normalizeText(context?.userId),
-        selfId: normalizeText(context?.selfId)
-      },
-      targetUserId: normalizeText(context?.userId),
-      sourceMessageId: normalizeText(event?.message_id),
-      modId: modInfo.id,
-      modDisplayName: modInfo.displayName || modInfo.projectFolderName,
-      issueSummary: normalizeIssueSummary(decision.issueSummary),
-      createdAt,
-      updatedAt: createdAt,
-      expiresAt: new Date(Date.now() + OFFER_TTL_MS).toISOString(),
-      botMessageIds: []
-    };
-    const results = await this.napcatClient.replyText(
-      context,
-      event.message_id,
-      `看起来像是 ${offerRecord.modDisplayName} 的 bug / 体验问题。要不要我直接跟进修一下或顺手优化体验？`
-    );
-    offerRecord.botMessageIds = extractMessageIds(results);
-    this.stateStore.setIssueRepairOffer(offerRecord);
-    await this.stateStore.save();
-    return true;
   }
 
   #findPendingOffer(scopeKey) {
@@ -704,9 +831,12 @@ export class ModIssueRepairManager {
           '-C', workDir,
           '-'
         ];
-    const child = spawn(this.config.codexCommand || 'codex', args, {
+    const codexCommand = await resolveSpawnCommand(this.config.codexCommand || 'codex');
+    const spawnSpec = buildSpawnSpec(codexCommand, args);
+    const child = spawn(spawnSpec.command, spawnSpec.args, {
       windowsHide: true,
-      stdio: ['pipe', 'pipe', 'pipe']
+      stdio: ['pipe', 'pipe', 'pipe'],
+      ...spawnSpec.options
     });
     const timeoutMs = Math.max(60 * 1000, Number(this.config.codexTimeoutMs ?? DEFAULT_CODEX_TIMEOUT_MS) || DEFAULT_CODEX_TIMEOUT_MS);
     const timer = setTimeout(() => {
@@ -725,7 +855,7 @@ export class ModIssueRepairManager {
     const stdoutText = stdoutChunks.join('');
     const stderrText = stderrChunks.join('');
     const threadId = extractThreadIdFromJsonl(stdoutText);
-    this.logger.info(`修复会话 ${freshSession.id} (${reason}) Codex 结束: code=${exitCode} stdout=${truncate(stdoutText)} stderr=${truncate(stderrText)}`);
+    this.logger.info(`修复会话 ${freshSession.id} (${reason}) Codex 结束: cmd=${spawnSpec.command} args=${truncate(spawnSpec.args.join(' '), 240)} code=${exitCode} stdout=${truncate(stdoutText)} stderr=${truncate(stderrText)}`);
 
     const latest = this.stateStore.getIssueRepairSession(freshSession.id);
     if (!latest) {
@@ -746,7 +876,6 @@ export class ModIssueRepairManager {
       });
       this.stateStore.setIssueRepairSession(latest);
       await this.stateStore.save();
-      await this.napcatClient.replyText(latest.context, latest.sourceMessageId || latest.botMessageIds?.[0] || '', '这轮修复跑挂了，等我整理一下再继续。');
       return;
     }
 

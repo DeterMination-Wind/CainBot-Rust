@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import readline from 'node:readline';
 import { promisify } from 'node:util';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -12,8 +13,12 @@ const execFileAsync = promisify(execFile);
 const SESSION_TTL_MS = 5 * 60 * 1000;
 const MAX_RELEASE_PAGES = 4;
 const RELEASES_PER_PAGE = 100;
+const COMMITS_PER_PAGE = 100;
 const GITHUB_API_BASE_URL = 'https://api.github.com';
 const MAX_CONCURRENT_DOWNLOADS = 5;
+const PREFERRED_MIRROR_TTL_MS = 8 * 60 * 60 * 1000;
+const BUILD_TIMEOUT_MS = 60 * 60 * 1000;
+const PLATFORM_CLASSIFY_MODEL = 'gpt-5-codex-mini';
 const GITHUB_DOWNLOAD_MIRRORS = [
   'https://github.chenc.dev',
   'https://ghproxy.cfd',
@@ -79,6 +84,81 @@ function normalizeText(value) {
   return String(value ?? '').trim();
 }
 
+function parseGithubRepoSpecifier(input) {
+  const source = normalizeText(input);
+  if (!source) {
+    throw new Error('repo 不能为空');
+  }
+
+  const normalized = source
+    .replace(/^git\+/i, '')
+    .replace(/\.git$/i, '')
+    .trim();
+
+  let owner = '';
+  let repo = '';
+  const directMatch = normalized.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
+  if (directMatch) {
+    owner = directMatch[1];
+    repo = directMatch[2];
+  } else {
+    try {
+      const parsed = new URL(/^https?:\/\//i.test(normalized) ? normalized : `https://${normalized}`);
+      const parts = parsed.pathname.split('/').map((item) => item.trim()).filter(Boolean);
+      if ((parsed.hostname === 'github.com' || parsed.hostname === 'www.github.com') && parts.length >= 2) {
+        [owner, repo] = parts;
+      }
+    } catch {
+    }
+  }
+
+  owner = normalizeText(owner);
+  repo = normalizeText(repo).replace(/\.git$/i, '');
+  if (!owner || !repo) {
+    throw new Error(`无法解析 GitHub 仓库：${source}`);
+  }
+
+  return {
+    owner,
+    repo,
+    fullName: `${owner}/${repo}`,
+    htmlUrl: `https://github.com/${owner}/${repo}`
+  };
+}
+
+function tryParseGithubRepoSpecifier(input) {
+  try {
+    return parseGithubRepoSpecifier(input);
+  } catch {
+    return null;
+  }
+}
+
+function extractGithubRepoSpecifier(text) {
+  const normalized = normalizeText(text);
+  if (!normalized) {
+    return null;
+  }
+
+  const urlMatch = normalized.match(/https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/|(?:\.git)?)?/i);
+  if (urlMatch?.[0]) {
+    const parsedFromUrl = tryParseGithubRepoSpecifier(urlMatch[0]);
+    if (parsedFromUrl) {
+      return parsedFromUrl;
+    }
+  }
+
+  const directMatches = normalized.match(/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/g) ?? [];
+  for (const candidate of directMatches) {
+    const parsed = tryParseGithubRepoSpecifier(candidate);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
 function sanitizePathSegment(value) {
   return normalizeText(value).replace(/[<>:"/\\|?*\x00-\x1F]/g, '_') || 'unknown';
 }
@@ -97,6 +177,7 @@ function withUppercaseApkName(fileName) {
 function createRepoInfo(choice) {
   if (choice === 'x') {
     return {
+      kind: 'builtin',
       choice,
       owner: 'TinyLake',
       repo: 'MindustryX',
@@ -104,12 +185,25 @@ function createRepoInfo(choice) {
       displayName: 'MindustryX X端'
     };
   }
+  if (choice === 'vanilla') {
+    return {
+      kind: 'builtin',
+      choice: 'vanilla',
+      owner: 'Anuken',
+      repo: 'Mindustry',
+      fullName: 'Anuken/Mindustry',
+      displayName: 'Mindustry 原版'
+    };
+  }
+  const parsed = parseGithubRepoSpecifier(choice);
   return {
-    choice: 'vanilla',
-    owner: 'Anuken',
-    repo: 'Mindustry',
-    fullName: 'Anuken/Mindustry',
-    displayName: 'Mindustry 原版'
+    kind: 'github',
+    choice: parsed.fullName,
+    owner: parsed.owner,
+    repo: parsed.repo,
+    fullName: parsed.fullName,
+    displayName: parsed.fullName,
+    htmlUrl: parsed.htmlUrl
   };
 }
 
@@ -124,7 +218,7 @@ function parseRepoChoice(text) {
   if (/(anuken|原版|官版|官方原版|原版mdt|原版mindustry)/i.test(normalized)) {
     return 'vanilla';
   }
-  return '';
+  return extractGithubRepoSpecifier(text)?.fullName ?? '';
 }
 
 function normalizeRepoChoiceInput(value) {
@@ -138,7 +232,7 @@ function normalizeRepoChoiceInput(value) {
   if (normalized === 'vanilla' || /(anuken\/mindustry|原版|官版|官方原版|原版mdt|原版mindustry)/i.test(normalized)) {
     return 'vanilla';
   }
-  return '';
+  return tryParseGithubRepoSpecifier(value)?.fullName ?? '';
 }
 
 function parseVersionQuery(text) {
@@ -158,15 +252,56 @@ function parseVersionQuery(text) {
   return String(matches[0]?.[2] ?? '').trim();
 }
 
+function parseCommitHash(text) {
+  const normalized = normalizeText(text).toLowerCase();
+  if (!normalized) {
+    return '';
+  }
+  const match = normalized.match(/\b([0-9a-f]{7,40})\b/);
+  const value = String(match?.[1] ?? '').trim();
+  if (!value) {
+    return '';
+  }
+  if (/^\d+$/.test(value) && !/(commit|hash|sha|提交|编译|构建|build)/i.test(normalized)) {
+    return '';
+  }
+  return value;
+}
+
+function looksLikeCommitBuildRequest(text) {
+  const normalized = normalizeText(text);
+  if (!normalized) {
+    return false;
+  }
+  const hasCommitHash = Boolean(parseCommitHash(normalized));
+  const buildLike = /(commit|hash|提交|编译|构建|build|源码)/i.test(normalized);
+  const artifactLike = /(jar|服务端|服务器|server|desktop|电脑版|pc|安卓|android|apk)/i.test(normalized);
+  if (hasCommitHash && (artifactLike || buildLike || looksLikeGameMention(normalized))) {
+    return true;
+  }
+  return looksLikeGameMention(normalized) && buildLike && artifactLike;
+}
+
+function wantsExactCommitBuild(text) {
+  const normalized = normalizeText(text);
+  if (!normalized) {
+    return false;
+  }
+  return /(一定要|就要|精确编译|本地编译|原样编译|该commit|这个commit|exact)/i.test(normalized);
+}
+
 function parsePlatformHint(text) {
   const normalized = normalizeText(text).toLowerCase();
   if (!normalized) {
     return '';
   }
-  if (/(电脑版|pc|desktop|windows|window|win|exe|jar|zip)/i.test(normalized)) {
+  if (/(服务端|服务器|server)/i.test(normalized)) {
+    return 'server';
+  }
+  if (/(电脑版|电脑端|电脑|pc|desktop|windows|window|win|exe|jar|zip)/i.test(normalized)) {
     return 'pc';
   }
-  if (/(安卓|android|apk|手机|移动端)/i.test(normalized)) {
+  if (/(安卓|android|apk|手机|移动端|手机版)/i.test(normalized)) {
     return 'android';
   }
   return '';
@@ -177,10 +312,13 @@ function normalizePlatformHintInput(value) {
   if (!normalized) {
     return '';
   }
-  if (normalized === 'pc' || /(电脑版|pc|desktop|windows|window|win|exe|jar|zip)/i.test(normalized)) {
+  if (normalized === 'server' || /(服务端|服务器|server)/i.test(normalized)) {
+    return 'server';
+  }
+  if (normalized === 'pc' || /(电脑版|电脑端|电脑|pc|desktop|windows|window|win|exe|jar|zip)/i.test(normalized)) {
     return 'pc';
   }
-  if (normalized === 'android' || /(安卓|android|apk|手机|移动端)/i.test(normalized)) {
+  if (normalized === 'android' || /(安卓|android|apk|手机|移动端|手机版)/i.test(normalized)) {
     return 'android';
   }
   return '';
@@ -210,6 +348,10 @@ function looksLikeDownloadRequest(text) {
   if (!normalized) {
     return false;
   }
+  const githubRepo = extractGithubRepoSpecifier(normalized);
+  if (githubRepo && /(release|releases|最新版|最新版本|latest|安装包|客户端下载|下载|下载包|文件|资产|asset|apk|exe|zip|jar)/i.test(normalized)) {
+    return true;
+  }
   const installLike = /(安装包|安装文件|客户端|下载包|pc安装包|pc包|apk|APK|exe|jar|zip|桌面版|电脑版|电脑版本|pc版本|桌面端|版本包|游戏包|文件包)/i.test(normalized);
   const requestLike = /(有没有|有吗|求|求发|发一下|发个|给我|来个|想要|下载|整一个|能发|有无|有没有人发|谁有|发我|来一份|是哪个|哪个包|哪一个)/i.test(normalized);
   const versionLike = Boolean(parseVersionQuery(normalized));
@@ -226,12 +368,37 @@ function looksLikeDownloadRequest(text) {
   return false;
 }
 
+function parseFolderNameHint(text) {
+  const normalized = normalizeText(text);
+  if (!normalized) {
+    return '';
+  }
+  const explicitMatch = normalized.match(/(?:群文件夹|文件夹|目录|路径)\s*[：: ]\s*[“"'`]?([^"'`”’\n，。,；;]{1,80})/i);
+  if (explicitMatch?.[1]) {
+    return normalizeText(explicitMatch[1]);
+  }
+  const targetMatch = normalized.match(/(?:发|传|上传|保存|放|丢|下载)(?:到)?\s*[“"'`]?([^"'`”’\n，。,；;]{1,40})[”"'`]?/i);
+  if (!targetMatch?.[1]) {
+    return '';
+  }
+  const candidate = normalizeText(targetMatch[1]);
+  if (!candidate || /^(我|你|这里|那边|本地|群里|群文件|最新|最新版)$/i.test(candidate)) {
+    return '';
+  }
+  return candidate;
+}
+
 function parseInitialIntent(text) {
+  const commitMode = looksLikeCommitBuildRequest(text);
   return {
-    matched: looksLikeDownloadRequest(text),
+    matched: looksLikeDownloadRequest(text) || commitMode,
+    mode: commitMode ? 'commit-build' : 'release',
     repoChoice: parseRepoChoice(text),
     versionQuery: parseVersionQuery(text),
-    platformHint: parsePlatformHint(text)
+    platformHint: parsePlatformHint(text),
+    commitHash: parseCommitHash(text),
+    exactCommitBuild: wantsExactCommitBuild(text),
+    folderName: parseFolderNameHint(text)
   };
 }
 
@@ -368,6 +535,21 @@ async function fileExists(targetPath) {
   }
 }
 
+async function resolvePreferredBashPath() {
+  const candidates = [
+    'C:\\Program Files\\Git\\bin\\bash.exe',
+    'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+    'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+    'C:\\Program Files (x86)\\Git\\usr\\bin\\bash.exe'
+  ];
+  for (const candidate of candidates) {
+    if (await fileExists(candidate)) {
+      return candidate;
+    }
+  }
+  return 'bash';
+}
+
 function isSimpleUpstreamVersionQuery(versionQuery) {
   const normalized = normalizeText(versionQuery).toLowerCase().replace(/^v/, '');
   if (!normalized || normalized === 'latest') {
@@ -376,15 +558,126 @@ function isSimpleUpstreamVersionQuery(versionQuery) {
   return /^\d{2,3}(?:\.\d+){0,2}$/.test(normalized);
 }
 
+function releaseSortValue(release) {
+  return String(release?.published_at ?? release?.created_at ?? '');
+}
+
+function pickLatestRelease(releases) {
+  const normalized = [...(Array.isArray(releases) ? releases : [])]
+    .filter((item) => item?.draft !== true)
+    .sort((left, right) => releaseSortValue(right).localeCompare(releaseSortValue(left)));
+  const latestPreRelease = normalized.find((item) => item?.prerelease === true);
+  return latestPreRelease ?? normalized[0] ?? null;
+}
+
+function scoreAssetForPlatform(assetName, platformHint) {
+  const normalized = normalizeText(assetName).toLowerCase();
+  if (!normalized || !platformHint) {
+    return 0;
+  }
+
+  let score = 0;
+  switch (platformHint) {
+    case 'pc':
+      if (/desktop/i.test(normalized)) {
+        score += 300;
+      }
+      if (/\.jar$/i.test(normalized)) {
+        score += 90;
+      }
+      if (/\.(exe|zip)$/i.test(normalized)) {
+        score += 70;
+      }
+      if (/loader/i.test(normalized)) {
+        score -= 220;
+      }
+      if (/server/i.test(normalized)) {
+        score -= 260;
+      }
+      if (/\.apk$/i.test(normalized) || /android/i.test(normalized)) {
+        score -= 320;
+      }
+      break;
+    case 'android':
+      if (/\.apk$/i.test(normalized)) {
+        score += 320;
+      }
+      if (/android/i.test(normalized)) {
+        score += 120;
+      }
+      if (/\.jar$/i.test(normalized)) {
+        score -= 220;
+      }
+      if (/server/i.test(normalized) || /loader/i.test(normalized)) {
+        score -= 260;
+      }
+      break;
+    case 'server':
+      if (/(^|[-_.])server/i.test(normalized)) {
+        score += 320;
+      }
+      if (/\.jar$/i.test(normalized)) {
+        score += 100;
+      }
+      if (/desktop/i.test(normalized) || /loader/i.test(normalized)) {
+        score -= 260;
+      }
+      if (/\.apk$/i.test(normalized) || /android/i.test(normalized)) {
+        score -= 320;
+      }
+      break;
+    default:
+      break;
+  }
+
+  return score;
+}
+
+function isGithubHttpsUrl(url) {
+  return /^https?:\/\/github\.com\//i.test(normalizeText(url));
+}
+
+function buildGitMirrorRewritePrefix(base) {
+  const normalizedBase = normalizeText(base).replace(/\/+$/g, '');
+  if (!normalizedBase) {
+    return '';
+  }
+  return `${normalizedBase}/https://github.com/`;
+}
+
+function buildGitMirrorConfigArgs(base) {
+  const rewritePrefix = buildGitMirrorRewritePrefix(base);
+  if (!rewritePrefix) {
+    return [];
+  }
+  return ['-c', `url.${rewritePrefix}.insteadOf=https://github.com/`];
+}
+
+function buildGitMirrorProbeUrl(base, sourceUrl) {
+  const normalizedBase = normalizeText(base).replace(/\/+$/g, '');
+  const normalizedSourceUrl = normalizeText(sourceUrl).replace(/\/+$/g, '');
+  if (!normalizedBase || !normalizedSourceUrl) {
+    return '';
+  }
+  return `${normalizedBase}/${normalizedSourceUrl}/info/refs?service=git-upload-pack`;
+}
+
 export class GroupFileDownloadManager {
   constructor(config, runtimeConfigStore, napcatClient, logger, options = {}) {
     this.githubConfig = config?.github ?? {};
     this.runtimeConfigStore = runtimeConfigStore;
     this.napcatClient = napcatClient;
     this.logger = logger;
+    this.chatClient = options.chatClient ?? null;
     this.downloadRoot = path.resolve(options.downloadRoot ?? path.join(process.cwd(), 'data', 'release-downloads'));
+    this.vanillaRepoRoot = path.resolve(options.vanillaRepoRoot ?? path.join(process.cwd(), '..', 'codex', 'Mindustry-master'));
+    this.xRepoRoot = path.resolve(options.xRepoRoot ?? path.join(process.cwd(), '..', 'MindustryX'));
     this.sessions = new Map();
     this.githubResolvedToken = null;
+    this.mirrorCache = null;
+    this.mirrorCacheFile = path.join(this.downloadRoot, '_meta', 'preferred-mirror.json');
+    this.groupFolderCache = null;
+    this.groupFolderCacheFile = path.join(this.downloadRoot, '_meta', 'group-folder-cache.json');
   }
 
   isGroupEnabled(groupId) {
@@ -426,15 +719,18 @@ export class GroupFileDownloadManager {
       startedAt: Date.now(),
       expiresAt: Date.now() + SESSION_TTL_MS,
       requestText: normalizeText(text),
+      mode: intent.mode,
       repoChoice: intent.repoChoice,
       versionQuery: intent.versionQuery,
-      platformHint: intent.platformHint,
-      folderName: this.runtimeConfigStore?.getQaGroupFileDownloadFolderName(groupId) || '',
+      platformHint: await this.#resolvePlatformHint(text),
+      commitHash: intent.commitHash,
+      exactCommitBuild: intent.exactCommitBuild === true,
+      folderName: intent.folderName || this.runtimeConfigStore?.getQaGroupFileDownloadFolderName(groupId) || '',
       state: ''
     };
 
     this.logger.info(
-      `群文件下载请求：group=${groupId} user=${userId} repoHint=${session.repoChoice || '(ask)'} version=${session.versionQuery || '(ask)'} platform=${session.platformHint || '-'}`
+      `群文件下载请求：group=${groupId} user=${userId} mode=${session.mode} repoHint=${session.repoChoice || '(ask)'} version=${session.versionQuery || '(ask)'} commit=${session.commitHash || '(ask)'} platform=${session.platformHint || '-'}`
     );
 
     try {
@@ -478,9 +774,27 @@ export class GroupFileDownloadManager {
       ?? event?.raw_message
       ?? ''
     );
+    const requestedMode = normalizeText(request?.mode ?? request?.download_mode ?? '').toLowerCase();
     const repoChoice = normalizeRepoChoiceInput(request?.repo_choice ?? request?.repo ?? '') || parseRepoChoice(rawText);
     const versionQuery = normalizeVersionQueryInput(request?.version_query ?? request?.version ?? '') || parseVersionQuery(rawText);
-    const platformHint = normalizePlatformHintInput(request?.platform_hint ?? request?.platform ?? '') || parsePlatformHint(rawText);
+    const explicitPlatformHint = normalizePlatformHintInput(request?.platform_hint ?? request?.platform ?? '');
+    const platformHint = explicitPlatformHint || await this.#resolvePlatformHint(rawText);
+    const commitHash = normalizeText(
+      request?.commit_hash
+      ?? request?.commit
+      ?? request?.sha
+      ?? request?.hash
+      ?? ''
+    ).toLowerCase() || parseCommitHash(rawText);
+    const inferredIntent = parseInitialIntent(rawText);
+    const mode = requestedMode === 'commit-build' || requestedMode === 'commit'
+      ? 'commit-build'
+      : commitHash
+        ? 'commit-build'
+        : inferredIntent.mode;
+    const exactCommitBuild = request?.exact_commit_build === true
+      || request?.exactCommitBuild === true
+      || wantsExactCommitBuild(rawText);
     const sessionKey = `${groupId}:${userId}`;
     const session = {
       key: sessionKey,
@@ -489,17 +803,21 @@ export class GroupFileDownloadManager {
       startedAt: Date.now(),
       expiresAt: Date.now() + SESSION_TTL_MS,
       requestText: rawText || [repoChoice, versionQuery, platformHint].filter(Boolean).join(' '),
+      mode,
       repoChoice,
       versionQuery,
       platformHint,
+      commitHash,
+      exactCommitBuild,
       folderName: normalizeText(request?.folder_name ?? request?.folderName ?? '')
+        || parseFolderNameHint(rawText)
         || this.runtimeConfigStore?.getQaGroupFileDownloadFolderName(groupId)
         || '',
       state: ''
     };
 
     this.logger.info(
-      `群文件下载工具触发：group=${groupId} user=${userId} repoHint=${session.repoChoice || '(ask)'} version=${session.versionQuery || '(ask)'} platform=${session.platformHint || '-'}`
+      `群文件下载工具触发：group=${groupId} user=${userId} mode=${session.mode} repoHint=${session.repoChoice || '(ask)'} version=${session.versionQuery || '(ask)'} commit=${session.commitHash || '(ask)'} platform=${session.platformHint || '-'}`
     );
 
     try {
@@ -552,6 +870,7 @@ export class GroupFileDownloadManager {
 
   async #handleSessionReply(session, context, event, text) {
     session.expiresAt = Date.now() + SESSION_TTL_MS;
+    await this.#mergeSessionHintsFromText(session, text);
     switch (session.state) {
       case 'awaiting_repo_choice': {
         const repoChoice = parseRepoChoice(text);
@@ -568,6 +887,49 @@ export class GroupFileDownloadManager {
         }
         session.versionQuery = versionQuery;
         return await this.#resolveReleaseAndContinue(session, context, event);
+      }
+      case 'awaiting_commit_choice': {
+        if (isCancelSelectionText(text)) {
+          this.sessions.delete(session.key);
+          await this.#reply(context, event, '已退出这次 commit 构建查询。');
+          return true;
+        }
+        const directHash = parseCommitHash(text);
+        if (directHash) {
+          session.commitHash = directHash;
+          return await this.#resolveCommitBuildAndSend(session, context, event);
+        }
+        const choices = parseNumberSelection(text, Array.isArray(session.commitCandidates) ? session.commitCandidates.length : 0);
+        if (choices.length !== 1) {
+          return true;
+        }
+        const commit = session.commitCandidates[choices[0] - 1];
+        if (!commit?.sha) {
+          return true;
+        }
+        session.commitHash = commit.sha;
+        return await this.#resolveCommitBuildAndSend(session, context, event);
+      }
+      case 'awaiting_commit_release_choice': {
+        if (isCancelSelectionText(text)) {
+          this.sessions.delete(session.key);
+          await this.#reply(context, event, '已退出这次 commit 构建查询。');
+          return true;
+        }
+        if (wantsExactCommitBuild(text)) {
+          session.exactCommitBuild = true;
+          return await this.#resolveCommitBuildAndSend(session, context, event);
+        }
+        const choices = parseNumberSelection(text, Array.isArray(session.releaseCandidates) ? session.releaseCandidates.length : 0);
+        if (choices.length !== 1) {
+          return true;
+        }
+        const release = session.releaseCandidates[choices[0] - 1];
+        if (!release) {
+          return true;
+        }
+        session.release = release;
+        return await this.#presentAssets(session, context, event);
       }
       case 'awaiting_latest_confirm': {
         const confirm = parseLatestConfirmation(text);
@@ -626,6 +988,13 @@ export class GroupFileDownloadManager {
   }
 
   async #continueAfterRepoResolved(session, context, event) {
+    if (session.mode === 'commit-build') {
+      if (!session.commitHash) {
+        return await this.#presentCommitChoices(session, context, event);
+      }
+      return await this.#resolveCommitBuildAndSend(session, context, event);
+    }
+
     if (!session.versionQuery) {
       session.state = 'awaiting_version_query';
       this.sessions.set(session.key, session);
@@ -633,6 +1002,70 @@ export class GroupFileDownloadManager {
       return true;
     }
     return await this.#resolveReleaseAndContinue(session, context, event);
+  }
+
+  async #mergeSessionHintsFromText(session, text) {
+    if (!session || !text) {
+      return;
+    }
+    if (!session.repoChoice) {
+      session.repoChoice = parseRepoChoice(text) || session.repoChoice;
+    }
+    if (!session.platformHint) {
+      session.platformHint = await this.#resolvePlatformHint(text) || session.platformHint;
+    }
+    if (session.mode === 'commit-build' && !session.commitHash) {
+      session.commitHash = parseCommitHash(text) || session.commitHash;
+    }
+    if (session.mode === 'commit-build' && wantsExactCommitBuild(text)) {
+      session.exactCommitBuild = true;
+    }
+    if (session.mode !== 'commit-build' && !session.versionQuery) {
+      session.versionQuery = parseVersionQuery(text) || session.versionQuery;
+    }
+  }
+
+  async #resolvePlatformHint(text) {
+    const regexHint = parsePlatformHint(text);
+    const normalizedText = normalizeText(text);
+    if (!normalizedText) {
+      return regexHint;
+    }
+    if (!this.chatClient?.complete) {
+      return regexHint;
+    }
+    try {
+      const raw = await this.chatClient.complete([
+        {
+          role: 'system',
+          content: [
+            '你负责判断一段中文资源请求更偏向哪个平台。',
+            '只输出 JSON：{"platform":"pc|android|server|unknown","reason":"简短原因"}。',
+            '规则：',
+            '1. 电脑版、电脑、PC、桌面版、desktop、Windows、jar、exe、zip -> pc',
+            '2. 安卓、Android、手机、APK、移动端 -> android',
+            '3. 服务端、服务器、server -> server',
+            '4. 如果文本没有明确平台，就输出 unknown。'
+          ].join('\n')
+        },
+        {
+          role: 'user',
+          content: normalizedText
+        }
+      ], {
+        model: PLATFORM_CLASSIFY_MODEL,
+        temperature: 0.1
+      });
+      const match = String(raw ?? '').match(/\{[\s\S]*\}/);
+      const parsed = JSON.parse(match?.[0] ?? '{}');
+      const platform = normalizePlatformHintInput(parsed?.platform ?? '');
+      if (platform) {
+        return platform;
+      }
+    } catch (error) {
+      this.logger.warn(`平台识别模型判定失败，回退正则：${error.message}`);
+    }
+    return regexHint;
   }
 
   async #resolveReleaseAndContinue(session, context, event) {
@@ -646,7 +1079,7 @@ export class GroupFileDownloadManager {
     }
 
     if (session.versionQuery === 'latest') {
-      session.release = releases[0];
+      session.release = pickLatestRelease(releases);
       this.logger.info(`群文件下载匹配到最新 release：repo=${repo.fullName} tag=${normalizeText(session.release?.tag_name) || '(none)'}`);
       return await this.#presentAssets(session, context, event);
     }
@@ -691,12 +1124,91 @@ export class GroupFileDownloadManager {
     return await this.#presentAssets(session, context, event);
   }
 
+  async #presentCommitChoices(session, context, event) {
+    const repo = createRepoInfo(session.repoChoice);
+    session.repo = repo;
+    const commits = await this.#listCommits(repo, 100);
+    if (commits.length === 0) {
+      this.sessions.delete(session.key);
+      await this.#reply(context, event, `${repo.displayName} 这边暂时没读到最近 commit。`);
+      return true;
+    }
+
+    session.commitCandidates = commits;
+    session.state = 'awaiting_commit_choice';
+    this.sessions.set(session.key, session);
+    const lines = commits.map((commit, index) => {
+      const shaShort = String(commit.sha ?? '').slice(0, 7);
+      const title = normalizeText(commit.title) || '(无标题)';
+      return `${index + 1}. ${shaShort} ${title}`;
+    });
+    await this.#reply(context, event, [
+      `这是 ${repo.displayName} 最近 100 个 commit：`,
+      ...lines,
+      '0. Cancel',
+      '回序号，或直接回 commit hash。'
+    ].join('\n'));
+    return true;
+  }
+
+  async #resolveCommitBuildAndSend(session, context, event) {
+    const repo = createRepoInfo(session.repoChoice);
+    session.repo = repo;
+    const commitHash = normalizeText(session.commitHash).toLowerCase();
+    if (!commitHash) {
+      return await this.#presentCommitChoices(session, context, event);
+    }
+
+    const platformHint = session.platformHint || 'pc';
+    const artifactLabel = platformHint === 'server' ? 'server jar' : platformHint === 'android' ? 'apk' : 'desktop jar';
+
+    let artifact = null;
+    try {
+      if (repo.choice === 'x') {
+        const exactArtifact = await this.#resolveExactXCommitArtifact(session, platformHint);
+        if (!exactArtifact) {
+          if (session.exactCommitBuild === true) {
+            await this.#reply(context, event, `开始本地精确编译 ${commitHash.slice(0, 7)} 的 ${artifactLabel}。`);
+            artifact = await this.#buildExactXCommitArtifact(session, platformHint);
+          } else {
+            return await this.#presentXCommitReleaseChoices(session, context, event);
+          }
+        } else {
+          artifact = exactArtifact;
+        }
+      } else {
+        artifact = await this.#buildVanillaCommitArtifact(session, platformHint);
+      }
+      const targetFolderName = await this.#getSessionTargetFolderName(session);
+      await this.napcatClient.sendLocalFileToGroup({
+        groupId: context.groupId,
+        filePath: artifact.filePath,
+        fileName: artifact.fileName,
+        folderName: targetFolderName
+      });
+      this.sessions.delete(session.key);
+      return true;
+    } finally {
+      if (artifact?.cleanup) {
+        await artifact.cleanup().catch((error) => {
+          this.logger.warn(`清理 commit 构建临时文件失败：${error.message}`);
+        });
+      }
+    }
+  }
+
   async #presentAssets(session, context, event) {
     const release = session.release;
     const assets = getDownloadAssets(release);
     if (assets.length === 0) {
       this.sessions.delete(session.key);
       await this.#reply(context, event, `找到了 ${normalizeText(release?.tag_name) || '(无 tag)'}，但这个 release 没有可发的文件资产。`);
+      return true;
+    }
+
+    const matchedAssets = this.#matchAssetsByPlatform(assets, session.platformHint);
+    if (matchedAssets.length > 0) {
+      await this.#downloadAndSendAssets(session, context, event, matchedAssets);
       return true;
     }
 
@@ -718,6 +1230,7 @@ export class GroupFileDownloadManager {
     const repo = session.repo;
     const total = assets.length;
     await this.#reply(context, event, total > 1 ? `开始下载并发送这 ${total} 个文件。` : '开始下载并发送文件。');
+    const targetFolderName = await this.#getSessionTargetFolderName(session);
 
     for (const asset of assets) {
       this.logger.info(`群文件下载开始：group=${context.groupId} asset=${asset.name} tag=${releaseTag}`);
@@ -726,7 +1239,7 @@ export class GroupFileDownloadManager {
         groupId: context.groupId,
         filePath: downloaded.filePath,
         fileName: downloaded.fileName,
-        folderName: normalizeText(session.folderName)
+        folderName: targetFolderName
       });
       this.logger.info(`群文件下载完成：group=${context.groupId} file=${downloaded.fileName} tag=${releaseTag}`);
     }
@@ -757,9 +1270,32 @@ export class GroupFileDownloadManager {
     if (!sourceUrl) {
       throw new Error(`资产 ${fileName} 缺少下载地址`);
     }
-    const candidates = await this.#buildDownloadCandidates(sourceUrl);
     let lastError = null;
     let timeoutCount = 0;
+
+    const preferredMirror = await this.#getPreferredMirrorBase();
+    if (preferredMirror) {
+      this.logger.info(`优先尝试最近成功镜像：${preferredMirror}`);
+      const preferredBatch = [{
+        label: `preferred:${preferredMirror}`,
+        url: `${preferredMirror.replace(/\/+$/g, '')}/${sourceUrl}`,
+        useAuth: false
+      }];
+      const preferredResult = await this.#downloadCandidateBatch(preferredBatch, filePath);
+      if (preferredResult.success) {
+        await this.#rememberPreferredMirrorBase(preferredMirror);
+        return { filePath, fileName };
+      }
+      if (preferredResult.lastError) {
+        lastError = preferredResult.lastError;
+      }
+      timeoutCount += preferredResult.timeoutCount;
+      if (timeoutCount >= DOWNLOAD_TIMEOUT_ABORT_LIMIT) {
+        throw new Error(`The operation was aborted due to timeout（累计 ${timeoutCount} 次）`);
+      }
+    }
+
+    const candidates = await this.#buildDownloadCandidates(sourceUrl, preferredMirror);
     for (let startIndex = 0; startIndex < candidates.length; startIndex += MAX_CONCURRENT_DOWNLOADS) {
       const batch = candidates.slice(startIndex, startIndex + MAX_CONCURRENT_DOWNLOADS);
       if (batch.length === 0) {
@@ -768,6 +1304,10 @@ export class GroupFileDownloadManager {
       this.logger.info(`开始并发下载批次：${batch.map((item) => item.label).join(', ')}`);
       const batchResult = await this.#downloadCandidateBatch(batch, filePath);
       if (batchResult.success) {
+        if (batchResult.winnerLabel?.startsWith('mirror:')) {
+          const mirrorBase = batchResult.winnerLabel.slice('mirror:'.length);
+          await this.#rememberPreferredMirrorBase(mirrorBase);
+        }
         return { filePath, fileName };
       }
       timeoutCount += batchResult.timeoutCount;
@@ -800,6 +1340,641 @@ export class GroupFileDownloadManager {
     return releases;
   }
 
+  async #listCommits(repo, maxCommits = 100) {
+    const commits = [];
+    for (let page = 1; commits.length < maxCommits; page += 1) {
+      const remaining = maxCommits - commits.length;
+      const perPage = Math.min(COMMITS_PER_PAGE, remaining);
+      const payload = await this.#githubApiGet(`/repos/${repo.owner}/${repo.repo}/commits`, {
+        per_page: perPage,
+        page
+      });
+      const current = Array.isArray(payload) ? payload : [];
+      if (current.length === 0) {
+        break;
+      }
+      commits.push(...current.map((commit) => {
+        const message = String(commit?.commit?.message ?? '').replace(/\r\n/g, '\n').trim();
+        const [title, ...rest] = message.split('\n');
+        return {
+          sha: normalizeText(commit?.sha),
+          title: normalizeText(title),
+          body: normalizeText(rest.join('\n')),
+          htmlUrl: normalizeText(commit?.html_url),
+          date: normalizeText(commit?.commit?.author?.date)
+        };
+      }));
+      if (current.length < perPage) {
+        break;
+      }
+    }
+    return commits.slice(0, maxCommits);
+  }
+
+  #matchAssetsByPlatform(assets, platformHint) {
+    const normalizedPlatform = normalizeText(platformHint);
+    if (!normalizedPlatform) {
+      return [];
+    }
+    const scored = (Array.isArray(assets) ? assets : [])
+      .map((asset) => ({ asset, score: scoreAssetForPlatform(asset?.name, normalizedPlatform) }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || normalizeText(left.asset?.name).localeCompare(normalizeText(right.asset?.name), 'zh-CN'));
+    if (scored.length === 0) {
+      return [];
+    }
+    return [scored[0].asset];
+  }
+
+  async #resolveExactXCommitArtifact(session, platformHint) {
+    const repo = session.repo;
+    const commitHash = normalizeText(session.commitHash).toLowerCase();
+    const releases = await this.#listReleases(repo);
+    const matchedRelease = releases
+      .filter((release) => {
+        const target = normalizeText(release?.target_commitish).toLowerCase();
+        return target && (target.startsWith(commitHash) || commitHash.startsWith(target));
+      })
+      .sort((left, right) => releaseSortValue(right).localeCompare(releaseSortValue(left)))[0] ?? null;
+
+    if (!matchedRelease) {
+      return null;
+    }
+
+    const assets = getDownloadAssets(matchedRelease);
+    const selected = this.#matchAssetsByPlatform(assets, platformHint || 'pc');
+    if (selected.length === 0) {
+      throw new Error(`commit ${commitHash.slice(0, 7)} 的 pre-release 没有匹配 ${platformHint || 'pc'} 的文件`);
+    }
+
+    const artifact = await this.#downloadAsset(repo, normalizeText(matchedRelease.tag_name) || commitHash.slice(0, 7), selected[0]);
+    return {
+      ...artifact,
+      cleanup: null
+    };
+  }
+
+  async #presentXCommitReleaseChoices(session, context, event) {
+    const candidates = await this.#findXCommitReleaseCandidates(session.commitHash, 6);
+    if (candidates.length === 0) {
+      throw new Error(`X端这边没找到 commit ${normalizeText(session.commitHash).slice(0, 7)} 对应或后续包含它的 Actions pre-release`);
+    }
+
+    session.releaseCandidates = candidates.map((item) => item.release);
+    session.state = 'awaiting_commit_release_choice';
+    this.sessions.set(session.key, session);
+    const lines = candidates.map((item, index) => {
+      const tag = normalizeText(item.release?.tag_name) || '(无 tag)';
+      const distance = Number(item.aheadBy ?? 0);
+      return `${index + 1}. ${tag} | 后续 ${distance} 提交`;
+    });
+    await this.#reply(context, event, [
+      `这个 commit 没有精确预编译，我找到后续最近的几个 X端预编译：`,
+      ...lines,
+      '0. Cancel',
+      '回序号选择；回“精确编译”则本地编译该 commit。'
+    ].join('\n'));
+    return true;
+  }
+
+  async #findXCommitReleaseCandidates(commitHash, maxCandidates = 6) {
+    const repo = createRepoInfo('x');
+    const releases = (await this.#listReleases(repo))
+      .filter((release) => release?.prerelease === true || release?.draft !== true)
+      .slice(0, 16);
+    const normalizedCommit = normalizeText(commitHash).toLowerCase();
+    const repoRoot = this.xRepoRoot;
+    if (!(await fileExists(path.join(repoRoot, '.git')))) {
+      throw new Error(`X端源码仓库不存在：${repoRoot}`);
+    }
+
+    const refMap = await this.#resolveGitRefsWithSingleFetch(repoRoot, [
+      normalizedCommit,
+      ...releases.map((release) => normalizeText(release?.target_commitish)).filter(Boolean)
+    ]);
+    const resolvedCommit = refMap.get(normalizedCommit);
+    if (!resolvedCommit) {
+      throw new Error(`本地 X端仓库里找不到 commit ${normalizedCommit.slice(0, 7)}`);
+    }
+
+    const candidates = [];
+
+    for (const release of releases) {
+      const target = normalizeText(release?.target_commitish).toLowerCase();
+      const resolvedTarget = refMap.get(target);
+      if (!resolvedTarget) {
+        continue;
+      }
+      try {
+        const isAncestor = await this.#isGitAncestor(repoRoot, resolvedCommit, resolvedTarget);
+        if (!isAncestor) {
+          continue;
+        }
+        const aheadBy = await this.#countGitRevisionDistance(repoRoot, resolvedCommit, resolvedTarget);
+        candidates.push({
+          release,
+          aheadBy
+        });
+      } catch (error) {
+        this.logger.warn(`比较 X端 commit 与 release 失败：commit=${normalizedCommit.slice(0, 7)} target=${resolvedTarget.slice(0, 7)} error=${error.message}`);
+      }
+    }
+
+    return candidates
+      .sort((left, right) => left.aheadBy - right.aheadBy || releaseSortValue(right.release).localeCompare(releaseSortValue(left.release)))
+      .slice(0, maxCandidates);
+  }
+
+  async #buildVanillaCommitArtifact(session, platformHint) {
+    const normalizedPlatform = platformHint || 'pc';
+    if (normalizedPlatform === 'android') {
+      throw new Error('原版 commit 构建目前只支持 pc 或 server');
+    }
+
+    const repoRoot = this.vanillaRepoRoot;
+    if (!(await fileExists(path.join(repoRoot, 'gradlew.bat')))) {
+      throw new Error(`原版源码仓库不存在：${repoRoot}`);
+    }
+
+    const fullCommit = await this.#resolveGitCommit(repoRoot, session.commitHash);
+    const tempParent = path.join(this.downloadRoot, '_tmp-builds');
+    const worktreeDir = path.join(tempParent, `mindustry-${fullCommit.slice(0, 12)}-${Date.now()}`);
+    await ensureDir(tempParent);
+    this.logger.info(`原版 commit 编译准备 worktree：commit=${fullCommit.slice(0, 7)} path=${worktreeDir}`);
+
+    await execFileAsync('git', ['-C', repoRoot, 'worktree', 'add', '--detach', worktreeDir, fullCommit], {
+      windowsHide: true,
+      timeout: 120000,
+      maxBuffer: 8 * 1024 * 1024
+    });
+
+    let artifactPath = '';
+    let artifactName = '';
+    const cleanup = async () => {
+      await execFileAsync('git', ['-C', repoRoot, 'worktree', 'remove', worktreeDir, '--force'], {
+        windowsHide: true,
+        timeout: 120000,
+        maxBuffer: 8 * 1024 * 1024
+      }).catch(() => {});
+      await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => {});
+    };
+
+    try {
+      const taskArgs = normalizedPlatform === 'server'
+        ? [':server:dist']
+        : [':desktop:dist', '-x', 'test'];
+      this.logger.info(`原版 commit 开始构建：commit=${fullCommit.slice(0, 7)} platform=${normalizedPlatform} task=${taskArgs.join(' ')}`);
+      await this.#runLoggedCommand(
+        path.join(worktreeDir, 'gradlew.bat'),
+        taskArgs,
+        {
+          cwd: worktreeDir,
+          timeout: BUILD_TIMEOUT_MS,
+          label: `vanilla-build:${fullCommit.slice(0, 7)}`
+        }
+      );
+
+      artifactPath = normalizedPlatform === 'server'
+        ? path.join(worktreeDir, 'server', 'build', 'libs', 'server-release.jar')
+        : path.join(worktreeDir, 'desktop', 'build', 'libs', 'Mindustry.jar');
+      const exists = await fileExists(artifactPath);
+      if (!exists) {
+        throw new Error(`构建成功但没找到产物：${artifactPath}`);
+      }
+      artifactName = normalizedPlatform === 'server'
+        ? `Mindustry-server-${fullCommit.slice(0, 7)}.jar`
+        : `Mindustry-desktop-${fullCommit.slice(0, 7)}.jar`;
+      this.logger.info(`原版 commit 构建完成：commit=${fullCommit.slice(0, 7)} artifact=${artifactPath}`);
+      return {
+        filePath: artifactPath,
+        fileName: artifactName,
+        cleanup
+      };
+    } catch (error) {
+      await cleanup();
+      throw error;
+    }
+  }
+
+  async #buildExactXCommitArtifact(session, platformHint) {
+    const normalizedPlatform = platformHint || 'pc';
+    if (normalizedPlatform === 'android') {
+      throw new Error('X端本地精确编译暂不支持安卓包');
+    }
+
+    const repoRoot = this.xRepoRoot;
+    if (!(await fileExists(path.join(repoRoot, 'scripts', 'applyPatches.sh')))) {
+      throw new Error(`X端源码仓库不存在：${repoRoot}`);
+    }
+
+    const fullCommit = await this.#resolveGitCommit(repoRoot, session.commitHash);
+    const tempParent = path.join(this.downloadRoot, '_tmp-builds');
+    const worktreeDir = path.join(tempParent, `mindustryx-${fullCommit.slice(0, 12)}-${Date.now()}`);
+    await ensureDir(tempParent);
+    this.logger.info(`X端精确编译准备 worktree：commit=${fullCommit.slice(0, 7)} path=${worktreeDir}`);
+
+    await execFileAsync('git', ['-C', repoRoot, 'worktree', 'add', '--detach', worktreeDir, fullCommit], {
+      windowsHide: true,
+      timeout: 120000,
+      maxBuffer: 8 * 1024 * 1024
+    });
+
+    const cleanup = async () => {
+      await execFileAsync('git', ['-C', repoRoot, 'worktree', 'remove', worktreeDir, '--force'], {
+        windowsHide: true,
+        timeout: 120000,
+        maxBuffer: 8 * 1024 * 1024
+      }).catch(() => {});
+      await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => {});
+    };
+
+    try {
+      let usedLocalSubmodules = false;
+      try {
+        const localSubmoduleResult = await this.#prepareExactXLocalSubmodules(worktreeDir);
+        if (localSubmoduleResult.prepared === true) {
+          usedLocalSubmodules = true;
+          this.logger.info(`X端精确编译已复用本地子模块：commit=${fullCommit.slice(0, 7)} ${localSubmoduleResult.items.map((item) => `${item.path}@${item.commit.slice(0, 7)}`).join(' ')}`);
+        } else {
+          this.logger.info(`X端精确编译无法复用本地子模块，回退网络初始化：commit=${fullCommit.slice(0, 7)} reason=${localSubmoduleResult.reason || 'unknown'}`);
+        }
+      } catch (error) {
+        this.logger.warn(`X端精确编译复用本地子模块失败，回退网络初始化：commit=${fullCommit.slice(0, 7)} error=${error.message}`);
+      }
+
+      if (!usedLocalSubmodules) {
+        this.logger.info(`X端精确编译开始同步子模块配置：commit=${fullCommit.slice(0, 7)}`);
+        await this.#runLoggedCommand('git', ['-C', worktreeDir, 'submodule', 'sync', '--recursive'], {
+          timeout: 10 * 60 * 1000,
+          label: `mindustryx-submodule-sync:${fullCommit.slice(0, 7)}`
+        });
+        this.logger.info(`X端精确编译开始初始化子模块：commit=${fullCommit.slice(0, 7)}`);
+        await this.#runGitCommandWithMirrorFallback(
+          ['-C', worktreeDir, 'submodule', 'update', '--init', '--recursive', '--jobs', '4'],
+          {
+            sourceUrlHint: 'https://github.com/Anuken/Arc',
+            timeout: 30 * 60 * 1000,
+            maxBuffer: 8 * 1024 * 1024,
+            label: `mindustryx-submodule-update:${fullCommit.slice(0, 7)}`,
+            mirrorLimit: MAX_CONCURRENT_DOWNLOADS
+          }
+        );
+      }
+      this.logger.info(`X端精确编译开始应用补丁：commit=${fullCommit.slice(0, 7)}`);
+      const bashPath = await resolvePreferredBashPath();
+      this.logger.info(`X端精确编译补丁脚本 shell：${bashPath}`);
+      await this.#runLoggedCommand(bashPath, ['./scripts/applyPatches.sh'], {
+        cwd: worktreeDir,
+        timeout: 20 * 60 * 1000,
+        label: `mindustryx-patch:${fullCommit.slice(0, 7)}`
+      });
+
+      const taskArgs = normalizedPlatform === 'server'
+        ? [':server:dist']
+        : [':desktop:dist', '-x', 'test'];
+      this.logger.info(`X端精确编译开始构建：commit=${fullCommit.slice(0, 7)} platform=${normalizedPlatform} task=${taskArgs.join(' ')}`);
+      await this.#runLoggedCommand(path.join(worktreeDir, 'work', 'gradlew.bat'), taskArgs, {
+        cwd: path.join(worktreeDir, 'work'),
+        timeout: BUILD_TIMEOUT_MS,
+        label: `mindustryx-build:${fullCommit.slice(0, 7)}`
+      });
+
+      const artifactPath = normalizedPlatform === 'server'
+        ? path.join(worktreeDir, 'work', 'server', 'build', 'libs', 'server-release.jar')
+        : path.join(worktreeDir, 'work', 'desktop', 'build', 'libs', 'Mindustry.jar');
+      if (!(await fileExists(artifactPath))) {
+        throw new Error(`X端精确编译成功但没找到产物：${artifactPath}`);
+      }
+
+      const artifactName = normalizedPlatform === 'server'
+        ? `MindustryX-server-${fullCommit.slice(0, 7)}.jar`
+        : `MindustryX-desktop-${fullCommit.slice(0, 7)}.jar`;
+      this.logger.info(`X端精确编译完成：commit=${fullCommit.slice(0, 7)} artifact=${artifactPath}`);
+      return {
+        filePath: artifactPath,
+        fileName: artifactName,
+        cleanup
+      };
+    } catch (error) {
+      await cleanup();
+      throw error;
+    }
+  }
+
+  async #prepareExactXLocalSubmodules(worktreeDir) {
+    const submodules = [
+      { path: 'Arc', sourcePath: path.join(this.xRepoRoot, 'Arc') },
+      { path: 'work', sourcePath: path.join(this.xRepoRoot, 'work') }
+    ];
+    const preparedItems = [];
+
+    for (const submodule of submodules) {
+      const commit = await this.#readGitTreeEntryCommit(worktreeDir, 'HEAD', submodule.path);
+      if (!commit) {
+        return {
+          prepared: false,
+          reason: `未找到子模块 gitlink：${submodule.path}`
+        };
+      }
+      if (!(await fileExists(path.join(submodule.sourcePath, '.git')))) {
+        return {
+          prepared: false,
+          reason: `本地子模块不存在：${submodule.path}`
+        };
+      }
+      if (!(await this.#tryResolveGitCommit(submodule.sourcePath, commit))) {
+        return {
+          prepared: false,
+          reason: `本地子模块缺少目标 commit：${submodule.path}@${commit.slice(0, 7)}`
+        };
+      }
+
+      const targetPath = path.join(worktreeDir, submodule.path);
+      await fs.rm(targetPath, { recursive: true, force: true }).catch(() => {});
+      await this.#runLoggedCommand('git', ['clone', '--no-checkout', submodule.sourcePath, targetPath], {
+        timeout: 10 * 60 * 1000,
+        label: `mindustryx-local-submodule-clone:${submodule.path}:${commit.slice(0, 7)}`
+      });
+      await this.#runLoggedCommand('git', ['-C', targetPath, 'checkout', '--force', commit], {
+        timeout: 10 * 60 * 1000,
+        label: `mindustryx-local-submodule-checkout:${submodule.path}:${commit.slice(0, 7)}`
+      });
+      preparedItems.push({
+        path: submodule.path,
+        commit
+      });
+    }
+
+    return {
+      prepared: true,
+      items: preparedItems
+    };
+  }
+
+  async #readGitTreeEntryCommit(repoRoot, ref, entryPath) {
+    try {
+      const result = await execFileAsync('git', ['-C', repoRoot, 'ls-tree', ref, entryPath], {
+        windowsHide: true,
+        timeout: 20000,
+        maxBuffer: 1024 * 1024
+      });
+      const line = String(result?.stdout ?? '')
+        .split(/\r?\n/g)
+        .map((item) => normalizeText(item))
+        .find(Boolean);
+      const match = line?.match(/^160000 commit ([0-9a-f]{40})\t/);
+      return String(match?.[1] ?? '').toLowerCase();
+    } catch {
+      return '';
+    }
+  }
+
+  async #resolveGitCommit(repoRoot, commitHash) {
+    const normalized = normalizeText(commitHash).toLowerCase();
+    if (!normalized) {
+      throw new Error('commit hash 不能为空');
+    }
+
+    const tryResolve = async () => this.#tryResolveGitCommit(repoRoot, normalized);
+
+    try {
+      const resolved = await tryResolve();
+      if (resolved) {
+        return resolved;
+      }
+      throw new Error('unresolved');
+    } catch {
+      await this.#fetchGitRepo(repoRoot);
+      const resolved = await tryResolve();
+      if (resolved) {
+        return resolved;
+      }
+      throw new Error(`找不到 commit ${normalized.slice(0, 7)}`);
+    }
+  }
+
+  async #resolveGitRefsWithSingleFetch(repoRoot, refs) {
+    const uniqueRefs = Array.from(new Set(
+      (Array.isArray(refs) ? refs : [])
+        .map((item) => normalizeText(item).toLowerCase())
+        .filter(Boolean)
+    ));
+    const resolved = new Map();
+    const unresolved = [];
+
+    for (const ref of uniqueRefs) {
+      const fullHash = await this.#tryResolveGitCommit(repoRoot, ref);
+      if (fullHash) {
+        resolved.set(ref, fullHash);
+      } else {
+        unresolved.push(ref);
+      }
+    }
+
+    if (unresolved.length === 0) {
+      return resolved;
+    }
+
+    await this.#fetchGitRepo(repoRoot);
+
+    for (const ref of unresolved) {
+      const fullHash = await this.#tryResolveGitCommit(repoRoot, ref);
+      if (fullHash) {
+        resolved.set(ref, fullHash);
+      }
+    }
+
+    return resolved;
+  }
+
+  async #tryResolveGitCommit(repoRoot, commitish) {
+    const normalized = normalizeText(commitish).toLowerCase();
+    if (!normalized) {
+      return '';
+    }
+    try {
+      const result = await execFileAsync('git', ['-C', repoRoot, 'rev-parse', '--verify', `${normalized}^{commit}`], {
+        windowsHide: true,
+        timeout: 20000,
+        maxBuffer: 4 * 1024 * 1024
+      });
+      return normalizeText(result?.stdout);
+    } catch {
+      return '';
+    }
+  }
+
+  async #runLoggedCommand(command, args = [], options = {}) {
+    const label = normalizeText(options?.label) || path.basename(String(command ?? 'command'));
+    const cwd = normalizeText(options?.cwd);
+    const timeout = clampInteger(options?.timeout, 120000, 1000, BUILD_TIMEOUT_MS);
+    const maxLineLength = clampInteger(options?.maxLineLength, 500, 80, 4000);
+    this.logger.info(`[${label}] start: ${command} ${(Array.isArray(args) ? args : []).join(' ')}`.trim());
+
+    return await new Promise((resolve, reject) => {
+      const child = spawn(command, Array.isArray(args) ? args : [], {
+        cwd: cwd || undefined,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+      let finished = false;
+      const finish = (handler, value) => {
+        if (finished) {
+          return;
+        }
+        finished = true;
+        clearTimeout(timer);
+        handler(value);
+      };
+
+      const bindStream = (stream, level) => {
+        if (!stream) {
+          return;
+        }
+        const lineReader = readline.createInterface({ input: stream });
+        lineReader.on('line', (line) => {
+          const text = normalizeText(line);
+          if (!text) {
+            return;
+          }
+          this.logger[level](`[${label}] ${text.slice(0, maxLineLength)}`);
+        });
+      };
+
+      bindStream(child.stdout, 'info');
+      bindStream(child.stderr, 'warn');
+
+      child.on('error', (error) => {
+        finish(reject, error);
+      });
+
+      child.on('close', (code, signal) => {
+        if (code === 0) {
+          this.logger.info(`[${label}] done`);
+          finish(resolve, { code, signal });
+          return;
+        }
+        finish(reject, new Error(`[${label}] 退出失败：code=${code ?? 'null'} signal=${signal ?? 'null'}`));
+      });
+
+      const timer = setTimeout(() => {
+        child.kill('SIGTERM');
+        finish(reject, new Error(`[${label}] 超时：${timeout}ms`));
+      }, timeout);
+    });
+  }
+
+  async #fetchGitRepo(repoRoot) {
+    const orderedRemotes = await this.#getOrderedGitRemotes(repoRoot);
+    if (orderedRemotes.length === 0) {
+      await execFileAsync('git', ['-C', repoRoot, 'fetch', '--all', '--tags', '--prune'], {
+        windowsHide: true,
+        timeout: 120000,
+        maxBuffer: 8 * 1024 * 1024
+      });
+      return;
+    }
+
+    let lastError = null;
+    for (const remote of orderedRemotes) {
+      try {
+        await this.#runGitCommandWithMirrorFallback(
+          ['-C', repoRoot, 'fetch', remote, '--tags', '--prune'],
+          {
+            sourceUrlHint: await this.#getGitRemoteUrl(repoRoot, remote),
+            timeout: 120000,
+            maxBuffer: 8 * 1024 * 1024,
+            label: `git-fetch:${path.basename(repoRoot)}:${remote}`
+          }
+        );
+        return;
+      } catch (error) {
+        lastError = error;
+        this.logger.warn(`git fetch 远端失败：repo=${repoRoot} remote=${remote} error=${error.message}`);
+      }
+    }
+
+    if (lastError) {
+      throw lastError;
+    }
+  }
+
+  async #getOrderedGitRemotes(repoRoot) {
+    const result = await execFileAsync('git', ['-C', repoRoot, 'remote'], {
+      windowsHide: true,
+      timeout: 10000,
+      maxBuffer: 1024 * 1024
+    }).catch(() => null);
+    const remotes = String(result?.stdout ?? '')
+      .split(/\r?\n/g)
+      .map((item) => normalizeText(item))
+      .filter(Boolean);
+    if (remotes.length === 0) {
+      return [];
+    }
+
+    const preferred = this.#getPreferredGitFetchRemotes(repoRoot);
+    const ordered = [
+      ...preferred.filter((item) => remotes.includes(item)),
+      ...remotes.filter((item) => !preferred.includes(item))
+    ];
+    return Array.from(new Set(ordered));
+  }
+
+  async #getGitRemoteUrl(repoRoot, remote) {
+    const normalizedRemote = normalizeText(remote);
+    if (!normalizedRemote) {
+      return '';
+    }
+    try {
+      const result = await execFileAsync('git', ['-C', repoRoot, 'remote', 'get-url', normalizedRemote], {
+        windowsHide: true,
+        timeout: 10000,
+        maxBuffer: 1024 * 1024
+      });
+      return normalizeText(result?.stdout);
+    } catch {
+      return '';
+    }
+  }
+
+  #getPreferredGitFetchRemotes(repoRoot) {
+    const normalizedRepoRoot = path.resolve(repoRoot);
+    if (normalizedRepoRoot === this.xRepoRoot) {
+      return ['upstream', 'origin'];
+    }
+    if (normalizedRepoRoot === this.vanillaRepoRoot) {
+      return ['origin', 'upstream', 'mindustry-upstream'];
+    }
+    return ['origin', 'upstream'];
+  }
+
+  async #isGitAncestor(repoRoot, ancestorRef, descendantRef) {
+    try {
+      await execFileAsync('git', ['-C', repoRoot, 'merge-base', '--is-ancestor', ancestorRef, descendantRef], {
+        windowsHide: true,
+        timeout: 20000,
+        maxBuffer: 4 * 1024 * 1024
+      });
+      return true;
+    } catch (error) {
+      if (Number(error?.code) === 1) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  async #countGitRevisionDistance(repoRoot, baseRef, targetRef) {
+    const result = await execFileAsync('git', ['-C', repoRoot, 'rev-list', '--count', `${baseRef}..${targetRef}`], {
+      windowsHide: true,
+      timeout: 20000,
+      maxBuffer: 4 * 1024 * 1024
+    });
+    return Math.max(0, Number.parseInt(normalizeText(result?.stdout), 10) || 0);
+  }
+
   async #githubApiGet(apiPath, searchParams = {}) {
     const baseUrl = normalizeText(this.githubConfig?.apiBaseUrl) || GITHUB_API_BASE_URL;
     const parsed = new URL(apiPath, `${baseUrl.replace(/\/+$/g, '')}/`);
@@ -819,16 +1994,33 @@ export class GroupFileDownloadManager {
       headers.Authorization = `Bearer ${token}`;
     }
 
-    const response = await fetch(parsed, {
-      method: 'GET',
-      headers,
-      signal: AbortSignal.timeout(clampInteger(this.githubConfig?.requestTimeoutMs, 15000, 3000, 120000))
-    });
-    if (!response.ok) {
-      const body = normalizeText(await response.text());
-      throw new Error(body ? `GitHub API ${response.status}: ${body}` : `GitHub API ${response.status}`);
+    try {
+      const response = await fetch(parsed, {
+        method: 'GET',
+        headers,
+        signal: AbortSignal.timeout(clampInteger(this.githubConfig?.requestTimeoutMs, 15000, 3000, 120000))
+      });
+      if (!response.ok) {
+        const body = normalizeText(await response.text());
+        throw new Error(body ? `GitHub API ${response.status}: ${body}` : `GitHub API ${response.status}`);
+      }
+      return await response.json();
+    } catch (error) {
+      this.logger.warn(`GitHub fetch 失败，改用 gh api 重试：${error.message}`);
+      return await this.#githubApiGetViaGh(parsed);
     }
-    return await response.json();
+  }
+
+  async #githubApiGetViaGh(url) {
+    const apiBase = normalizeText(this.githubConfig?.apiBaseUrl) || GITHUB_API_BASE_URL;
+    const parsed = new URL(String(url), `${apiBase.replace(/\/+$/g, '')}/`);
+    const pathWithQuery = `${parsed.pathname}${parsed.search}`;
+    const result = await execFileAsync('gh', ['api', pathWithQuery], {
+      windowsHide: true,
+      timeout: clampInteger(this.githubConfig?.requestTimeoutMs, 15000, 3000, 120000),
+      maxBuffer: 8 * 1024 * 1024
+    });
+    return JSON.parse(String(result?.stdout ?? '').trim() || 'null');
   }
 
   async #resolveGithubToken() {
@@ -852,6 +2044,179 @@ export class GroupFileDownloadManager {
     }
   }
 
+  async #loadMirrorCache() {
+    if (this.mirrorCache) {
+      return this.mirrorCache;
+    }
+    try {
+      const raw = JSON.parse(await fs.readFile(this.mirrorCacheFile, 'utf8'));
+      this.mirrorCache = raw && typeof raw === 'object' ? raw : {};
+    } catch {
+      this.mirrorCache = {};
+    }
+    return this.mirrorCache;
+  }
+
+  async #loadGroupFolderCache() {
+    if (this.groupFolderCache) {
+      return this.groupFolderCache;
+    }
+    try {
+      const raw = JSON.parse(await fs.readFile(this.groupFolderCacheFile, 'utf8'));
+      this.groupFolderCache = raw && typeof raw === 'object' ? raw : {};
+    } catch {
+      this.groupFolderCache = {};
+    }
+    return this.groupFolderCache;
+  }
+
+  #buildGroupFolderCacheKey(groupId, repoChoice) {
+    return `${normalizeText(groupId)}:${normalizeText(repoChoice) || 'unknown'}`;
+  }
+
+  async #getCachedGroupFolderName(groupId, repoChoice) {
+    const cache = await this.#loadGroupFolderCache();
+    return normalizeText(cache?.[this.#buildGroupFolderCacheKey(groupId, repoChoice)]?.folderName);
+  }
+
+  async #rememberGroupFolderName(groupId, repoChoice, folderName) {
+    const normalizedFolderName = normalizeText(folderName);
+    if (!normalizedFolderName) {
+      return;
+    }
+    const cache = await this.#loadGroupFolderCache();
+    cache[this.#buildGroupFolderCacheKey(groupId, repoChoice)] = {
+      folderName: normalizedFolderName,
+      updatedAt: new Date().toISOString()
+    };
+    this.groupFolderCache = cache;
+    await ensureDir(path.dirname(this.groupFolderCacheFile));
+    await fs.writeFile(this.groupFolderCacheFile, JSON.stringify(cache, null, 2), 'utf8');
+  }
+
+  #pickExistingMindustryFolder(folders, repoChoice) {
+    const normalizedFolders = (Array.isArray(folders) ? folders : [])
+      .map((folder) => ({
+        folderName: normalizeText(folder?.folder_name ?? folder?.name),
+        lowered: normalizeText(folder?.folder_name ?? folder?.name).toLowerCase()
+      }))
+      .filter((folder) => folder.folderName);
+
+    if (repoChoice === 'x') {
+      const exact = normalizedFolders.find((folder) => folder.lowered === 'mindustryx');
+      if (exact) {
+        return exact.folderName;
+      }
+      const fuzzy = normalizedFolders.find((folder) => folder.lowered.includes('mindustryx'));
+      return fuzzy?.folderName ?? '';
+    }
+
+    const exact = normalizedFolders.find((folder) => folder.lowered === 'mindustry');
+    if (exact) {
+      return exact.folderName;
+    }
+    const fuzzy = normalizedFolders.find((folder) => folder.lowered.includes('mindustry') && !folder.lowered.includes('mindustryx'));
+    return fuzzy?.folderName ?? '';
+  }
+
+  async #getSessionTargetFolderName(session) {
+    const resolved = normalizeText(session?.resolvedFolderName);
+    if (resolved) {
+      return resolved;
+    }
+
+    const explicit = normalizeText(session?.folderName);
+    if (explicit) {
+      session.resolvedFolderName = explicit;
+      return explicit;
+    }
+
+    const groupId = normalizeText(session?.groupId);
+    const repoChoice = normalizeText(session?.repo?.choice ?? session?.repoChoice);
+    if (!groupId) {
+      session.resolvedFolderName = '';
+      return '';
+    }
+
+    const cached = await this.#getCachedGroupFolderName(groupId, repoChoice);
+    if (cached) {
+      session.resolvedFolderName = cached;
+      this.logger.info(`群文件下载使用缓存目录：group=${groupId} repo=${repoChoice || '-'} folder=${cached}`);
+      return cached;
+    }
+
+    try {
+      const root = await this.napcatClient.call('get_group_root_files', {
+        group_id: groupId,
+        file_count: 500
+      });
+      const matched = this.#pickExistingMindustryFolder(root?.folders, repoChoice);
+      if (matched) {
+        await this.#rememberGroupFolderName(groupId, repoChoice, matched);
+        session.resolvedFolderName = matched;
+        this.logger.info(`群文件下载自动匹配目录：group=${groupId} repo=${repoChoice || '-'} folder=${matched}`);
+        return matched;
+      }
+    } catch (error) {
+      this.logger.warn(`扫描群文件根目录失败，回退根目录上传：group=${groupId} error=${error.message}`);
+    }
+
+    session.resolvedFolderName = '';
+    return '';
+  }
+
+  async #getPreferredMirrorBase() {
+    const cache = await this.#loadMirrorCache();
+    const entry = cache?.githubReleaseMirror;
+    const base = normalizeText(entry?.base);
+    const expiresAt = Number(entry?.expiresAt ?? 0);
+    if (!base || !expiresAt || expiresAt <= Date.now()) {
+      return '';
+    }
+    return base;
+  }
+
+  async #rememberPreferredMirrorBase(base) {
+    const normalizedBase = normalizeText(base);
+    if (!normalizedBase) {
+      return;
+    }
+    const cache = await this.#loadMirrorCache();
+    cache.githubReleaseMirror = {
+      base: normalizedBase,
+      expiresAt: Date.now() + PREFERRED_MIRROR_TTL_MS
+    };
+    this.mirrorCache = cache;
+    await ensureDir(path.dirname(this.mirrorCacheFile));
+    await fs.writeFile(this.mirrorCacheFile, JSON.stringify(cache, null, 2), 'utf8');
+  }
+
+  async #getPreferredGitMirrorBase() {
+    const cache = await this.#loadMirrorCache();
+    const entry = cache?.githubGitMirror;
+    const base = normalizeText(entry?.base);
+    const expiresAt = Number(entry?.expiresAt ?? 0);
+    if (!base || !expiresAt || expiresAt <= Date.now()) {
+      return '';
+    }
+    return base;
+  }
+
+  async #rememberPreferredGitMirrorBase(base) {
+    const normalizedBase = normalizeText(base);
+    if (!normalizedBase) {
+      return;
+    }
+    const cache = await this.#loadMirrorCache();
+    cache.githubGitMirror = {
+      base: normalizedBase,
+      expiresAt: Date.now() + PREFERRED_MIRROR_TTL_MS
+    };
+    this.mirrorCache = cache;
+    await ensureDir(path.dirname(this.mirrorCacheFile));
+    await fs.writeFile(this.mirrorCacheFile, JSON.stringify(cache, null, 2), 'utf8');
+  }
+
   async #reply(context, event, text) {
     await this.napcatClient.replyText(context, event?.message_id, text);
   }
@@ -867,15 +2232,18 @@ export class GroupFileDownloadManager {
     return true;
   }
 
-  async #buildDownloadCandidates(sourceUrl) {
+  async #buildDownloadCandidates(sourceUrl, excludedMirror = '') {
     const rankedMirrors = await this.#probeMirrorLatencies(sourceUrl);
     this.logger.info(`GitHub 镜像前五：${rankedMirrors.slice(0, MAX_CONCURRENT_DOWNLOADS).map((item) => `${item.base}(${item.latencyMs}ms)`).join(' | ') || '(none)'}`);
     return [
-      ...rankedMirrors.map((item) => ({
+      ...rankedMirrors
+        .filter((item) => item.base !== excludedMirror)
+        .slice(0, MAX_CONCURRENT_DOWNLOADS)
+        .map((item) => ({
         label: `mirror:${item.base}`,
         url: `${item.base.replace(/\/+$/g, '')}/${sourceUrl}`,
         useAuth: false
-      })),
+        })),
       {
         label: 'source:github',
         url: sourceUrl,
@@ -897,6 +2265,127 @@ export class GroupFileDownloadManager {
     const summary = results.map((item) => `${item.base}=${item.ok ? `${item.latencyMs}ms` : `error:${item.error}`}`).join(' | ');
     this.logger.info(`GitHub 镜像测速：${summary}`);
     return successful;
+  }
+
+  async #buildRankedGitMirrorBases(sourceUrl, limit = MAX_CONCURRENT_DOWNLOADS) {
+    if (!isGithubHttpsUrl(sourceUrl)) {
+      return [];
+    }
+    const preferredGitMirror = await this.#getPreferredGitMirrorBase();
+    const preferredDownloadMirror = await this.#getPreferredMirrorBase();
+    const rankedMirrors = await this.#probeGitMirrorLatencies(sourceUrl);
+    const orderedBases = [
+      ...[preferredGitMirror, preferredDownloadMirror].filter(Boolean),
+      ...rankedMirrors.map((item) => item.base)
+    ];
+    return Array.from(new Set(orderedBases))
+      .slice(0, clampInteger(limit, MAX_CONCURRENT_DOWNLOADS, 1, 10));
+  }
+
+  async #probeGitMirrorLatencies(sourceUrl) {
+    const results = await Promise.all(
+      GITHUB_DOWNLOAD_MIRRORS.map(async (base) => ({
+        base,
+        ...(await this.#probeSingleGitMirror(base, sourceUrl))
+      }))
+    );
+    const successful = results
+      .filter((item) => item.ok)
+      .sort((left, right) => left.latencyMs - right.latencyMs);
+    const summary = results
+      .map((item) => `${item.base}=${item.ok ? `${item.latencyMs}ms` : `error:${item.error}`}`)
+      .join(' | ');
+    this.logger.info(`Git 镜像测速：${summary}`);
+    return successful;
+  }
+
+  async #probeSingleGitMirror(base, sourceUrl) {
+    const probeUrl = buildGitMirrorProbeUrl(base, sourceUrl);
+    if (!probeUrl) {
+      return {
+        ok: false,
+        error: 'empty-probe-url'
+      };
+    }
+
+    const startedAt = Date.now();
+    try {
+      const response = await fetch(probeUrl, {
+        method: 'GET',
+        headers: {
+          Accept: '*/*',
+          'User-Agent': 'NapCatCainBot/0.1'
+        },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(8000)
+      });
+      if (response.body && typeof response.body.cancel === 'function') {
+        response.body.cancel().catch(() => {});
+      }
+      if (!response.ok) {
+        return {
+          ok: false,
+          error: `HTTP ${response.status}`
+        };
+      }
+      return {
+        ok: true,
+        latencyMs: Date.now() - startedAt
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error.message
+      };
+    }
+  }
+
+  async #runGitCommandWithMirrorFallback(args = [], options = {}) {
+    const sourceUrl = normalizeText(options?.sourceUrlHint);
+    const timeout = clampInteger(options?.timeout, 120000, 1000, BUILD_TIMEOUT_MS);
+    const maxBuffer = clampInteger(options?.maxBuffer, 8 * 1024 * 1024, 1024 * 1024, 64 * 1024 * 1024);
+    const label = normalizeText(options?.label) || 'git-command';
+    const mirrorLimit = clampInteger(options?.mirrorLimit, MAX_CONCURRENT_DOWNLOADS, 1, 10);
+    const commandArgs = Array.isArray(args) ? args : [];
+
+    const runOnce = async (prefixArgs, routeLabel, mirrorBase = '') => {
+      this.logger.info(`[${label}] start via ${routeLabel}: git ${[...prefixArgs, ...commandArgs].join(' ')}`.trim());
+      await execFileAsync('git', [...prefixArgs, ...commandArgs], {
+        windowsHide: true,
+        timeout,
+        maxBuffer
+      });
+      this.logger.info(`[${label}] done via ${routeLabel}`);
+      if (mirrorBase) {
+        await this.#rememberPreferredGitMirrorBase(mirrorBase);
+      }
+    };
+
+    if (!isGithubHttpsUrl(sourceUrl)) {
+      await runOnce([], 'source');
+      return;
+    }
+
+    const mirrorBases = await this.#buildRankedGitMirrorBases(sourceUrl, mirrorLimit);
+    let lastMirrorError = null;
+    for (const mirrorBase of mirrorBases) {
+      try {
+        await runOnce(buildGitMirrorConfigArgs(mirrorBase), `mirror:${mirrorBase}`, mirrorBase);
+        return;
+      } catch (error) {
+        lastMirrorError = error;
+        this.logger.warn(`[${label}] git 镜像失败：base=${mirrorBase} error=${error.message}`);
+      }
+    }
+
+    try {
+      await runOnce([], 'source');
+    } catch (error) {
+      if (lastMirrorError) {
+        this.logger.warn(`[${label}] 全部镜像失败后原链也失败：mirrorError=${lastMirrorError.message} sourceError=${error.message}`);
+      }
+      throw error;
+    }
   }
 
   async #probeSingleMirror(base, sourceUrl) {
@@ -958,7 +2447,8 @@ export class GroupFileDownloadManager {
       return {
         success: true,
         timeoutCount: 0,
-        lastError: null
+        lastError: null,
+        winnerLabel: candidates[winner.index]?.label ?? ''
       };
     } catch (aggregateError) {
       const settled = await Promise.allSettled(tasks);
@@ -985,7 +2475,8 @@ export class GroupFileDownloadManager {
       return {
         success: false,
         timeoutCount,
-        lastError: lastError ?? aggregateError
+        lastError: lastError ?? aggregateError,
+        winnerLabel: ''
       };
     }
   }

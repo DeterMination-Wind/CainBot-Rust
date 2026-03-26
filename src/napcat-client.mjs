@@ -12,6 +12,50 @@ function isMissingReplyTargetError(error) {
     || message.toLowerCase().includes('msg not found');
 }
 
+function isReplySendRejectedError(error) {
+  const message = String(error?.message ?? '');
+  if (!message) {
+    return false;
+  }
+  return /send_group_msg/i.test(message)
+    && (/EventChecker Failed/i.test(message)
+      || /NTEvent/i.test(message)
+      || /result"\s*:\s*120/i.test(message)
+      || /result\s*[:=]\s*120/i.test(message));
+}
+
+function flattenMessageText(message) {
+  if (typeof message === 'string') {
+    return message;
+  }
+  if (Array.isArray(message)) {
+    return message
+      .map((segment) => {
+        if (typeof segment === 'string') {
+          return segment;
+        }
+        if (segment?.type === 'text') {
+          return String(segment?.data?.text ?? '');
+        }
+        return '';
+      })
+      .join('')
+      .trim();
+  }
+  if (message && typeof message === 'object' && message.type === 'text') {
+    return String(message?.data?.text ?? '').trim();
+  }
+  return '';
+}
+
+function sanitizeOutgoingText(text) {
+  return String(text ?? '')
+    .replace(/\u0000/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 export class NapCatClient {
   constructor(config, logger) {
     this.config = config;
@@ -122,20 +166,36 @@ export class NapCatClient {
     });
   }
 
-  async setGroupAddRequest(flag, approve = true, reason = '', count = 100) {
+  async setGroupAddRequest(flag, approve = true, reason = '', count = 100, subType = '') {
     return await this.call('set_group_add_request', {
       flag: String(flag),
       approve,
       reason,
-      count
+      count,
+      ...(String(subType ?? '').trim() ? { sub_type: String(subType).trim() } : {})
     });
   }
 
   async sendGroupMessage(groupId, message) {
-    return await this.call('send_group_msg', {
-      group_id: String(groupId),
-      message
-    });
+    try {
+      return await this.call('send_group_msg', {
+        group_id: String(groupId),
+        message
+      });
+    } catch (error) {
+      if (!isReplySendRejectedError(error)) {
+        throw error;
+      }
+      const flattenedText = sanitizeOutgoingText(flattenMessageText(message));
+      if (!flattenedText) {
+        throw error;
+      }
+      this.logger.warn(`群消息发送被拒，回退为纯文本重试：${error.message}`);
+      return await this.call('send_group_msg', {
+        group_id: String(groupId),
+        message: flattenedText
+      });
+    }
   }
 
   async sendPrivateMessage(userId, message) {
@@ -308,8 +368,8 @@ export class NapCatClient {
       try {
         results.push(await this.sendContextMessage(context, message));
       } catch (error) {
-        if (useReply && isMissingReplyTargetError(error)) {
-          this.logger.warn(`引用消息不存在，回退为普通消息发送：${error.message}`);
+        if (useReply && (isMissingReplyTargetError(error) || isReplySendRejectedError(error))) {
+          this.logger.warn(`引用回复发送失败，回退为普通消息发送：${error.message}`);
           results.push(await this.sendContextMessage(context, part));
           continue;
         }

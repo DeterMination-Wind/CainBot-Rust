@@ -38,11 +38,13 @@ const projectRoot = path.resolve(srcDir, '..');
 const GROUP_CARD_SYNC_RETRY_MS = 10 * 60 * 1000;
 const SHUTDOWN_VOTE_REQUIRED_COUNT = 3;
 const SHUTDOWN_VOTE_TTL_MS = 10 * 60 * 1000;
-const SHUTDOWN_VOTE_FILTER_MODEL = 'gpt-5.4-mini';
+const SHUTDOWN_VOTE_FILTER_MODEL = 'gpt-5-codex-mini';
+const LOW_INFORMATION_REPLY_FILTER_MODEL = 'gpt-5-codex-mini';
 const SHUTDOWN_VOTE_PROMPT = '确定要关闭此bot的功能吗，大于两个人回复本消息"Y"将确认此操作';
 const OWNER_LOG_MAX_CHARS = 1500;
+const GROUP_INVITE_POLL_INTERVAL_MS = 60 * 1000;
 
-const E_SUBCOMMANDS = new Set(['过滤', '聊天', '状态', '启用', '禁用', '文件下载']);
+const E_SUBCOMMANDS = new Set(['过滤', '聊天', '状态', '启用', '禁用', '文件下载', '过滤心跳']);
 let fatalLogger = null;
 
 function trimOwnerLogText(text, maxChars = OWNER_LOG_MAX_CHARS) {
@@ -154,8 +156,116 @@ function describeModelFramework(baseUrl) {
   }
 }
 
-function formatChatReplyForSend(config, text) {
-  return String(text ?? '').trim();
+function extractBalancedJsonObject(text) {
+  const source = String(text ?? '').trim();
+  let depth = 0;
+  let startIndex = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === '{') {
+      if (depth === 0) {
+        startIndex = index;
+      }
+      depth += 1;
+      continue;
+    }
+    if (char === '}') {
+      if (depth === 0) {
+        continue;
+      }
+      depth -= 1;
+      if (depth === 0 && startIndex >= 0) {
+        return source.slice(startIndex, index + 1);
+      }
+    }
+  }
+
+  return '';
+}
+
+function parseLowInformationDecision(raw) {
+  try {
+    const parsed = JSON.parse(extractBalancedJsonObject(raw));
+    return {
+      allow: parsed?.allow !== false,
+      fallback: String(parsed?.fallback ?? '').trim(),
+      reason: String(parsed?.reason ?? '').trim()
+    };
+  } catch {
+    return {
+      allow: true,
+      fallback: '',
+      reason: 'parse-failed'
+    };
+  }
+}
+
+async function maybeFilterLowInformationReply(qaClient, logger, sourceText, replyText, options = {}) {
+  const normalizedReply = String(replyText ?? '').trim();
+  if (!normalizedReply) {
+    return '';
+  }
+  const normalizedSource = String(sourceText ?? '').trim();
+  if (!normalizedSource) {
+    return normalizedReply;
+  }
+
+  try {
+    const raw = await qaClient.complete([
+      {
+        role: 'system',
+        content: [
+          '你是聊天回复质检器，只判断这条回复该不该发出去。',
+          '如果回复只是把用户问题换词重复、空泛复述、没有新增信息、没有具体定位、没有实际帮助，就判定 allow=false。',
+          '如果回复给出了具体做法、具体定位、明确结论、有效下一步，判定 allow=true。',
+          '当用户在问“怎么改/怎么做/在哪里/哪个字段”时，像“改对应字段”“看对应对象”“去改相关配置”这类话都算低信息空话。',
+          '只输出 JSON：{"allow":boolean,"fallback":"可选的替代短句","reason":"简短原因"}',
+          'fallback 只在 allow=false 且需要替代短句时填写，否则留空。'
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: [
+          `用户原话：${normalizedSource}`,
+          `拟发送回复：${normalizedReply}`,
+          `低信息时的处理模式：${options.onLowInformation === 'fallback' ? 'fallback' : 'suppress'}`
+        ].join('\n')
+      }
+    ], {
+      model: LOW_INFORMATION_REPLY_FILTER_MODEL,
+      temperature: 0.1
+    });
+
+    const decision = parseLowInformationDecision(raw);
+    if (decision.allow) {
+      return normalizedReply;
+    }
+    logger.info(`已拦截低信息回复：${decision.reason || 'no-reason'} | source=${normalizedSource.slice(0, 80)} | reply=${normalizedReply.slice(0, 80)}`);
+    if (options.onLowInformation === 'fallback') {
+      return decision.fallback || '还没定位到具体改法。';
+    }
+    return '';
+  } catch (error) {
+    logger.warn(`低信息回复判定失败，回退为原回复：${error.message}`);
+    return normalizedReply;
+  }
 }
 
 function createContextFromEvent(event) {
@@ -256,6 +366,8 @@ function buildHelpText(config) {
     '/e 聊天 <要求>',
     '/e 启用',
     '/e 禁用',
+    '/e 过滤心跳 启用 [N]',
+    '/e 过滤心跳 关闭',
     '/e 文件下载 启用 [群文件夹名]',
     '/e 文件下载 关闭',
     '',
@@ -263,6 +375,7 @@ function buildHelpText(config) {
     '- 只有指定群会启用普通群消息的“问题过滤 + 提示”流程。',
     '- /e 的过滤和聊天 prompt 仅当前群的群主、管理员或 bot 主人可修改。',
     '- /e 启用 与 /e 禁用 仅 bot 主人可用。',
+    '- /e 过滤心跳 启用 [N] 与 /e 过滤心跳 关闭 仅当前群群主、管理员或 bot 主人可用；启用后每 N 条候选消息才会触发一次 AI 过滤。',
     '- /e 文件下载 启用 [群文件夹名] 与 /e 文件下载 关闭 仅当前群群主、管理员或 bot 主人可用。'
   ];
   return lines.join('\n');
@@ -342,8 +455,21 @@ async function sendLongReply(napcatClient, context, messageId, text) {
   return await napcatClient.replyText(context, messageId, text);
 }
 
-async function sendChatResultIfPresent(config, napcatClient, context, messageId, result) {
-  const replyText = formatChatReplyForSend(config, result?.text);
+function compactErrorReplyText(error) {
+  const source = String(error?.message ?? error ?? '').trim();
+  if (!source) {
+    return '处理失败，请稍后重试。';
+  }
+  const compact = source
+    .replace(/\s+/g, ' ')
+    .replace(/EventChecker Failed:.*$/i, '消息发送失败')
+    .trim()
+    .slice(0, 220);
+  return compact ? `处理失败：${compact}` : '处理失败，请稍后重试。';
+}
+
+async function sendChatResultIfPresent(config, qaClient, logger, napcatClient, context, messageId, result, options = {}) {
+  const replyText = await maybeFilterLowInformationReply(qaClient, logger, options?.sourceText, result?.text, options);
   if (!replyText) {
     return;
   }
@@ -371,6 +497,22 @@ function extractMessageIdsFromSendResults(results) {
   };
   normalizedResults.forEach(visit);
   return Array.from(new Set(ids));
+}
+
+function normalizeInvitedRequests(payload) {
+  const candidates = [
+    ...(Array.isArray(payload?.invited_requests) ? payload.invited_requests : []),
+    ...(Array.isArray(payload?.InvitedRequest) ? payload.InvitedRequest : [])
+  ];
+  const deduped = new Map();
+  for (const item of candidates) {
+    const requestId = String(item?.request_id ?? item?.flag ?? '').trim();
+    if (!requestId || deduped.has(requestId)) {
+      continue;
+    }
+    deduped.set(requestId, item);
+  }
+  return Array.from(deduped.values());
 }
 
 async function extractOpenAiImagesFromMessage(message) {
@@ -598,6 +740,7 @@ function formatGroupStatus(status) {
   return [
     `当前群启用状态：${status.enabled ? '已启用' : '未启用'}`,
     `当前主动回复状态：${status.proactiveReplyEnabled ? '已启用' : '已关闭'}`,
+    `当前过滤心跳：${status.filterHeartbeatEnabled ? `已启用（每 ${status.filterHeartbeatInterval} 条候选消息审核一次）` : '已关闭'}`,
     `当前文件下载状态：${status.fileDownloadEnabled ? '已启用' : '已关闭'}`,
     `当前文件下载群文件夹：${status.fileDownloadFolderName || '(根目录)'}`,
     '',
@@ -692,7 +835,10 @@ function textContainsShutdownVoteApproval(text) {
   return /(^|[^A-Za-z0-9])y([^A-Za-z0-9]|$)/i.test(normalized);
 }
 
-function shouldReplyErrorToChat(error) {
+function shouldReplyErrorToChat(config, error) {
+  if (config?.bot?.replyErrorsToChat !== true) {
+    return false;
+  }
   if (!error) {
     return true;
   }
@@ -740,7 +886,10 @@ async function handleCommand(params) {
         getTrackedMsavSections(msavMapAnalyzer, event)
       );
       const result = await chatSessionManager.chat(context, chatInput);
-      await sendChatResultIfPresent(config, napcatClient, context, event.message_id, result);
+      await sendChatResultIfPresent(config, qaClient, logger, napcatClient, context, event.message_id, result, {
+        sourceText: command.argument || plainTextFromMessage(event?.message, event?.raw_message),
+        onLowInformation: 'fallback'
+      });
       return true;
     }
     case 'translate': {
@@ -755,7 +904,7 @@ async function handleCommand(params) {
     case 'edit': {
       const subcommand = String(command.positionals?.[0] ?? '').trim();
       if (!E_SUBCOMMANDS.has(subcommand)) {
-        throw new Error('用法：/e 状态 | /e 过滤 <要求> | /e 聊天 <要求> | /e 启用 | /e 禁用 | /e 文件下载 启用 [群文件夹名]|关闭');
+        throw new Error('用法：/e 状态 | /e 过滤 <要求> | /e 聊天 <要求> | /e 启用 | /e 禁用 | /e 过滤心跳 启用 [N]|关闭 | /e 文件下载 启用 [群文件夹名]|关闭');
       }
       const groupId = requireGroupId(command, context);
       const role = await getUserGroupRole(napcatClient, event, context, config.bot.ownerUserId);
@@ -815,6 +964,39 @@ async function handleCommand(params) {
         return true;
       }
 
+      if (subcommand === '过滤心跳') {
+        if (!(isOwner || role === 'owner' || role === 'admin')) {
+          throw new Error('只有该群群主、管理员或 bot 主人可以修改过滤心跳开关。');
+        }
+        const action = String(command.positionals?.[1] ?? '').trim();
+        if (action !== '启用' && action !== '关闭') {
+          throw new Error('用法：/e 过滤心跳 启用 [N]|关闭');
+        }
+        const rawInterval = String(command.positionals?.[2] ?? '').trim();
+        const interval = rawInterval ? Number(rawInterval) : 10;
+        if (action === '启用' && (!Number.isFinite(interval) || interval < 1 || interval > 1000)) {
+          throw new Error('过滤心跳间隔必须是 1 到 1000 之间的整数。');
+        }
+        const result = await params.runtimeConfigStore.setQaGroupFilterHeartbeat(
+          groupId,
+          action === '启用',
+          interval,
+          config.qa.enabledGroupIds
+        );
+        chatSessionManager.resetGroupFilterHeartbeat(groupId);
+        const status = chatSessionManager.getGroupPromptStatus(groupId);
+        await sendLongReply(
+          napcatClient,
+          context,
+          event.message_id,
+          [
+            result.action === 'created' ? '已创建过滤心跳记录。' : '已更新过滤心跳记录。',
+            formatGroupStatus(status)
+          ].join('\n\n')
+        );
+        return true;
+      }
+
       if (!(isOwner || role === 'owner' || role === 'admin')) {
         throw new Error('只有该群群主、管理员或 bot 主人可以修改 prompt。');
       }
@@ -858,7 +1040,9 @@ async function main() {
 
   await ensureConfigExists(configPath);
   const { config, configDir } = await loadConfig(configPath);
-  const logger = new Logger(config.bot.logLevel);
+  const logger = new Logger(config.bot.logLevel, {
+    logDir: config.bot.logDir
+  });
   fatalLogger = logger;
   if (caSetupResult.enabled) {
     logger.info(`已启用系统证书库，合并 CA ${caSetupResult.mergedCount} 条（bundled=${caSetupResult.bundledCount}, system=${caSetupResult.systemCount}）。`);
@@ -929,7 +1113,8 @@ async function main() {
     napcatClient,
     logger,
     {
-      downloadRoot: path.join(projectRoot, 'data', 'release-downloads')
+      downloadRoot: path.join(projectRoot, 'data', 'release-downloads'),
+      chatClient: qaClient
     }
   );
   const msavMapAnalyzer = new MsavMapAnalyzer({
@@ -1353,7 +1538,10 @@ async function main() {
   const handleRequestEvent = async (event) => {
     const requestType = String(event?.request_type ?? '').trim();
     const subType = String(event?.sub_type ?? '').trim();
-    if (requestType !== 'group' || subType !== 'invite') {
+    if (requestType !== 'group') {
+      return;
+    }
+    if (subType && subType !== 'invite') {
       return;
     }
     const flag = String(event?.flag ?? '').trim();
@@ -1361,13 +1549,32 @@ async function main() {
       logger.warn(`收到群邀请请求但缺少 flag：${JSON.stringify(event)}`);
       return;
     }
-    await napcatClient.setGroupAddRequest(flag, true, '');
+    await napcatClient.setGroupAddRequest(flag, true, '', 100, subType || 'invite');
     logger.info(
       `已自动同意群邀请：group=${String(event?.group_id ?? '').trim() || '-'} inviter=${String(event?.user_id ?? '').trim() || '-'}`
     );
   };
 
+  const pollPendingGroupInvites = async () => {
+    const systemMessages = await napcatClient.getGroupSystemMessages(100);
+    const invitedRequests = normalizeInvitedRequests(systemMessages);
+    for (const invite of invitedRequests) {
+      if (invite?.checked === true) {
+        continue;
+      }
+      const requestId = String(invite?.request_id ?? invite?.flag ?? '').trim();
+      if (!requestId) {
+        continue;
+      }
+      await napcatClient.setGroupAddRequest(requestId, true, '', 100, 'invite');
+      logger.info(
+        `已通过系统消息轮询自动同意群邀请：group=${String(invite?.group_id ?? '').trim() || '-'} inviter=${String(invite?.invitor_uin ?? invite?.actor ?? '').trim() || '-'} request=${requestId}`
+      );
+    }
+  };
+
   let shuttingDown = false;
+  let groupInvitePollTimer = null;
   const shutdown = async (signal = 'shutdown') => {
     if (shuttingDown) {
       return;
@@ -1375,6 +1582,10 @@ async function main() {
     shuttingDown = true;
     logger.info(`收到 ${signal}，准备停止 Cain Bot。`);
     napcatClient.stop();
+    if (groupInvitePollTimer) {
+      clearInterval(groupInvitePollTimer);
+      groupInvitePollTimer = null;
+    }
     for (const item of idleTimers.values()) {
       clearTimeout(item?.timer);
     }
@@ -1382,12 +1593,23 @@ async function main() {
     await Promise.allSettled([
       codexBridgeServer.stop()
     ]);
+    await logger.flush();
   };
 
   process.once('SIGINT', () => { void shutdown('SIGINT'); });
   process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
 
   logger.info('Cain Bot 启动中。');
+  try {
+    await pollPendingGroupInvites();
+  } catch (error) {
+    logger.warn(`启动时检查待处理群邀请失败：${error.message}`);
+  }
+  groupInvitePollTimer = setInterval(() => {
+    void pollPendingGroupInvites().catch((error) => {
+      logger.warn(`轮询待处理群邀请失败：${error.message}`);
+    });
+  }, GROUP_INVITE_POLL_INTERVAL_MS);
   await napcatClient.startEventLoop(async (event) => {
     if (!event) {
       return;
@@ -1465,7 +1687,10 @@ async function main() {
           getTrackedMsavSections(msavMapAnalyzer, event)
         );
         const result = await chatSessionManager.chat(context, chatInput);
-        await sendChatResultIfPresent(config, napcatClient, context, event.message_id, result);
+        await sendChatResultIfPresent(config, qaClient, logger, napcatClient, context, event.message_id, result, {
+          sourceText: text,
+          onLowInformation: 'fallback'
+        });
         return;
       }
 
@@ -1483,6 +1708,10 @@ async function main() {
         if (eventMentionsOtherUser(event, config.bot.displayName)) {
           return;
         }
+        const heartbeatDecision = chatSessionManager.shouldRunGroupProactiveFilter(context.groupId);
+        if (!heartbeatDecision.allowed) {
+          return;
+        }
         const filterResult = await chatSessionManager.shouldSuggestReply(context, event);
         if (filterResult.shouldPrompt) {
           const chatInput = appendExtraSectionsToChatInput(
@@ -1495,19 +1724,22 @@ async function main() {
             getTrackedMsavSections(msavMapAnalyzer, event)
           );
           const result = await chatSessionManager.chat(context, chatInput);
-          await sendChatResultIfPresent(config, napcatClient, context, event.message_id, result);
+          await sendChatResultIfPresent(config, qaClient, logger, napcatClient, context, event.message_id, result, {
+            sourceText: text,
+            onLowInformation: 'suppress'
+          });
           await chatSessionManager.markHinted(context, event.message_id);
           return;
         }
       }
     } catch (error) {
       logger.error(`事件处理失败：${error.stack || error.message}`);
-      if (!shouldReplyErrorToChat(error)) {
+      if (!shouldReplyErrorToChat(config, error)) {
         logger.info(`已抑制聊天接口错误的群内提示：${error.message}`);
         return;
       }
       try {
-        await sendLongReply(napcatClient, context, event.message_id, `处理失败：${error.message}`);
+        await sendLongReply(napcatClient, context, event.message_id, compactErrorReplyText(error));
       } catch (replyError) {
         logger.warn(`发送错误提示失败：${replyError.message}`);
       }
@@ -1515,9 +1747,10 @@ async function main() {
   });
 }
 
-await main().catch((error) => {
+await main().catch(async (error) => {
   if (fatalLogger) {
     fatalLogger.error(error?.stack || error?.message || error);
+    await fatalLogger.flush();
   } else {
     console.error(error?.stack || error?.message || error);
   }

@@ -20,7 +20,9 @@
     "groupNickname": "[Bot]Cain",
     "stateFile": "./data/state.json",
     "runtimeConfigFile": "./data/runtime-config.json",
-    "logLevel": "info"
+    "logLevel": "info",
+    "logDir": "./data/logs",
+    "replyErrorsToChat": false
   },
   "codexBridge": {
     "enabled": true,
@@ -39,6 +41,9 @@
     "followupModel": "gpt-5.4-mini",
     "satisfactionModel": "gpt-5.4-mini",
     "publishGroupId": "188709300",
+    "offerGroupIds": [
+      "188709300"
+    ],
     "codexTimeoutMs": 1800000
   },
   "ai": {
@@ -62,6 +67,7 @@
     "retryAttempts": 3,
     "retryDelayMs": 1500,
     "failureCooldownMs": 60000,
+    "failureCooldownThreshold": 2,
     "filter": {
       "model": "gpt-5.4-mini",
       "promptFile": "./prompts/qa-filter-prompt.txt"
@@ -79,6 +85,7 @@
       "maxTimelineMessages": 80,
       "contextWindowMessages": 30,
       "promptFile": "./prompts/chat-system-prompt.txt",
+      "promptImageRoot": "./prompts",
       "codexRoot": "../codex",
       "memoryFile": "./data/cain-longterm-memory.txt",
       "enableCodexReadonlyTools": true,

@@ -3,11 +3,21 @@ import fs from 'node:fs/promises';
 
 import { ensureDir, nowIso } from './utils.mjs';
 
+const DEFAULT_FILTER_HEARTBEAT_INTERVAL = 10;
+
 function normalizePromptText(value) {
   if (typeof value !== 'string') {
     return '';
   }
   return value.replace(/\r\n/g, '\n').trim();
+}
+
+function normalizeFilterHeartbeatInterval(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return DEFAULT_FILTER_HEARTBEAT_INTERVAL;
+  }
+  return Math.min(1000, Math.max(1, Math.trunc(numeric)));
 }
 
 function normalizeQaGroup(entry) {
@@ -16,6 +26,10 @@ function normalizeQaGroup(entry) {
     groupId,
     enabled: entry?.enabled !== false,
     proactiveReplyEnabled: entry?.proactiveReplyEnabled !== false,
+    filterHeartbeatEnabled: entry?.filterHeartbeatEnabled === true,
+    filterHeartbeatInterval: normalizeFilterHeartbeatInterval(
+      entry?.filterHeartbeatInterval ?? entry?.filterHeartbeatEvery ?? DEFAULT_FILTER_HEARTBEAT_INTERVAL
+    ),
     fileDownloadEnabled: entry?.fileDownloadEnabled === true,
     fileDownloadFolderName: String(entry?.fileDownloadFolderName ?? entry?.fileDownloadFolder ?? '').trim(),
     createdAt: String(entry?.createdAt ?? ''),
@@ -36,7 +50,7 @@ function normalizeGroupQaOverride(entry) {
 
 function createDefaultData() {
   return {
-    version: 6,
+    version: 7,
     qaGroups: [],
     groupQaOverrides: []
   };
@@ -133,6 +147,8 @@ export class RuntimeConfigStore {
           groupId: normalizedGroupId,
           enabled: true,
           proactiveReplyEnabled: true,
+          filterHeartbeatEnabled: false,
+          filterHeartbeatInterval: DEFAULT_FILTER_HEARTBEAT_INTERVAL,
           fileDownloadEnabled: false,
           source: 'static'
         });
@@ -147,6 +163,8 @@ export class RuntimeConfigStore {
         groupId: item.groupId,
         enabled: true,
         proactiveReplyEnabled: item.proactiveReplyEnabled !== false,
+        filterHeartbeatEnabled: item.filterHeartbeatEnabled === true,
+        filterHeartbeatInterval: normalizeFilterHeartbeatInterval(item.filterHeartbeatInterval),
         fileDownloadEnabled: item.fileDownloadEnabled === true,
         source: 'runtime',
         createdAt: item.createdAt,
@@ -171,6 +189,10 @@ export class RuntimeConfigStore {
         proactiveReplyEnabled: nextEnabled
           ? (options.proactiveReplyEnabled !== false)
           : (this.data.qaGroups[index]?.proactiveReplyEnabled !== false),
+        filterHeartbeatEnabled: this.data.qaGroups[index]?.filterHeartbeatEnabled === true,
+        filterHeartbeatInterval: normalizeFilterHeartbeatInterval(
+          this.data.qaGroups[index]?.filterHeartbeatInterval
+        ),
         fileDownloadEnabled: this.data.qaGroups[index]?.fileDownloadEnabled === true,
         updatedAt: nowIso()
       };
@@ -184,6 +206,8 @@ export class RuntimeConfigStore {
       proactiveReplyEnabled: nextEnabled
         ? (options.proactiveReplyEnabled !== false)
         : true,
+      filterHeartbeatEnabled: options.filterHeartbeatEnabled === true,
+      filterHeartbeatInterval: normalizeFilterHeartbeatInterval(options.filterHeartbeatInterval),
       fileDownloadEnabled: options.fileDownloadEnabled === true,
       createdAt: nowIso(),
       updatedAt: nowIso()
@@ -206,6 +230,10 @@ export class RuntimeConfigStore {
         groupId: normalizedGroupId,
         enabled: currentEnabled || this.data.qaGroups[index]?.enabled !== false,
         proactiveReplyEnabled: enabled !== false,
+        filterHeartbeatEnabled: this.data.qaGroups[index]?.filterHeartbeatEnabled === true,
+        filterHeartbeatInterval: normalizeFilterHeartbeatInterval(
+          this.data.qaGroups[index]?.filterHeartbeatInterval
+        ),
         fileDownloadEnabled: this.data.qaGroups[index]?.fileDownloadEnabled === true,
         updatedAt: nowIso()
       };
@@ -217,6 +245,8 @@ export class RuntimeConfigStore {
       groupId: normalizedGroupId,
       enabled: currentEnabled,
       proactiveReplyEnabled: enabled !== false,
+      filterHeartbeatEnabled: false,
+      filterHeartbeatInterval: DEFAULT_FILTER_HEARTBEAT_INTERVAL,
       fileDownloadEnabled: false,
       createdAt: nowIso(),
       updatedAt: nowIso()
@@ -233,6 +263,27 @@ export class RuntimeConfigStore {
     }
     const override = this.getQaGroups().find((item) => item.groupId === normalizedGroupId);
     return override?.fileDownloadEnabled === true;
+  }
+
+  isQaGroupFilterHeartbeatEnabled(groupId, staticGroupIds = []) {
+    const normalizedGroupId = String(groupId ?? '').trim();
+    if (!normalizedGroupId) {
+      return false;
+    }
+    if (!this.isQaGroupEnabled(normalizedGroupId, staticGroupIds)) {
+      return false;
+    }
+    const override = this.getQaGroups().find((item) => item.groupId === normalizedGroupId);
+    return override?.filterHeartbeatEnabled === true;
+  }
+
+  getQaGroupFilterHeartbeatInterval(groupId) {
+    const normalizedGroupId = String(groupId ?? '').trim();
+    if (!normalizedGroupId) {
+      return DEFAULT_FILTER_HEARTBEAT_INTERVAL;
+    }
+    const override = this.getQaGroups().find((item) => item.groupId === normalizedGroupId);
+    return normalizeFilterHeartbeatInterval(override?.filterHeartbeatInterval);
   }
 
   getQaGroupFileDownloadFolderName(groupId) {
@@ -258,6 +309,10 @@ export class RuntimeConfigStore {
         groupId: normalizedGroupId,
         enabled: currentEnabled || this.data.qaGroups[index]?.enabled !== false,
         proactiveReplyEnabled: this.data.qaGroups[index]?.proactiveReplyEnabled !== false,
+        filterHeartbeatEnabled: this.data.qaGroups[index]?.filterHeartbeatEnabled === true,
+        filterHeartbeatInterval: normalizeFilterHeartbeatInterval(
+          this.data.qaGroups[index]?.filterHeartbeatInterval
+        ),
         fileDownloadEnabled: enabled === true,
         fileDownloadFolderName: normalizedFolderName || String(this.data.qaGroups[index]?.fileDownloadFolderName ?? '').trim(),
         updatedAt: nowIso()
@@ -270,8 +325,50 @@ export class RuntimeConfigStore {
       groupId: normalizedGroupId,
       enabled: currentEnabled,
       proactiveReplyEnabled: true,
+      filterHeartbeatEnabled: false,
+      filterHeartbeatInterval: DEFAULT_FILTER_HEARTBEAT_INTERVAL,
       fileDownloadEnabled: enabled === true,
       fileDownloadFolderName: normalizedFolderName,
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    };
+    this.data.qaGroups.push(record);
+    await this.save();
+    return { action: 'created', entry: normalizeQaGroup(record) };
+  }
+
+  async setQaGroupFilterHeartbeat(groupId, enabled, interval = DEFAULT_FILTER_HEARTBEAT_INTERVAL, staticGroupIds = []) {
+    const normalizedGroupId = String(groupId ?? '').trim();
+    if (!normalizedGroupId) {
+      throw new Error('groupId 不能为空');
+    }
+    const normalizedInterval = normalizeFilterHeartbeatInterval(interval);
+    const currentEnabled = this.isQaGroupEnabled(normalizedGroupId, staticGroupIds);
+    const index = this.data.qaGroups.findIndex((item) => String(item?.groupId ?? '').trim() === normalizedGroupId);
+    if (index >= 0) {
+      this.data.qaGroups[index] = {
+        ...this.data.qaGroups[index],
+        groupId: normalizedGroupId,
+        enabled: currentEnabled || this.data.qaGroups[index]?.enabled !== false,
+        proactiveReplyEnabled: this.data.qaGroups[index]?.proactiveReplyEnabled !== false,
+        filterHeartbeatEnabled: enabled === true,
+        filterHeartbeatInterval: normalizedInterval,
+        fileDownloadEnabled: this.data.qaGroups[index]?.fileDownloadEnabled === true,
+        fileDownloadFolderName: String(this.data.qaGroups[index]?.fileDownloadFolderName ?? '').trim(),
+        updatedAt: nowIso()
+      };
+      await this.save();
+      return { action: 'updated', entry: normalizeQaGroup(this.data.qaGroups[index]) };
+    }
+
+    const record = {
+      groupId: normalizedGroupId,
+      enabled: currentEnabled,
+      proactiveReplyEnabled: true,
+      filterHeartbeatEnabled: enabled === true,
+      filterHeartbeatInterval: normalizedInterval,
+      fileDownloadEnabled: false,
+      fileDownloadFolderName: '',
       createdAt: nowIso(),
       updatedAt: nowIso()
     };

@@ -744,9 +744,13 @@ export class CodexReadonlyTools {
     if (this.startGroupFileDownload) {
       parts.push([
         '如果当前是群聊，且用户是在要游戏安装包、客户端下载包、apk、桌面版、电脑版、pc 版、jar、zip、exe，或在问“有没有人发 v156 原版 mdt / MindustryX 安装包”这类资源请求，不要普通聊天回复，也不要让他去群里问。',
+        '如果用户直接给了 GitHub 仓库链接或 owner/repo，并说要 latest release、最新版 release、下载 release 资产，也同样直接调用这个工具。',
+        '如果用户是在要“某个 commit/hash 的 jar、某次提交编译包、按提交号打包出来的桌面版/服务端”，这同样属于下载流程，也要直接调用 start_group_file_download。',
         '这类请求应直接调用 start_group_file_download，把对话转交给群文件下载流程；工具会自己发追问、列文件、下载并发送。',
-        '调用时尽量带上 repo_choice、version_query、platform_hint、folder_name；repo_choice 只能写 x 或 vanilla。',
-        '如果信息还不全，比如没说是 X端 还是 原版，也照样调用；工具会自己继续追问。',
+        '调用时尽量带上 repo_choice、version_query、platform_hint、folder_name；release 下载时 repo_choice 可以写 x、vanilla、owner/repo 或 GitHub 仓库链接；commit 编译请求目前只支持 x 或 vanilla。',
+        '如果这是 commit 编译请求，必须显式带 mode:"commit-build"；如果用户已经给了 hash，必须再带 commit_hash。',
+        'folder_name 是群文件夹名；如果用户特别说明“发到某个文件夹/目录”，把那个值带上。',
+        '如果信息还不全，比如没说是 X端 还是 原版，或者没给 commit hash，也照样调用；工具会自己继续追问。',
         '一旦 start_group_file_download 返回 started=true，你就算已经完成这次接管，不要再额外输出任何普通文本。'
       ].join('\n'));
     }
@@ -780,6 +784,8 @@ export class CodexReadonlyTools {
       `或者：${TOOL_REQUEST_START}{"tool":"read_recent_chat_messages","count":20}${TOOL_REQUEST_END}`,
       `或者：${TOOL_REQUEST_START}{"tool":"read_group_chat_messages","count":200}${TOOL_REQUEST_END}`,
       `或者：${TOOL_REQUEST_START}{"tool":"start_group_file_download","request_text":"我想要v156的MindustryX电脑版","repo_choice":"x","version_query":"156","platform_hint":"pc","folder_name":"MindustryX"}${TOOL_REQUEST_END}`,
+      `或者：${TOOL_REQUEST_START}{"tool":"start_group_file_download","request_text":"我要 https://github.com/NapNeko/NapCatQQ 的最新 release 下载","repo_choice":"https://github.com/NapNeko/NapCatQQ","version_query":"latest","folder_name":"NapCatQQ"}${TOOL_REQUEST_END}`,
+      `或者：${TOOL_REQUEST_START}{"tool":"start_group_file_download","request_text":"把 TinyLake/MindustryX 的 c1ffcd3 编译包发我","mode":"commit-build","repo_choice":"x","commit_hash":"c1ffcd3","platform_hint":"pc","folder_name":"MindustryX"}${TOOL_REQUEST_END}`,
       `或者：${TOOL_REQUEST_START}{"tool":"read_github_repo_releases","repo":"Anuken/Mindustry","max_releases":5,"max_body_chars":4000}${TOOL_REQUEST_END}`,
       `或者：${TOOL_REQUEST_START}{"tool":"read_github_repo_commits","repo":"Anuken/Mindustry","max_commits":100,"max_message_chars":3000}${TOOL_REQUEST_END}`,
       '收到工具结果后，如果信息已经足够，就直接正常回答用户；只有在确实还缺信息时，才能继续再请求一个工具。回答的时候不要使用Markdown'
