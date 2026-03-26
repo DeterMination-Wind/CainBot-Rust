@@ -37,7 +37,7 @@ const srcDir = path.dirname(__filename);
 const projectRoot = path.resolve(srcDir, '..');
 const GROUP_CARD_SYNC_RETRY_MS = 10 * 60 * 1000;
 const SHUTDOWN_VOTE_REQUIRED_COUNT = 3;
-const SHUTDOWN_VOTE_TTL_MS = 30 * 60 * 1000;
+const SHUTDOWN_VOTE_TTL_MS = 10 * 60 * 1000;
 const SHUTDOWN_VOTE_FILTER_MODEL = 'gpt-5.4-mini';
 const SHUTDOWN_VOTE_PROMPT = '确定要关闭此bot的功能吗，大于两个人回复本消息"Y"将确认此操作';
 const OWNER_LOG_MAX_CHARS = 1500;
@@ -676,6 +676,14 @@ function looksLikeBotOppositionCandidate(text, displayName = '') {
   return false;
 }
 
+function textLooksLikeExplicitShutdownRequest(text) {
+  const normalized = String(text ?? '').trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return /(关闭(这个|此)?(机器人|機器人|bot|自动回复|ai|该bot|这个bot)|关掉(这个|此)?(机器人|機器人|bot|自动回复|ai|该bot|这个bot)|停用(这个|此)?(机器人|機器人|bot|自动回复|ai|该bot|这个bot)|禁用(这个|此)?(机器人|機器人|bot|自动回复|ai|该bot|这个bot)|把(这个|此)?(机器人|機器人|bot|自动回复|ai|该bot|这个bot)关掉|把(这个|此)?(机器人|機器人|bot|自动回复|ai|该bot|这个bot)关闭|停止(这个|此)?(机器人|機器人|bot|自动回复|ai|该bot|这个bot))/i.test(normalized);
+}
+
 function textContainsShutdownVoteApproval(text) {
   const normalized = String(text ?? '').trim();
   if (!normalized) {
@@ -1080,10 +1088,32 @@ async function main() {
     if (!vote) {
       return;
     }
+    if (vote.expireTimer) {
+      clearTimeout(vote.expireTimer);
+    }
     shutdownVotesByGroup.delete(normalizedGroupId);
     for (const messageId of vote.messageIds) {
       shutdownVoteMessageToGroup.delete(messageId);
     }
+  };
+
+  const scheduleShutdownVoteExpiry = (vote) => {
+    const delayMs = Math.max(0, Number(vote?.expiresAt ?? 0) - Date.now());
+    if (!Number.isFinite(delayMs)) {
+      return;
+    }
+    vote.expireTimer = setTimeout(async () => {
+      const activeVote = shutdownVotesByGroup.get(vote.groupId);
+      if (!activeVote || activeVote !== vote) {
+        return;
+      }
+      clearShutdownVote(vote.groupId);
+      try {
+        await napcatClient.sendGroupMessage(vote.groupId, '关闭投票 10 分钟内未通过，已自动关闭。');
+      } catch (error) {
+        logger.warn(`发送关闭投票超时提示失败：${error.message}`);
+      }
+    }, delayMs);
   };
 
   const getActiveShutdownVote = (groupId) => {
@@ -1172,16 +1202,21 @@ async function main() {
   };
 
   const classifyBotOpposition = async (context, event, text) => {
-    if (!looksLikeBotOppositionCandidate(text, config.bot.displayName)) {
+    if (!eventMentionsSelf(event, config.bot.displayName)) {
+      return { shouldStartVote: false, reason: 'not-mentioned' };
+    }
+    if (!looksLikeBotOppositionCandidate(text, config.bot.displayName) || !textLooksLikeExplicitShutdownRequest(text)) {
       return { shouldStartVote: false, reason: 'heuristic-skip' };
     }
     const raw = await qaClient.complete([
       {
         role: 'system',
         content: [
-          '你负责判断一条 QQ 群消息是否在反对、嫌弃、质疑或要求关闭当前 bot 的发言功能。',
-          '以下情形判定 should_start_vote=true：嫌 bot 吵、叫 bot 闭嘴/别回复、质疑“这是谁的机器人”、反感 bot 存在、希望关掉 bot 功能。',
-          '以下情形判定 should_start_vote=false：正常向 bot 提问、普通讨论机器人技术实现、友善地询问 bot 来源且没有反对语气。',
+          '你负责判断一条 QQ 群消息是否是在明确要求关闭当前 bot 的功能。',
+          '只有同时满足以下条件，才判定 should_start_vote=true：',
+          '1. 这条消息明确在对 Cain 说话，也就是在 at Cain；',
+          '2. 文本明确表达“关闭/关掉/停用/禁用/停止这个机器人或 bot 功能”的意思。',
+          '以下情形必须判定 should_start_vote=false：嫌 bot 吵、叫 bot 闭嘴/别回复、质疑“这是谁的机器人”、普通吐槽、普通讨论机器人技术实现、友善地询问 bot 来源、没有明确要求关闭。',
           '输出必须是 JSON：{"should_start_vote":boolean,"reason":"简短原因"}。不要输出额外文字。'
         ].join('\n\n')
       },
@@ -1226,7 +1261,6 @@ async function main() {
       return true;
     }
     vote.voters.add(voterId);
-    vote.expiresAt = Date.now() + SHUTDOWN_VOTE_TTL_MS;
     if (vote.voters.size < SHUTDOWN_VOTE_REQUIRED_COUNT) {
       return true;
     }
@@ -1244,6 +1278,9 @@ async function main() {
 
   const maybeStartShutdownVote = async (context, event, text) => {
     if (context.messageType !== 'group' || !chatSessionManager.isGroupEnabled(context.groupId) || !chatSessionManager.isGroupProactiveReplyEnabled(context.groupId)) {
+      return false;
+    }
+    if (!eventMentionsSelf(event, config.bot.displayName) || !textLooksLikeExplicitShutdownRequest(text)) {
       return false;
     }
     const decision = await classifyBotOpposition(context, event, text);
@@ -1280,10 +1317,12 @@ async function main() {
       messageIds: new Set(messageIds),
       voters: new Set(),
       createdAt: Date.now(),
-      expiresAt: Date.now() + SHUTDOWN_VOTE_TTL_MS
+      expiresAt: Date.now() + SHUTDOWN_VOTE_TTL_MS,
+      expireTimer: null
     };
     shutdownVotesByGroup.set(vote.groupId, vote);
     messageIds.forEach((messageId) => shutdownVoteMessageToGroup.set(messageId, vote.groupId));
+    scheduleShutdownVoteExpiry(vote);
     logger.info(`群 ${vote.groupId} 发起关闭投票：${decision.reason || 'bot-opposition'}`);
     return true;
   };
