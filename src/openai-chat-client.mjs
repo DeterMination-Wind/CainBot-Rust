@@ -108,6 +108,90 @@ function buildModelCandidates(model) {
   ]));
 }
 
+async function executeRetriableRequest(runRequest, retryConfig, logger, shouldRetry = isRetryableError) {
+  for (let attempt = 1; attempt <= retryConfig.maxAttempts; attempt += 1) {
+    try {
+      return await runRequest();
+    } catch (error) {
+      if (attempt < retryConfig.maxAttempts && shouldRetry(error)) {
+        const delayMs = retryConfig.baseDelayMs * attempt;
+        logger.warn(`聊天接口请求异常，准备重试（${attempt}/${retryConfig.maxAttempts}）：${normalizeThrowableMessage(error)}`);
+        await sleep(delayMs);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw createChatError('聊天接口调用失败', {
+    code: 'CHAT_BACKEND_UNKNOWN',
+    silent: true
+  });
+}
+
+async function withModelFallback({ modelCandidates, shouldFallback, onFallback, runCandidate }) {
+  let lastError = null;
+
+  for (let index = 0; index < modelCandidates.length; index += 1) {
+    const model = modelCandidates[index];
+    try {
+      return await runCandidate(model);
+    } catch (error) {
+      lastError = error;
+      const hasAlternateModel = index < modelCandidates.length - 1;
+      if (hasAlternateModel && shouldFallback(error)) {
+        onFallback(model, modelCandidates[index + 1], error);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError ?? createChatError('聊天接口调用失败', {
+    code: 'CHAT_BACKEND_UNKNOWN',
+    silent: true
+  });
+}
+
+async function withVariantAndModelFallback({
+  variants,
+  modelCandidates,
+  shouldFallbackModel: shouldFallbackModelCandidate,
+  shouldFallbackVariant,
+  onModelFallback,
+  onVariantFallback,
+  runCandidate
+}) {
+  let lastError = null;
+
+  for (let variantIndex = 0; variantIndex < variants.length; variantIndex += 1) {
+    const variant = variants[variantIndex];
+    try {
+      return await withModelFallback({
+        modelCandidates,
+        shouldFallback: shouldFallbackModelCandidate,
+        onFallback: (currentModel, nextModel, error) => {
+          onModelFallback(variant, currentModel, nextModel, error);
+        },
+        runCandidate: (model) => runCandidate(variant, model)
+      });
+    } catch (error) {
+      lastError = error;
+      const hasAlternateVariant = variantIndex < variants.length - 1;
+      if (hasAlternateVariant && shouldFallbackVariant(error)) {
+        onVariantFallback(variant, variants[variantIndex + 1], error);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError ?? createChatError('聊天接口调用失败', {
+    code: 'CHAT_BACKEND_UNKNOWN',
+    silent: true
+  });
+}
+
 function extractAssistantText(payload) {
   const content = payload?.choices?.[0]?.message?.content;
   if (typeof content === 'string') {
@@ -553,66 +637,85 @@ export class OpenAiChatClient {
     return available.length > 0 ? available : preferred;
   }
 
+  async #fetchChatCompletion(messages, model, options, headers, retryConfig) {
+    return await executeRetriableRequest(async () => {
+      const response = await fetch(joinUrl(this.config.baseUrl, 'chat/completions'), {
+        method: 'POST',
+        headers,
+        signal: AbortSignal.timeout(retryConfig.requestTimeoutMs),
+        body: JSON.stringify({
+          model,
+          temperature: options.temperature ?? this.config.temperature ?? 0.7,
+          messages
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        const httpError = buildHttpError(response.status, errorText);
+        if (RETRYABLE_HTTP_STATUS.has(response.status)) {
+          throw httpError;
+        }
+        throw httpError;
+      }
+
+      const payload = await response.json();
+      const assistantText = extractAssistantText(payload);
+      if (!assistantText) {
+        throw createChatError('聊天接口未返回可用文本', {
+          code: 'CHAT_BACKEND_INVALID_RESPONSE',
+          silent: true
+        });
+      }
+      return assistantText;
+    }, retryConfig, this.logger, (error) => {
+      if (isRetryableError(error)) {
+        return true;
+      }
+      return RETRYABLE_HTTP_STATUS.has(Number(error?.httpStatus ?? 0));
+    });
+  }
+
   async #completeViaChatCompletions(messages, options, headers, retryConfig) {
     const modelCandidates = buildModelCandidates(options.model ?? this.config.model);
+    return await withModelFallback({
+      modelCandidates,
+      shouldFallback: shouldFallbackModel,
+      onFallback: (currentModel, nextModel, error) => {
+        this.logger.warn(`聊天接口 chat 当前模型 ${currentModel} 不稳定，切换到 ${nextModel}：${normalizeThrowableMessage(error)}`);
+      },
+      runCandidate: async (model) => await this.#fetchChatCompletion(messages, model, options, headers, retryConfig)
+    });
+  }
 
-    for (let modelIndex = 0; modelIndex < modelCandidates.length; modelIndex += 1) {
-      const model = modelCandidates[modelIndex];
-      for (let attempt = 1; attempt <= retryConfig.maxAttempts; attempt += 1) {
-        try {
-          const response = await fetch(joinUrl(this.config.baseUrl, 'chat/completions'), {
-            method: 'POST',
-            headers,
-            signal: AbortSignal.timeout(retryConfig.requestTimeoutMs),
-            body: JSON.stringify({
-              model,
-              temperature: options.temperature ?? this.config.temperature ?? 0.7,
-              messages
-            })
-          });
+  async #fetchResponsesCompletion(variant, model, options, headers, retryConfig) {
+    return await executeRetriableRequest(async () => {
+      const response = await fetch(joinUrl(this.config.baseUrl, 'responses'), {
+        method: 'POST',
+        headers,
+        signal: AbortSignal.timeout(retryConfig.requestTimeoutMs),
+        body: JSON.stringify({
+          model,
+          temperature: options.temperature ?? this.config.temperature ?? 0.7,
+          ...variant.body
+        })
+      });
 
-          if (!response.ok) {
-            const errorText = await response.text();
-            const httpError = buildHttpError(response.status, errorText);
-            if (attempt < retryConfig.maxAttempts && RETRYABLE_HTTP_STATUS.has(response.status)) {
-              const delayMs = retryConfig.baseDelayMs * attempt;
-              this.logger.warn(`聊天接口暂时失败，准备重试（${attempt}/${retryConfig.maxAttempts}，HTTP ${response.status}）`);
-              await sleep(delayMs);
-              continue;
-            }
-            throw httpError;
-          }
-
-          const payload = await response.json();
-          const assistantText = extractAssistantText(payload);
-          if (!assistantText) {
-            throw createChatError('聊天接口未返回可用文本', {
-              code: 'CHAT_BACKEND_INVALID_RESPONSE',
-              silent: true
-            });
-          }
-          return assistantText;
-        } catch (error) {
-          if (attempt < retryConfig.maxAttempts && isRetryableError(error)) {
-            const delayMs = retryConfig.baseDelayMs * attempt;
-            this.logger.warn(`聊天接口请求异常，准备重试（${attempt}/${retryConfig.maxAttempts}）：${normalizeThrowableMessage(error)}`);
-            await sleep(delayMs);
-            continue;
-          }
-          const hasAlternateModel = modelIndex < modelCandidates.length - 1;
-          if (hasAlternateModel && shouldFallbackModel(error)) {
-            const nextModel = modelCandidates[modelIndex + 1];
-            this.logger.warn(`聊天接口 chat 当前模型 ${model} 不稳定，切换到 ${nextModel}：${normalizeThrowableMessage(error)}`);
-            break;
-          }
-          throw error;
+      if (!response.ok) {
+        const errorText = await response.text();
+        const httpError = buildHttpError(response.status, errorText);
+        if (RETRYABLE_HTTP_STATUS.has(response.status)) {
+          throw httpError;
         }
+        throw httpError;
       }
-    }
 
-    throw createChatError('聊天接口调用失败', {
-      code: 'CHAT_BACKEND_UNKNOWN',
-      silent: true
+      return await readResponseText(response);
+    }, retryConfig, this.logger, (error) => {
+      if (isRetryableError(error)) {
+        return true;
+      }
+      return RETRYABLE_HTTP_STATUS.has(Number(error?.httpStatus ?? 0));
     });
   }
 
@@ -626,64 +729,18 @@ export class OpenAiChatClient {
     }
 
     const modelCandidates = buildModelCandidates(options.model ?? this.config.model);
-    for (let variantIndex = 0; variantIndex < variants.length; variantIndex += 1) {
-      const variant = variants[variantIndex];
-      for (let modelIndex = 0; modelIndex < modelCandidates.length; modelIndex += 1) {
-        const model = modelCandidates[modelIndex];
-        for (let attempt = 1; attempt <= retryConfig.maxAttempts; attempt += 1) {
-          try {
-            const response = await fetch(joinUrl(this.config.baseUrl, 'responses'), {
-              method: 'POST',
-              headers,
-              signal: AbortSignal.timeout(retryConfig.requestTimeoutMs),
-              body: JSON.stringify({
-                model,
-                temperature: options.temperature ?? this.config.temperature ?? 0.7,
-                ...variant.body
-              })
-            });
-
-            if (!response.ok) {
-              const errorText = await response.text();
-              const httpError = buildHttpError(response.status, errorText);
-              if (attempt < retryConfig.maxAttempts && RETRYABLE_HTTP_STATUS.has(response.status)) {
-                const delayMs = retryConfig.baseDelayMs * attempt;
-                this.logger.warn(`聊天接口暂时失败，准备重试（${attempt}/${retryConfig.maxAttempts}，HTTP ${response.status}）`);
-                await sleep(delayMs);
-                continue;
-              }
-              throw httpError;
-            }
-
-            return await readResponseText(response);
-          } catch (error) {
-            if (attempt < retryConfig.maxAttempts && isRetryableError(error)) {
-              const delayMs = retryConfig.baseDelayMs * attempt;
-              this.logger.warn(`聊天接口请求异常，准备重试（${attempt}/${retryConfig.maxAttempts}）：${normalizeThrowableMessage(error)}`);
-              await sleep(delayMs);
-              continue;
-            }
-            const hasAlternateModel = modelIndex < modelCandidates.length - 1;
-            if (hasAlternateModel && shouldFallbackModel(error)) {
-              const nextModel = modelCandidates[modelIndex + 1];
-              this.logger.warn(`聊天接口 responses 当前模型 ${model} 不稳定，切换到 ${nextModel}：${normalizeThrowableMessage(error)}`);
-              break;
-            }
-            const hasAlternateVariant = variantIndex < variants.length - 1;
-            if (!hasAlternateModel && hasAlternateVariant && shouldFallbackTransport(error)) {
-              const nextVariant = variants[variantIndex + 1];
-              this.logger.warn(`聊天接口 responses 当前载荷 ${variant.name} 不稳定，切换到 ${nextVariant.name}：${normalizeThrowableMessage(error)}`);
-              break;
-            }
-            throw error;
-          }
-        }
-      }
-    }
-
-    throw createChatError('聊天接口调用失败', {
-      code: 'CHAT_BACKEND_UNKNOWN',
-      silent: true
+    return await withVariantAndModelFallback({
+      variants,
+      modelCandidates,
+      shouldFallbackModel: shouldFallbackModel,
+      shouldFallbackVariant: shouldFallbackTransport,
+      onModelFallback: (variant, currentModel, nextModel, error) => {
+        this.logger.warn(`聊天接口 responses 当前载荷 ${variant.name} 下模型 ${currentModel} 不稳定，切换到 ${nextModel}：${normalizeThrowableMessage(error)}`);
+      },
+      onVariantFallback: (currentVariant, nextVariant, error) => {
+        this.logger.warn(`聊天接口 responses 当前载荷 ${currentVariant.name} 不稳定，切换到 ${nextVariant.name}：${normalizeThrowableMessage(error)}`);
+      },
+      runCandidate: async (variant, model) => await this.#fetchResponsesCompletion(variant, model, options, headers, retryConfig)
     });
   }
 
