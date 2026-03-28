@@ -2,6 +2,7 @@ config.json
 data/
 
 node_modules/
+target/
 
 .idea/
 .vscode/
