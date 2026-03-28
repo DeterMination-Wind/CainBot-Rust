@@ -231,16 +231,33 @@ impl OpenAiChatClient {
 }
 
 fn extract_assistant_text(payload: &Value) -> Option<String> {
-    payload
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(value_to_text)
+    serde_json::from_value::<ChatCompletionPayload>(payload.clone())
+        .ok()
+        .and_then(|parsed| parsed.choices.into_iter().next())
+        .and_then(|choice| choice.message.content.into_text())
 }
 
 fn extract_responses_text(payload: &Value) -> Option<String> {
+    if let Ok(parsed) = serde_json::from_value::<ResponsesPayload>(payload.clone()) {
+        if let Some(text) = parsed.output_text.and_then(MaybeText::into_text)
+            && !text.is_empty()
+        {
+            return Some(text);
+        }
+        if let Some(output) = parsed.output {
+            let text = output
+                .into_iter()
+                .flat_map(|item| item.content.unwrap_or_default())
+                .filter_map(MaybeText::into_text)
+                .collect::<String>()
+                .trim()
+                .to_string();
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+
     if let Some(text) = payload.get("output_text").and_then(value_to_text)
         && !text.is_empty()
     {
@@ -334,4 +351,67 @@ fn is_cc_switch_proxy(base_url: &str) -> bool {
 fn is_retryable_error(error: &anyhow::Error) -> bool {
     let text = format!("{error:#}").to_ascii_lowercase();
     text.contains("network") || text.contains("socket") || text.contains("timeout") || text.contains("timed out")
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionPayload {
+    #[serde(default)]
+    choices: Vec<ChatChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatChoice {
+    message: ChatMessagePayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatMessagePayload {
+    content: MaybeText,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesPayload {
+    #[serde(default)]
+    output_text: Option<MaybeText>,
+    #[serde(default)]
+    output: Option<Vec<ResponseOutputItem>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponseOutputItem {
+    #[serde(default)]
+    content: Option<Vec<MaybeText>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum MaybeText {
+    Plain(String),
+    Rich(Vec<Value>),
+}
+
+impl MaybeText {
+    fn into_text(self) -> Option<String> {
+        match self {
+            Self::Plain(text) => {
+                let normalized = text.trim().to_string();
+                (!normalized.is_empty()).then_some(normalized)
+            }
+            Self::Rich(items) => {
+                let text = items
+                    .into_iter()
+                    .filter_map(|item| {
+                        item.get("text")
+                            .or_else(|| item.get("output_text"))
+                            .or_else(|| item.get("value"))
+                            .and_then(Value::as_str)
+                            .map(ToString::to_string)
+                    })
+                    .collect::<String>()
+                    .trim()
+                    .to_string();
+                (!text.is_empty()).then_some(text)
+            }
+        }
+    }
 }
