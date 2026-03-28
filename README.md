@@ -1,7 +1,7 @@
 # CainBot
 
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D24-brightgreen)](https://nodejs.org/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
 基于 NapCat OneBot 的 QQ 群聊机器人，支持 AI 问答、翻译、GitHub Release 下载、模组问题修复等功能。
 
@@ -143,7 +143,7 @@ cat data/logs/latest.log
 
 ## 许可证
 
-[MIT](LICENSE)
+[AGPL-3.0](LICENSE) - 修改并部署本项目需公开源码。
 
 ## 致谢
 
