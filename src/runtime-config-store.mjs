@@ -1,4 +1,5 @@
 import path from 'node:path';
+import syncFs from 'node:fs';
 import fs from 'node:fs/promises';
 
 import { ensureDir, nowIso } from './utils.mjs';
@@ -56,6 +57,24 @@ function createDefaultData() {
   };
 }
 
+function normalizeExternalExclusiveMode(value) {
+  return String(value ?? '').trim().toLowerCase() === 'all' ? 'all' : 'list';
+}
+
+function normalizeExternalExclusiveGroupsPayload(payload) {
+  return {
+    version: Number(payload?.version ?? 1) || 1,
+    source: String(payload?.source ?? '').trim(),
+    updatedAt: String(payload?.updatedAt ?? '').trim(),
+    mode: normalizeExternalExclusiveMode(payload?.mode),
+    groupIds: Array.from(new Set(
+      (Array.isArray(payload?.groupIds) ? payload.groupIds : [])
+        .map((item) => String(item ?? '').trim())
+        .filter(Boolean)
+    ))
+  };
+}
+
 export class RuntimeConfigStore {
   constructor(filePath, configDir, defaults, logger) {
     this.filePath = filePath;
@@ -63,6 +82,13 @@ export class RuntimeConfigStore {
     this.defaults = defaults;
     this.logger = logger;
     this.data = createDefaultData();
+    this.externalExclusiveGroups = {
+      filePath: '',
+      checkedAt: 0,
+      refreshMs: 5000,
+      mtimeMs: -1,
+      payload: normalizeExternalExclusiveGroupsPayload({})
+    };
   }
 
   async load() {
@@ -109,9 +135,113 @@ export class RuntimeConfigStore {
       .filter((item) => item.groupId);
   }
 
+  #getExternalExclusiveGroupsFilePath() {
+    return String(this.defaults?.qa?.externalExclusiveGroupsFile ?? '').trim();
+  }
+
+  #getExternalExclusiveGroupsFileCandidates() {
+    const configured = this.#getExternalExclusiveGroupsFilePath();
+    const candidates = [];
+    if (configured) {
+      candidates.push(configured);
+    }
+    const fallbackCandidates = [
+      path.resolve(this.configDir, '../../OlivOSAIChatAssassin/data/cainbot-exclusive-groups.json'),
+      path.resolve(this.configDir, '../../NapCatAIChatAssassin/data/cainbot-exclusive-groups.json'),
+      path.resolve(this.configDir, '../OlivOSAIChatAssassin/data/cainbot-exclusive-groups.json'),
+      path.resolve(this.configDir, '../NapCatAIChatAssassin/data/cainbot-exclusive-groups.json'),
+      '/OlivOSAIChatAssassin/data/cainbot-exclusive-groups.json',
+      '/NapCatAIChatAssassin/data/cainbot-exclusive-groups.json'
+    ];
+    for (const item of fallbackCandidates) {
+      const normalized = String(item ?? '').trim();
+      if (normalized && !candidates.includes(normalized)) {
+        candidates.push(normalized);
+      }
+    }
+    return candidates;
+  }
+
+  #getExternalExclusiveGroupsRefreshMs() {
+    const numeric = Number(this.defaults?.qa?.externalExclusiveGroupsRefreshMs ?? 5000);
+    if (!Number.isFinite(numeric)) {
+      return 5000;
+    }
+    return Math.max(250, Math.trunc(numeric));
+  }
+
+  #clearExternalExclusiveGroups(filePath = '') {
+    this.externalExclusiveGroups = {
+      filePath,
+      checkedAt: Date.now(),
+      refreshMs: this.#getExternalExclusiveGroupsRefreshMs(),
+      mtimeMs: -1,
+      payload: normalizeExternalExclusiveGroupsPayload({})
+    };
+  }
+
+  #refreshExternalExclusiveGroupsIfNeeded() {
+    const fileCandidates = this.#getExternalExclusiveGroupsFileCandidates();
+    if (fileCandidates.length === 0) {
+      this.#clearExternalExclusiveGroups('');
+      return;
+    }
+
+    const refreshMs = this.#getExternalExclusiveGroupsRefreshMs();
+    const now = Date.now();
+    this.externalExclusiveGroups.checkedAt = now;
+    this.externalExclusiveGroups.refreshMs = refreshMs;
+
+    for (const filePath of fileCandidates) {
+      try {
+        const stat = syncFs.statSync(filePath);
+        const mtimeMs = Number(stat?.mtimeMs ?? 0);
+        if (
+          this.externalExclusiveGroups.filePath === filePath
+          && this.externalExclusiveGroups.mtimeMs === mtimeMs
+        ) {
+          return;
+        }
+        const parsed = JSON.parse(syncFs.readFileSync(filePath, 'utf8'));
+        this.externalExclusiveGroups = {
+          filePath,
+          checkedAt: now,
+          refreshMs,
+          mtimeMs,
+          payload: normalizeExternalExclusiveGroupsPayload(parsed)
+        };
+        return;
+      } catch (error) {
+        if (error?.code === 'ENOENT') {
+          continue;
+        }
+        this.logger.warn(`读取外部互斥群文件失败：${error.message}`);
+        this.#clearExternalExclusiveGroups(filePath);
+        return;
+      }
+    }
+    this.#clearExternalExclusiveGroups(fileCandidates[0] ?? '');
+  }
+
+  isQaGroupExternallyExcluded(groupId) {
+    const normalizedGroupId = String(groupId ?? '').trim();
+    if (!normalizedGroupId) {
+      return false;
+    }
+    this.#refreshExternalExclusiveGroupsIfNeeded();
+    const payload = this.externalExclusiveGroups.payload;
+    if (payload.mode === 'all') {
+      return true;
+    }
+    return payload.groupIds.includes(normalizedGroupId);
+  }
+
   isQaGroupEnabled(groupId, staticGroupIds = []) {
     const normalizedGroupId = String(groupId ?? '').trim();
     if (!normalizedGroupId) {
+      return false;
+    }
+    if (this.isQaGroupExternallyExcluded(normalizedGroupId)) {
       return false;
     }
     const override = this.getQaGroups().find((item) => item.groupId === normalizedGroupId);
@@ -171,7 +301,9 @@ export class RuntimeConfigStore {
         updatedAt: item.updatedAt
       });
     }
-    return Array.from(merged.values()).sort((left, right) => left.groupId.localeCompare(right.groupId, 'zh-CN'));
+    return Array.from(merged.values())
+      .filter((item) => !this.isQaGroupExternallyExcluded(item.groupId))
+      .sort((left, right) => left.groupId.localeCompare(right.groupId, 'zh-CN'));
   }
 
   async setQaGroupEnabled(groupId, enabled, options = {}) {

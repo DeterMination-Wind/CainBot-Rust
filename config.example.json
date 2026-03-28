@@ -62,6 +62,8 @@
     "enabledGroupIds": [
       "123456789"
     ],
+    "externalExclusiveGroupsFile": "../../OlivOSAIChatAssassin/data/cainbot-exclusive-groups.json",
+    "externalExclusiveGroupsRefreshMs": 5000,
     "passHintText": "如果此问题无人回答，可以试试 at 我再问，或者输入 /chat 来询问 bot。",
     "requestTimeoutMs": 90000,
     "retryAttempts": 3,
@@ -87,6 +89,9 @@
       "promptFile": "./prompts/chat-system-prompt.txt",
       "promptImageRoot": "./prompts",
       "codexRoot": "../codex",
+      "localBuildRoot": "../codex/builds",
+      "vanillaRepoRoot": "../codex/Mindustry-master",
+      "xRepoRoot": "../codex/MindustryX-main",
       "memoryFile": "./data/cain-longterm-memory.txt",
       "enableCodexReadonlyTools": true,
       "github": {
@@ -118,6 +123,12 @@
       "idleMinutes": 15,
       "messageWindow": 30,
       "promptFile": "./prompts/qa-topic-closure.txt"
+    },
+    "hallucinationCheck": {
+      "enabled": true,
+      "model": "openai/gpt-oss-120b",
+      "maxToolRounds": 3,
+      "temperature": 0.1
     }
   }
 }

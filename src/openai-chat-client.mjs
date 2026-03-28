@@ -467,11 +467,22 @@ async function readResponseText(response) {
   return assistantText;
 }
 
+async function emitStreamDelta(onTextDelta, streamState, text) {
+  const delta = String(text ?? '');
+  if (!delta || typeof onTextDelta !== 'function') {
+    return;
+  }
+  if (streamState && typeof streamState === 'object') {
+    streamState.emitted = true;
+  }
+  await onTextDelta(delta);
+}
+
 function getEventDataType(payload, fallbackType = '') {
   return String(payload?.type ?? fallbackType ?? '').trim();
 }
 
-async function readResponsesEventStream(response) {
+async function readResponsesEventStream(response, onTextDelta = null, streamState = null) {
   if (!response.body) {
     throw createChatError('聊天接口返回了空流', {
       code: 'CHAT_BACKEND_INVALID_RESPONSE',
@@ -515,7 +526,9 @@ async function readResponsesEventStream(response) {
 
     const eventType = getEventDataType(payload, eventName);
     if (eventType === 'response.output_text.delta') {
-      deltaText += String(payload?.delta ?? payload?.text_delta ?? '');
+      const delta = String(payload?.delta ?? payload?.text_delta ?? '');
+      deltaText += delta;
+      void emitStreamDelta(onTextDelta, streamState, delta);
       return;
     }
     if (eventType === 'response.output_text.done') {
@@ -547,6 +560,105 @@ async function readResponsesEventStream(response) {
   const finalText = deltaText.trim()
     || doneText.trim()
     || extractResponsesApiText(completedPayload);
+  if (!finalText) {
+    throw createChatError('聊天接口未返回可用文本', {
+      code: 'CHAT_BACKEND_INVALID_RESPONSE',
+      silent: true
+    });
+  }
+  return finalText;
+}
+
+function extractChatDeltaText(payload) {
+  const content = payload?.choices?.[0]?.delta?.content;
+  if (typeof content === 'string') {
+    return content;
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === 'string') {
+          return item;
+        }
+        if (item?.type === 'text') {
+          return item.text ?? '';
+        }
+        if (typeof item?.text === 'string') {
+          return item.text;
+        }
+        if (typeof item?.value === 'string') {
+          return item.value;
+        }
+        return '';
+      })
+      .join('');
+  }
+  return '';
+}
+
+async function readChatCompletionsEventStream(response, onTextDelta = null, streamState = null) {
+  if (!response.body) {
+    throw createChatError('聊天接口返回了空流', {
+      code: 'CHAT_BACKEND_INVALID_RESPONSE',
+      silent: true
+    });
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let fullText = '';
+  let lastPayload = null;
+
+  const processEventBlock = (block) => {
+    const normalizedBlock = String(block ?? '').trim();
+    if (!normalizedBlock) {
+      return;
+    }
+
+    const dataLines = [];
+    for (const rawLine of normalizedBlock.split(/\r?\n/)) {
+      const line = String(rawLine ?? '');
+      if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+    const dataText = dataLines.join('\n').trim();
+    if (!dataText || dataText === '[DONE]') {
+      return;
+    }
+
+    let payload = null;
+    try {
+      payload = JSON.parse(dataText);
+    } catch {
+      return;
+    }
+
+    lastPayload = payload;
+    const delta = extractChatDeltaText(payload);
+    if (!delta) {
+      return;
+    }
+    fullText += delta;
+    void emitStreamDelta(onTextDelta, streamState, delta);
+  };
+
+  for await (const chunk of response.body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let separatorIndex = buffer.indexOf('\n\n');
+    while (separatorIndex >= 0) {
+      const eventBlock = buffer.slice(0, separatorIndex);
+      buffer = buffer.slice(separatorIndex + 2);
+      processEventBlock(eventBlock);
+      separatorIndex = buffer.indexOf('\n\n');
+    }
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    processEventBlock(buffer);
+  }
+
+  const finalText = fullText.trim() || extractAssistantText(lastPayload);
   if (!finalText) {
     throw createChatError('聊天接口未返回可用文本', {
       code: 'CHAT_BACKEND_INVALID_RESPONSE',
@@ -638,6 +750,9 @@ export class OpenAiChatClient {
   }
 
   async #fetchChatCompletion(messages, model, options, headers, retryConfig) {
+    const effectiveRetryConfig = typeof options?.onTextDelta === 'function'
+      ? { ...retryConfig, maxAttempts: 1 }
+      : retryConfig;
     return await executeRetriableRequest(async () => {
       const response = await fetch(joinUrl(this.config.baseUrl, 'chat/completions'), {
         method: 'POST',
@@ -646,6 +761,7 @@ export class OpenAiChatClient {
         body: JSON.stringify({
           model,
           temperature: options.temperature ?? this.config.temperature ?? 0.7,
+          stream: typeof options?.onTextDelta === 'function',
           messages
         })
       });
@@ -659,6 +775,11 @@ export class OpenAiChatClient {
         throw httpError;
       }
 
+      const contentType = String(response.headers.get('content-type') ?? '').toLowerCase();
+      if (contentType.includes('text/event-stream')) {
+        return await readChatCompletionsEventStream(response, options?.onTextDelta, options?.streamState);
+      }
+
       const payload = await response.json();
       const assistantText = extractAssistantText(payload);
       if (!assistantText) {
@@ -668,7 +789,7 @@ export class OpenAiChatClient {
         });
       }
       return assistantText;
-    }, retryConfig, this.logger, (error) => {
+    }, effectiveRetryConfig, this.logger, (error) => {
       if (isRetryableError(error)) {
         return true;
       }
@@ -680,7 +801,7 @@ export class OpenAiChatClient {
     const modelCandidates = buildModelCandidates(options.model ?? this.config.model);
     return await withModelFallback({
       modelCandidates,
-      shouldFallback: shouldFallbackModel,
+      shouldFallback: (error) => !(options?.streamState?.emitted) && shouldFallbackModel(error),
       onFallback: (currentModel, nextModel, error) => {
         this.logger.warn(`聊天接口 chat 当前模型 ${currentModel} 不稳定，切换到 ${nextModel}：${normalizeThrowableMessage(error)}`);
       },
@@ -689,6 +810,9 @@ export class OpenAiChatClient {
   }
 
   async #fetchResponsesCompletion(variant, model, options, headers, retryConfig) {
+    const effectiveRetryConfig = typeof options?.onTextDelta === 'function'
+      ? { ...retryConfig, maxAttempts: 1 }
+      : retryConfig;
     return await executeRetriableRequest(async () => {
       const response = await fetch(joinUrl(this.config.baseUrl, 'responses'), {
         method: 'POST',
@@ -697,6 +821,7 @@ export class OpenAiChatClient {
         body: JSON.stringify({
           model,
           temperature: options.temperature ?? this.config.temperature ?? 0.7,
+          ...(typeof options?.onTextDelta === 'function' ? { stream: true } : {}),
           ...variant.body
         })
       });
@@ -710,8 +835,12 @@ export class OpenAiChatClient {
         throw httpError;
       }
 
+      const contentType = String(response.headers.get('content-type') ?? '').toLowerCase();
+      if (contentType.includes('text/event-stream')) {
+        return await readResponsesEventStream(response, options?.onTextDelta, options?.streamState);
+      }
       return await readResponseText(response);
-    }, retryConfig, this.logger, (error) => {
+    }, effectiveRetryConfig, this.logger, (error) => {
       if (isRetryableError(error)) {
         return true;
       }
@@ -732,8 +861,8 @@ export class OpenAiChatClient {
     return await withVariantAndModelFallback({
       variants,
       modelCandidates,
-      shouldFallbackModel: shouldFallbackModel,
-      shouldFallbackVariant: shouldFallbackTransport,
+      shouldFallbackModel: (error) => !(options?.streamState?.emitted) && shouldFallbackModel(error),
+      shouldFallbackVariant: (error) => !(options?.streamState?.emitted) && shouldFallbackTransport(error),
       onModelFallback: (variant, currentModel, nextModel, error) => {
         this.logger.warn(`聊天接口 responses 当前载荷 ${variant.name} 下模型 ${currentModel} 不稳定，切换到 ${nextModel}：${normalizeThrowableMessage(error)}`);
       },

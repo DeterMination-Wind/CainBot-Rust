@@ -1,4 +1,0 @@
-$ErrorActionPreference = "Stop"
-$promptText = Get-Content -Raw -Encoding UTF8 'C:\Users\华硕\Documents\NapCatCainBot\data\github-tasks\ghtask-91dfef93cf12\prompt.txt'
-$promptText | & 'codex' '-a' 'never' '-s' 'workspace-write' 'exec' '-C' 'C:\Users\华硕\Documents\codex' '--skip-git-repo-check' '--output-schema' 'C:\Users\华硕\Documents\NapCatCainBot\data\github-tasks\ghtask-91dfef93cf12\output-schema.json' '-o' 'C:\Users\华硕\Documents\NapCatCainBot\data\github-tasks\ghtask-91dfef93cf12\output.json' '-m' 'gpt-5-codex' '--json' '-' *>&1 | Tee-Object -FilePath 'C:\Users\华硕\Documents\NapCatCainBot\data\github-tasks\ghtask-91dfef93cf12\codex.log'
-exit $LASTEXITCODE
