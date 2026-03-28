@@ -186,15 +186,19 @@ impl NapCatClient {
         self.logger.info("NapCat SSE 已连接。").await;
 
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer = Vec::<u8>::new();
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.context("读取 NapCat SSE 数据失败")?;
-            let text = String::from_utf8_lossy(&bytes).replace('\r', "");
-            buffer.push_str(&text);
+            for byte in bytes {
+                if byte != b'\r' {
+                    buffer.push(byte);
+                }
+            }
 
-            while let Some(index) = buffer.find("\n\n") {
-                let block = buffer[..index].to_string();
-                buffer = buffer[index + 2..].to_string();
+            // 这里按字节流切块，避免每次都把剩余 buffer 重新拷成新的 String。
+            while let Some(index) = find_sse_separator(&buffer) {
+                let block = buffer[..index].to_vec();
+                buffer.drain(..index + 2);
                 if let Some(event) = parse_sse_event(&block)? {
                     self.dispatch_event(on_event.clone(), event).await?;
                 }
@@ -230,7 +234,8 @@ impl NapCatClient {
     }
 }
 
-fn parse_sse_event(block: &str) -> Result<Option<Value>> {
+fn parse_sse_event(block: &[u8]) -> Result<Option<Value>> {
+    let block = std::str::from_utf8(block).context("SSE 事件不是合法 UTF-8")?;
     let mut data_lines = Vec::new();
     for line in block.lines() {
         if line.is_empty() || line.starts_with(':') {
@@ -247,4 +252,8 @@ fn parse_sse_event(block: &str) -> Result<Option<Value>> {
     let payload = serde_json::from_str::<Value>(&data)
         .with_context(|| format!("解析 SSE 事件失败: {data}"))?;
     Ok(Some(payload))
+}
+
+fn find_sse_separator(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(2).position(|window| window == b"\n\n")
 }
