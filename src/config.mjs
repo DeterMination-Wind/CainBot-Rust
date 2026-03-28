@@ -317,7 +317,7 @@ export async function loadConfig(configPath) {
       },
       hallucinationCheck: {
         enabled: raw?.qa?.hallucinationCheck?.enabled ?? true,
-        model: raw?.qa?.hallucinationCheck?.model ?? 'claude-opus-4-6',
+        model: raw?.qa?.hallucinationCheck?.model ?? 'z-ai/glm5',
         maxToolRounds: raw?.qa?.hallucinationCheck?.maxToolRounds ?? 3,
         temperature: raw?.qa?.hallucinationCheck?.temperature ?? 0.1
       }
