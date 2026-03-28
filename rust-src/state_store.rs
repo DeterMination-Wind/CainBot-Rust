@@ -5,7 +5,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::fs;
+use tokio::fs::{self, OpenOptions};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 use crate::logger::Logger;
@@ -59,16 +60,21 @@ impl Default for StateData {
 #[derive(Clone)]
 pub struct StateStore {
     file_path: PathBuf,
+    journal_path: PathBuf,
     logger: Logger,
     state: Arc<Mutex<StateData>>,
+    journal_lock: Arc<Mutex<()>>,
 }
 
 impl StateStore {
     pub fn new(file_path: PathBuf, logger: Logger) -> Self {
+        let journal_path = file_path.with_extension("journal.jsonl");
         Self {
             file_path,
+            journal_path,
             logger,
             state: Arc::new(Mutex::new(StateData::default())),
+            journal_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -81,6 +87,7 @@ impl StateStore {
                     parsed.version = 6;
                 }
                 *self.state.lock().await = parsed;
+                self.apply_journal().await?;
                 self.logger.info("已加载状态文件。").await;
                 Ok(())
             }
@@ -88,6 +95,7 @@ impl StateStore {
                 if let Some(parent) = self.file_path.parent() {
                     ensure_dir(parent).await?;
                 }
+                self.apply_journal().await?;
                 self.logger.info("未发现状态文件，将在首次保存时创建。").await;
                 Ok(())
             }
@@ -128,6 +136,7 @@ impl StateStore {
             .chat_sessions
             .entry(normalized_key.to_string())
             .or_insert_with(ChatSession::default);
+        let journal_entry = entry.clone();
         session.messages.push(entry);
         if session.messages.len() > max_messages {
             let start = session.messages.len().saturating_sub(max_messages);
@@ -136,7 +145,15 @@ impl StateStore {
         let timestamp = now_iso();
         session.updated_at = timestamp.clone();
         session.last_activity_at = timestamp;
-        Ok(session.clone())
+        let snapshot = session.clone();
+        drop(state);
+        self.append_journal(&StateJournalOp::AppendChatSessionEntry {
+            session_key: normalized_key.to_string(),
+            entry: journal_entry,
+            max_messages,
+        })
+        .await?;
+        Ok(snapshot)
     }
 
     pub async fn set_chat_session_hinted_message(
@@ -155,13 +172,26 @@ impl StateStore {
             .or_insert_with(ChatSession::default);
         session.last_hinted_message_id = message_id.trim().to_string();
         session.updated_at = now_iso();
-        Ok(session.clone())
+        let snapshot = session.clone();
+        drop(state);
+        self.append_journal(&StateJournalOp::SetChatSessionHintedMessage {
+            session_key: normalized_key.to_string(),
+            message_id: message_id.trim().to_string(),
+        })
+        .await?;
+        Ok(snapshot)
     }
 
-    pub async fn clear_chat_session(&self, session_key: &str) {
-        self.state.lock().await.chat_sessions.remove(session_key.trim());
+    pub async fn clear_chat_session(&self, session_key: &str) -> Result<()> {
+        let normalized = session_key.trim().to_string();
+        self.state.lock().await.chat_sessions.remove(&normalized);
+        self.append_journal(&StateJournalOp::ClearChatSession {
+            session_key: normalized,
+        })
+        .await
     }
 
+    // 只有显式 compact 时才重写整份 snapshot，避免高频业务更新反复 JSON stringify。
     pub async fn save(&self) -> Result<()> {
         let snapshot = self.state.lock().await.clone();
         if let Some(parent) = self.file_path.parent() {
@@ -170,6 +200,101 @@ impl StateStore {
         let text = serde_json::to_string_pretty(&snapshot)?;
         fs::write(&self.file_path, text)
             .await
-            .with_context(|| format!("写入状态文件失败: {}", self.file_path.display()))
+            .with_context(|| format!("写入状态文件失败: {}", self.file_path.display()))?;
+        match fs::remove_file(&self.journal_path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("删除状态 journal 失败: {}", self.journal_path.display()));
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply_journal(&self) -> Result<()> {
+        let journal_file = match OpenOptions::new().read(true).open(&self.journal_path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("读取状态 journal 失败: {}", self.journal_path.display()));
+            }
+        };
+        let reader = BufReader::new(journal_file);
+        let mut lines = reader.lines();
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let op: StateJournalOp = serde_json::from_str(&line)
+                .with_context(|| format!("解析状态 journal 失败: {}", self.journal_path.display()))?;
+            let mut state = self.state.lock().await;
+            apply_state_journal_op(&mut state, op);
+        }
+        Ok(())
+    }
+
+    async fn append_journal(&self, op: &StateJournalOp) -> Result<()> {
+        let _guard = self.journal_lock.lock().await;
+        if let Some(parent) = self.journal_path.parent() {
+            ensure_dir(parent).await?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.journal_path)
+            .await
+            .with_context(|| format!("打开状态 journal 失败: {}", self.journal_path.display()))?;
+        let line = serde_json::to_string(op)?;
+        file.write_all(line.as_bytes()).await?;
+        file.write_all(b"\n").await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum StateJournalOp {
+    AppendChatSessionEntry {
+        session_key: String,
+        entry: Value,
+        max_messages: usize,
+    },
+    SetChatSessionHintedMessage {
+        session_key: String,
+        message_id: String,
+    },
+    ClearChatSession {
+        session_key: String,
+    },
+}
+
+fn apply_state_journal_op(state: &mut StateData, op: StateJournalOp) {
+    match op {
+        StateJournalOp::AppendChatSessionEntry {
+            session_key,
+            entry,
+            max_messages,
+        } => {
+            let session = state.chat_sessions.entry(session_key).or_default();
+            session.messages.push(entry);
+            if session.messages.len() > max_messages {
+                let start = session.messages.len().saturating_sub(max_messages);
+                session.messages = session.messages[start..].to_vec();
+            }
+            let timestamp = now_iso();
+            session.updated_at = timestamp.clone();
+            session.last_activity_at = timestamp;
+        }
+        StateJournalOp::SetChatSessionHintedMessage {
+            session_key,
+            message_id,
+        } => {
+            let session = state.chat_sessions.entry(session_key).or_default();
+            session.last_hinted_message_id = message_id;
+            session.updated_at = now_iso();
+        }
+        StateJournalOp::ClearChatSession { session_key } => {
+            state.chat_sessions.remove(&session_key);
+        }
     }
 }

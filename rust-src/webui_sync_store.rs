@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::fs;
+use tokio::fs::{self, OpenOptions};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 use crate::utils::{ensure_dir, now_iso};
@@ -62,14 +63,19 @@ impl Default for WebUiSyncData {
 #[derive(Clone)]
 pub struct WebUiSyncStore {
     file_path: PathBuf,
+    journal_path: PathBuf,
     state: Arc<Mutex<WebUiSyncData>>,
+    journal_lock: Arc<Mutex<()>>,
 }
 
 impl WebUiSyncStore {
     pub fn new(file_path: PathBuf) -> Self {
+        let journal_path = file_path.with_extension("journal.jsonl");
         Self {
             file_path,
+            journal_path,
             state: Arc::new(Mutex::new(WebUiSyncData::default())),
+            journal_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -79,9 +85,13 @@ impl WebUiSyncStore {
                 let parsed: WebUiSyncData = serde_json::from_str(&text)
                     .with_context(|| format!("解析 WebUI 同步文件失败: {}", self.file_path.display()))?;
                 *self.state.lock().await = parsed;
+                self.apply_journal().await?;
                 Ok(())
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.save().await,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.apply_journal().await?;
+                self.save().await
+            }
             Err(error) => Err(error).with_context(|| format!("读取 WebUI 同步文件失败: {}", self.file_path.display())),
         }
     }
@@ -108,10 +118,12 @@ impl WebUiSyncStore {
         state.msav_tasks.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
         state.msav_tasks.truncate(200);
         drop(state);
-        self.save().await?;
+        self.append_journal(&WebUiJournalOp::UpsertMsavTask { task: normalized.clone() })
+            .await?;
         Ok(normalized)
     }
 
+    // 高峰期任务状态更新走 journal，只有 compact 时才回写整份 snapshot。
     pub async fn save(&self) -> Result<()> {
         if let Some(parent) = self.file_path.parent() {
             ensure_dir(parent).await?;
@@ -120,7 +132,54 @@ impl WebUiSyncStore {
         let text = serde_json::to_string_pretty(&snapshot)?;
         fs::write(&self.file_path, text)
             .await
-            .with_context(|| format!("写入 WebUI 同步文件失败: {}", self.file_path.display()))
+            .with_context(|| format!("写入 WebUI 同步文件失败: {}", self.file_path.display()))?;
+        match fs::remove_file(&self.journal_path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("删除 WebUI journal 失败: {}", self.journal_path.display()));
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply_journal(&self) -> Result<()> {
+        let journal_file = match OpenOptions::new().read(true).open(&self.journal_path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("读取 WebUI journal 失败: {}", self.journal_path.display()));
+            }
+        };
+        let reader = BufReader::new(journal_file);
+        let mut lines = reader.lines();
+        while let Some(line) = lines.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let op: WebUiJournalOp = serde_json::from_str(&line)
+                .with_context(|| format!("解析 WebUI journal 失败: {}", self.journal_path.display()))?;
+            let mut state = self.state.lock().await;
+            apply_webui_journal_op(&mut state, op)?;
+        }
+        Ok(())
+    }
+
+    async fn append_journal(&self, op: &WebUiJournalOp) -> Result<()> {
+        let _guard = self.journal_lock.lock().await;
+        if let Some(parent) = self.journal_path.parent() {
+            ensure_dir(parent).await?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.journal_path)
+            .await
+            .with_context(|| format!("打开 WebUI journal 失败: {}", self.journal_path.display()))?;
+        let line = serde_json::to_string(op)?;
+        file.write_all(line.as_bytes()).await?;
+        file.write_all(b"\n").await?;
+        Ok(())
     }
 }
 
@@ -175,4 +234,26 @@ fn default_type() -> String {
 
 fn default_running() -> String {
     "running".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum WebUiJournalOp {
+    UpsertMsavTask { task: MsavTask },
+}
+
+fn apply_webui_journal_op(state: &mut WebUiSyncData, op: WebUiJournalOp) -> Result<()> {
+    match op {
+        WebUiJournalOp::UpsertMsavTask { task } => {
+            let normalized = normalize_task(task)?;
+            if let Some(index) = state.msav_tasks.iter().position(|item| item.id == normalized.id) {
+                state.msav_tasks[index] = normalized;
+            } else {
+                state.msav_tasks.insert(0, normalized);
+            }
+            state.msav_tasks.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            state.msav_tasks.truncate(200);
+            Ok(())
+        }
+    }
 }
