@@ -12,6 +12,7 @@ use crate::runtime_config_store::{RuntimeConfigDefaults, RuntimeConfigStore};
 use crate::state_store::StateStore;
 use crate::utils::path_exists;
 use crate::webui_sync_store::WebUiSyncStore;
+use crate::worker_process::WorkerSupervisor;
 
 pub struct AppRuntime {
     pub logger: Logger,
@@ -23,10 +24,12 @@ pub struct AppRuntime {
     pub _webui_sync_store: WebUiSyncStore,
     pub _qa_client: Option<OpenAiChatClient>,
     pub _translator: Option<OpenAiTranslator>,
+    pub _worker_supervisor: WorkerSupervisor,
 }
 
 impl AppRuntime {
     pub async fn bootstrap(project_root: PathBuf, config_path: PathBuf) -> Result<Self> {
+        let exe_path = std::env::current_exe()?;
         ensure_config_exists(&config_path).await?;
 
         let loaded = load_config(&config_path).await?;
@@ -113,6 +116,7 @@ impl AppRuntime {
         } else {
             None
         };
+        let worker_supervisor = WorkerSupervisor::new(exe_path, logger.clone());
 
         logger
             .info(format!(
@@ -146,6 +150,7 @@ impl AppRuntime {
             _webui_sync_store: webui_sync_store,
             _qa_client: qa_client,
             _translator: translator,
+            _worker_supervisor: worker_supervisor,
         })
     }
 
