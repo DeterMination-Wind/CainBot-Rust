@@ -80,6 +80,10 @@ function normalizeStringArray(values) {
   ));
 }
 
+function resolveQaAnswerPath(configDir, primaryValue, fallbackValue = '') {
+  return resolveMaybeRelative(configDir, primaryValue ?? fallbackValue);
+}
+
 export async function loadConfig(configPath) {
   const absoluteConfigPath = path.resolve(configPath);
   const configDir = path.dirname(absoluteConfigPath);
@@ -237,6 +241,8 @@ export async function loadConfig(configPath) {
     qa: {
       enabled: raw?.qa?.enabled ?? true,
       enabledGroupIds: normalizeStringArray(raw?.qa?.enabledGroupIds),
+      externalExclusiveGroupsFile: resolveMaybeRelative(configDir, raw?.qa?.externalExclusiveGroupsFile ?? ''),
+      externalExclusiveGroupsRefreshMs: raw?.qa?.externalExclusiveGroupsRefreshMs ?? 5000,
       passHintText: String(raw?.qa?.passHintText ?? '如果此问题无人回答，可以试试 at 我再问，或者输入 /chat 来询问 bot。').trim()
         || '如果此问题无人回答，可以试试 at 我再问，或者输入 /chat 来询问 bot。',
       client: {
@@ -271,7 +277,22 @@ export async function loadConfig(configPath) {
         contextWindowMessages: raw?.qa?.answer?.contextWindowMessages ?? 30,
         systemPromptFile: answerPromptFile,
         systemPrompt: answerPrompt,
-        codexRoot: resolveMaybeRelative(configDir, raw?.qa?.answer?.codexRoot ?? answerRaw?.codexRoot ?? '../codex'),
+        codexRoot: resolveQaAnswerPath(configDir, raw?.qa?.answer?.codexRoot ?? answerRaw?.codexRoot, '../codex'),
+        localBuildRoot: resolveQaAnswerPath(
+          configDir,
+          raw?.qa?.answer?.localBuildRoot ?? answerRaw?.localBuildRoot,
+          path.join(raw?.qa?.answer?.codexRoot ?? answerRaw?.codexRoot ?? '../codex', 'builds')
+        ),
+        vanillaRepoRoot: resolveQaAnswerPath(
+          configDir,
+          raw?.qa?.answer?.vanillaRepoRoot ?? answerRaw?.vanillaRepoRoot,
+          path.join(raw?.qa?.answer?.codexRoot ?? answerRaw?.codexRoot ?? '../codex', 'Mindustry-master')
+        ),
+        xRepoRoot: resolveQaAnswerPath(
+          configDir,
+          raw?.qa?.answer?.xRepoRoot ?? answerRaw?.xRepoRoot,
+          path.join(raw?.qa?.answer?.codexRoot ?? answerRaw?.codexRoot ?? '../codex', 'MindustryX-main')
+        ),
         promptImageRoot: resolveMaybeRelative(configDir, raw?.qa?.answer?.promptImageRoot ?? './prompts'),
         memoryFile: resolveMaybeRelative(configDir, raw?.qa?.answer?.memoryFile ?? './data/cain-longterm-memory.txt'),
         enableCodexReadonlyTools: raw?.qa?.answer?.enableCodexReadonlyTools ?? answerRaw?.enableCodexReadonlyTools ?? true,
@@ -290,6 +311,12 @@ export async function loadConfig(configPath) {
         messageWindow: raw?.qa?.topicClosure?.messageWindow ?? 30,
         promptFile: topicClosurePromptFile,
         systemPrompt: topicClosurePrompt
+      },
+      hallucinationCheck: {
+        enabled: raw?.qa?.hallucinationCheck?.enabled ?? true,
+        model: raw?.qa?.hallucinationCheck?.model ?? 'openai/gpt-oss-120b',
+        maxToolRounds: raw?.qa?.hallucinationCheck?.maxToolRounds ?? 3,
+        temperature: raw?.qa?.hallucinationCheck?.temperature ?? 0.1
       }
     }
   };

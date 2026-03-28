@@ -18,7 +18,7 @@ const GITHUB_API_BASE_URL = 'https://api.github.com';
 const MAX_CONCURRENT_DOWNLOADS = 5;
 const PREFERRED_MIRROR_TTL_MS = 8 * 60 * 60 * 1000;
 const BUILD_TIMEOUT_MS = 60 * 60 * 1000;
-const PLATFORM_CLASSIFY_MODEL = 'gpt-5-codex-mini';
+const PLATFORM_CLASSIFY_MODEL = 'deepseek-ai/deepseek-v3.2';
 const GITHUB_DOWNLOAD_MIRRORS = [
   'https://github.chenc.dev',
   'https://ghproxy.cfd',
@@ -67,6 +67,27 @@ const GITHUB_DOWNLOAD_MIRRORS = [
   'https://gh.noki.icu'
 ];
 const DOWNLOAD_TIMEOUT_ABORT_LIMIT = 3;
+const LOCAL_RELEASE_SPECS = Object.freeze([
+  {
+    choice: 'local:neon',
+    displayName: 'Neon',
+    folderName: 'Neon',
+    matchers: [/neon/i, /氖/],
+    filePattern: /^Neon[-_].+\.(zip|jar)$/i,
+    preferredExts: ['.zip', '.jar']
+  },
+  {
+    choice: 'local:determination',
+    displayName: 'DeterMination 服务器插件',
+    folderName: 'DeterMination',
+    matchers: [/determination/i, /决心/],
+    filePattern: /^DeterMination-modules(?:-\d{8}(?:-\d{4,6})?)?\.zip$/i,
+    preferredExts: ['.zip']
+  }
+]);
+const LOCAL_RELEASE_SPEC_BY_CHOICE = new Map(
+  LOCAL_RELEASE_SPECS.map((item) => [item.choice, item])
+);
 
 function clampInteger(value, fallback, min, max) {
   const numeric = Number(value);
@@ -82,6 +103,10 @@ function escapeRegExp(value) {
 
 function normalizeText(value) {
   return String(value ?? '').trim();
+}
+
+function uniqueStrings(values) {
+  return Array.from(new Set((Array.isArray(values) ? values : []).map((item) => normalizeText(item)).filter(Boolean)));
 }
 
 function parseGithubRepoSpecifier(input) {
@@ -174,6 +199,43 @@ function withUppercaseApkName(fileName) {
   return normalized;
 }
 
+function getLocalReleaseSpec(choice) {
+  return LOCAL_RELEASE_SPEC_BY_CHOICE.get(normalizeText(choice).toLowerCase()) ?? null;
+}
+
+function detectLocalReleaseChoices(text) {
+  const normalized = normalizeText(text);
+  if (!normalized) {
+    return [];
+  }
+  return uniqueStrings(
+    LOCAL_RELEASE_SPECS
+      .filter((spec) => spec.matchers.some((matcher) => matcher.test(normalized)))
+      .map((spec) => spec.choice)
+  );
+}
+
+function normalizeRepoChoiceInput(value) {
+  const normalized = normalizeText(value).toLowerCase();
+  if (!normalized) {
+    return '';
+  }
+  const localChoices = detectLocalReleaseChoices(value);
+  if (localChoices.length === 1) {
+    return localChoices[0];
+  }
+  if (normalized === 'x' || /(tinylake\/mindustryx|mindustryx|x端)/i.test(normalized)) {
+    return 'x';
+  }
+  if (normalized === 'vanilla' || /(anuken\/mindustry|原版|官版|官方原版|原版mdt|原版mindustry)/i.test(normalized)) {
+    return 'vanilla';
+  }
+  if (/(scriptagent4mindustryext(?:-8\.0)?|scriptagent\s*4\s*mindustry\s*ext|script\s*agent\s*4\s*mindustry\s*ext|sa插件|sa plugin)/i.test(normalized)) {
+    return 'way-zer/ScriptAgent4MindustryExt';
+  }
+  return tryParseGithubRepoSpecifier(value)?.fullName ?? '';
+}
+
 function createRepoInfo(choice) {
   if (choice === 'x') {
     return {
@@ -195,6 +257,17 @@ function createRepoInfo(choice) {
       displayName: 'Mindustry 原版'
     };
   }
+  if (/^way-zer\/scriptagent4mindustryext$/i.test(normalizeText(choice))) {
+    return {
+      kind: 'github',
+      choice: 'way-zer/ScriptAgent4MindustryExt',
+      owner: 'way-zer',
+      repo: 'ScriptAgent4MindustryExt',
+      fullName: 'way-zer/ScriptAgent4MindustryExt',
+      displayName: 'ScriptAgent4MindustryExt 8.0',
+      htmlUrl: 'https://github.com/way-zer/ScriptAgent4MindustryExt'
+    };
+  }
   const parsed = parseGithubRepoSpecifier(choice);
   return {
     kind: 'github',
@@ -212,27 +285,20 @@ function parseRepoChoice(text) {
   if (!normalized) {
     return '';
   }
+  const localChoices = detectLocalReleaseChoices(text);
+  if (localChoices.length === 1) {
+    return localChoices[0];
+  }
   if (/(mindustryx|tinylake|x端)/i.test(normalized)) {
     return 'x';
   }
   if (/(anuken|原版|官版|官方原版|原版mdt|原版mindustry)/i.test(normalized)) {
     return 'vanilla';
   }
+  if (/(scriptagent4mindustryext(?:-8\.0)?|scriptagent\s*4\s*mindustry\s*ext|script\s*agent\s*4\s*mindustry\s*ext|sa插件|sa plugin)/i.test(normalized)) {
+    return 'way-zer/ScriptAgent4MindustryExt';
+  }
   return extractGithubRepoSpecifier(text)?.fullName ?? '';
-}
-
-function normalizeRepoChoiceInput(value) {
-  const normalized = normalizeText(value).toLowerCase();
-  if (!normalized) {
-    return '';
-  }
-  if (normalized === 'x' || /(tinylake\/mindustryx|mindustryx|x端)/i.test(normalized)) {
-    return 'x';
-  }
-  if (normalized === 'vanilla' || /(anuken\/mindustry|原版|官版|官方原版|原版mdt|原版mindustry)/i.test(normalized)) {
-    return 'vanilla';
-  }
-  return tryParseGithubRepoSpecifier(value)?.fullName ?? '';
 }
 
 function parseVersionQuery(text) {
@@ -295,6 +361,9 @@ function parsePlatformHint(text) {
   if (!normalized) {
     return '';
   }
+  if (/(sa插件|sa plugin|scriptagent4mindustryext|scriptagent|script agent)/i.test(normalized)) {
+    return 'server';
+  }
   if (/(服务端|服务器|server)/i.test(normalized)) {
     return 'server';
   }
@@ -348,15 +417,20 @@ function looksLikeDownloadRequest(text) {
   if (!normalized) {
     return false;
   }
+  const localReleaseChoices = detectLocalReleaseChoices(normalized);
   const githubRepo = extractGithubRepoSpecifier(normalized);
   if (githubRepo && /(release|releases|最新版|最新版本|latest|安装包|客户端下载|下载|下载包|文件|资产|asset|apk|exe|zip|jar)/i.test(normalized)) {
     return true;
   }
-  const installLike = /(安装包|安装文件|客户端|下载包|pc安装包|pc包|apk|APK|exe|jar|zip|桌面版|电脑版|电脑版本|pc版本|桌面端|版本包|游戏包|文件包)/i.test(normalized);
+  const installLike = /(安装包|安装文件|客户端|下载包|pc安装包|pc包|apk|APK|exe|jar|zip|桌面版|电脑版|电脑版本|pc版本|桌面端|版本包|游戏包|文件包|插件|服务器插件|服务端插件|脚本包)/i.test(normalized);
+  const pluginLike = /(sa插件|sa plugin|scriptagent|script agent|scriptagent4mindustryext|neon|determination|服务器插件|服务端插件)/i.test(normalized) || localReleaseChoices.length > 0;
   const requestLike = /(有没有|有吗|求|求发|发一下|发个|给我|来个|想要|下载|整一个|能发|有无|有没有人发|谁有|发我|来一份|是哪个|哪个包|哪一个)/i.test(normalized);
   const versionLike = Boolean(parseVersionQuery(normalized));
   const gameLike = looksLikeGameMention(normalized);
   if (installLike && (requestLike || versionLike)) {
+    return true;
+  }
+  if (pluginLike && (requestLike || versionLike)) {
     return true;
   }
   if (requestLike && versionLike && gameLike) {
@@ -669,9 +743,11 @@ export class GroupFileDownloadManager {
     this.napcatClient = napcatClient;
     this.logger = logger;
     this.chatClient = options.chatClient ?? null;
+    this.codexRoot = path.resolve(options.codexRoot ?? config?.codexRoot ?? path.join(process.cwd(), '..', 'codex'));
+    this.localBuildRoot = path.resolve(options.localBuildRoot ?? config?.localBuildRoot ?? path.join(this.codexRoot, 'builds'));
     this.downloadRoot = path.resolve(options.downloadRoot ?? path.join(process.cwd(), 'data', 'release-downloads'));
-    this.vanillaRepoRoot = path.resolve(options.vanillaRepoRoot ?? path.join(process.cwd(), '..', 'codex', 'Mindustry-master'));
-    this.xRepoRoot = path.resolve(options.xRepoRoot ?? path.join(process.cwd(), '..', 'MindustryX'));
+    this.vanillaRepoRoot = path.resolve(options.vanillaRepoRoot ?? config?.vanillaRepoRoot ?? path.join(this.codexRoot, 'Mindustry-master'));
+    this.xRepoRoot = path.resolve(options.xRepoRoot ?? config?.xRepoRoot ?? path.join(this.codexRoot, 'MindustryX-main'));
     this.sessions = new Map();
     this.githubResolvedToken = null;
     this.mirrorCache = null;
@@ -726,6 +802,7 @@ export class GroupFileDownloadManager {
       commitHash: intent.commitHash,
       exactCommitBuild: intent.exactCommitBuild === true,
       folderName: intent.folderName || this.runtimeConfigStore?.getQaGroupFileDownloadFolderName(groupId) || '',
+      localReleaseChoices: detectLocalReleaseChoices(text),
       state: ''
     };
 
@@ -734,6 +811,9 @@ export class GroupFileDownloadManager {
     );
 
     try {
+      if (session.mode !== 'commit-build' && session.localReleaseChoices.length > 0) {
+        return await this.#resolveLocalReleasesAndSend(session, context, event);
+      }
       if (!session.repoChoice) {
         session.state = 'awaiting_repo_choice';
         this.sessions.set(sessionKey, session);
@@ -813,6 +893,10 @@ export class GroupFileDownloadManager {
         || parseFolderNameHint(rawText)
         || this.runtimeConfigStore?.getQaGroupFileDownloadFolderName(groupId)
         || '',
+      localReleaseChoices: uniqueStrings([
+        ...detectLocalReleaseChoices(request?.repo_choice ?? request?.repo ?? ''),
+        ...detectLocalReleaseChoices(rawText)
+      ]),
       state: ''
     };
 
@@ -821,6 +905,18 @@ export class GroupFileDownloadManager {
     );
 
     try {
+      if (session.mode !== 'commit-build' && session.localReleaseChoices.length > 0) {
+        await this.#resolveLocalReleasesAndSend(session, context, event);
+        return {
+          tool: 'start_group_file_download',
+          started: true,
+          state: 'sent-local-release',
+          repo_choice: session.repoChoice || null,
+          version_query: session.versionQuery || null,
+          platform_hint: session.platformHint || null,
+          handled_directly: true
+        };
+      }
       if (!session.repoChoice) {
         session.state = 'awaiting_repo_choice';
         this.sessions.set(sessionKey, session);
@@ -1008,6 +1104,10 @@ export class GroupFileDownloadManager {
     if (!session || !text) {
       return;
     }
+    session.localReleaseChoices = uniqueStrings([
+      ...(Array.isArray(session.localReleaseChoices) ? session.localReleaseChoices : []),
+      ...detectLocalReleaseChoices(text)
+    ]);
     if (!session.repoChoice) {
       session.repoChoice = parseRepoChoice(text) || session.repoChoice;
     }
@@ -1023,6 +1123,201 @@ export class GroupFileDownloadManager {
     if (session.mode !== 'commit-build' && !session.versionQuery) {
       session.versionQuery = parseVersionQuery(text) || session.versionQuery;
     }
+  }
+
+  async #resolveLocalReleasesAndSend(session, context, event) {
+    const choices = uniqueStrings(session?.localReleaseChoices);
+    const artifacts = [];
+    const missing = [];
+
+    for (const choice of choices) {
+      const artifact = await this.#findLatestLocalReleaseArtifact(choice, session);
+      if (artifact) {
+        artifacts.push(artifact);
+      } else {
+        missing.push(getLocalReleaseSpec(choice)?.displayName ?? choice);
+      }
+    }
+
+    if (artifacts.length === 0) {
+      this.sessions.delete(session.key);
+      await this.#reply(context, event, '本地构建目录里还没找到对应的可发发布文件。');
+      return true;
+    }
+
+    await this.#reply(context, event, artifacts.length > 1 ? '开始发送本地最新发布。' : '开始发送本地最新发布文件。');
+    const targetFolderName = await this.#getSessionTargetFolderName(session);
+    for (const artifact of artifacts) {
+      await this.napcatClient.sendLocalFileToGroup({
+        groupId: context.groupId,
+        filePath: artifact.filePath,
+        fileName: artifact.fileName,
+        folderName: targetFolderName || artifact.folderName || ''
+      });
+    }
+    this.sessions.delete(session.key);
+
+    if (missing.length > 0) {
+      await this.#reply(context, event, `这些资源本地没找到可发文件：${missing.join('、')}`);
+    }
+    return true;
+  }
+
+  async #findLatestLocalReleaseArtifact(choice, session) {
+    const spec = getLocalReleaseSpec(choice);
+    if (!spec) {
+      return null;
+    }
+    const versionQuery = normalizeText(session?.versionQuery).toLowerCase();
+    let candidates = await this.#listLocalReleaseCandidates(spec);
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    if (versionQuery && versionQuery !== 'latest') {
+      candidates = candidates.filter((item) => normalizeText(item.fileName).toLowerCase().includes(versionQuery));
+      if (candidates.length === 0) {
+        return null;
+      }
+    }
+
+    const platformHint = normalizeText(session?.platformHint).toLowerCase();
+    const scored = candidates
+      .map((item) => ({
+        ...item,
+        score: this.#scoreLocalReleaseCandidate(item, spec, versionQuery, platformHint)
+      }))
+      .sort((left, right) => right.score - left.score || right.mtimeMs - left.mtimeMs || left.fileName.localeCompare(right.fileName, 'zh-CN'));
+
+    const best = scored[0];
+    if (!best || best.score <= 0) {
+      return null;
+    }
+    return {
+      filePath: best.filePath,
+      fileName: best.fileName,
+      folderName: spec.folderName
+    };
+  }
+
+  async #listLocalReleaseCandidates(spec) {
+    const roots = this.#getLocalReleaseSearchRoots(spec?.choice);
+    const results = [];
+    const seen = new Set();
+
+    for (const root of roots) {
+      const files = await this.#collectFilesRecursively(root, 4);
+      for (const filePath of files) {
+        const fileName = path.basename(filePath);
+        if (!spec.filePattern.test(fileName)) {
+          continue;
+        }
+        const normalizedPath = path.resolve(filePath).toLowerCase();
+        if (seen.has(normalizedPath)) {
+          continue;
+        }
+        seen.add(normalizedPath);
+        const stat = await fs.stat(filePath).catch(() => null);
+        if (!stat?.isFile?.()) {
+          continue;
+        }
+        results.push({
+          filePath,
+          fileName,
+          ext: path.extname(fileName).toLowerCase(),
+          mtimeMs: Number(stat.mtimeMs ?? 0)
+        });
+      }
+    }
+
+    return results;
+  }
+
+  #getLocalReleaseSearchRoots(choice) {
+    switch (normalizeText(choice).toLowerCase()) {
+      case 'local:neon':
+        return [
+          path.join(this.localBuildRoot, 'Neon'),
+          path.join(this.localBuildRoot, 'release-assets', 'Neon')
+        ];
+      case 'local:determination':
+        return [
+          path.join(this.codexRoot, 'anonymous'),
+          path.join(this.localBuildRoot, 'DeterMination'),
+          path.join(this.localBuildRoot, 'release-assets', 'DeterMination')
+        ];
+      default:
+        return [];
+    }
+  }
+
+  async #collectFilesRecursively(rootPath, maxDepth = 4) {
+    const normalizedRoot = normalizeText(rootPath);
+    if (!normalizedRoot || !(await fileExists(normalizedRoot))) {
+      return [];
+    }
+
+    const queue = [{ currentPath: normalizedRoot, depth: 0 }];
+    const files = [];
+    while (queue.length > 0) {
+      const current = queue.shift();
+      const currentPath = normalizeText(current?.currentPath);
+      const depth = Number(current?.depth ?? 0);
+      if (!currentPath) {
+        continue;
+      }
+      const entries = await fs.readdir(currentPath, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        const entryPath = path.join(currentPath, entry.name);
+        if (entry.isDirectory()) {
+          if (depth < maxDepth) {
+            queue.push({ currentPath: entryPath, depth: depth + 1 });
+          }
+          continue;
+        }
+        if (entry.isFile()) {
+          files.push(entryPath);
+        }
+      }
+    }
+    return files;
+  }
+
+  #scoreLocalReleaseCandidate(candidate, spec, versionQuery, platformHint) {
+    if (!candidate || !spec) {
+      return 0;
+    }
+    const fileName = normalizeText(candidate.fileName);
+    const lowerName = fileName.toLowerCase();
+    let score = 100;
+
+    if (versionQuery && versionQuery !== 'latest') {
+      if (lowerName.includes(versionQuery)) {
+        score += 200;
+      } else {
+        score -= 120;
+      }
+    }
+
+    if (platformHint === 'android') {
+      score += candidate.ext === '.jar' ? 20 : -10;
+    } else if (platformHint === 'pc') {
+      score += candidate.ext === '.zip' ? 20 : 10;
+    } else if (platformHint === 'server') {
+      score += candidate.ext === '.zip' || candidate.ext === '.jar' ? 20 : 0;
+    }
+
+    const preferredIndex = spec.preferredExts.indexOf(candidate.ext);
+    if (preferredIndex >= 0) {
+      score += (spec.preferredExts.length - preferredIndex) * 10;
+    }
+
+    if (/^DeterMination-modules\.zip$/i.test(fileName)) {
+      score += 25;
+    }
+
+    score += Math.min(30, Math.floor(candidate.mtimeMs / (60 * 1000)));
+    return score;
   }
 
   async #resolvePlatformHint(text) {

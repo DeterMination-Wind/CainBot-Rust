@@ -686,14 +686,19 @@ export class CodexReadonlyTools {
       parts.push([
         `你可以按需使用只读文件工具查看本地 /codex 目录（实际路径：${codexRoot}）中的文件，以帮助回答用户关于代码或项目的问题。`,
         '这些工具只能用于搜索、列目录、读取文件；绝对不能修改、创建、删除、重命名文件，也不能声称自己已经修改了 /codex 目录中的任何内容。',
+        '只要某个事实能通过工具精确确认，就优先调用工具，不要自己在脑中推断后直接回答。',
         '优先策略：如果用户提到项目名、目录名、仓库名或模块名，请优先调用 inspect_codex_project，先看该项目附近的 README、AGENTS、package.json 等上下文文件，再决定是否需要继续搜索源码。',
         '如果还需要源码定位，再用 search_codex_files；如果已经知道路径，再用 read_codex_file 精确读取。',
         '如果 read_codex_file 返回 truncated=true，或者文件明显很大、是一整行压缩 JSON、重复读取同一片段也看不全，就不要继续重复读同一段；必须改用 subagent_codex_lookup，带上 path 和你要找的具体问题/关键词，让“子代理检索”去文件或目录里定位相关片段。',
         '例外优先级：如果问题是 Mindustry / MindustryX 的游戏内容、Datapatch、content 字段、继承关系、方块/单位/物品/液体/状态/星球/天气，那么不要先用 inspect_codex_project。',
+        '如果问题里出现具体的中文物品、建筑、单位、液体、状态、星球或天气名称，先根据 Mindustry-master/core/assets/bundles/bundle_zh_CN.properties 确认它对应的英文 id；如果系统已经给出了 bundle 中文名解析结果，直接复用那个英文 id。',
+        '确认英文 id 这一步也属于工具工作，不要自己把中文名硬翻成英文名。',
         '这类问题必须先直接用 read_codex_file 读取两个固定文件：',
         '1. compose(MustRead_if_the_questions_are_about_data_patch).json',
         '2. mindustryx-content(MustRead_if_the_questions_are_about_mindustry_instances).json',
+        'mindustryx-content 用来确认具体实例；compose 用来查结构、字段和继承。',
         '读完这两个 JSON 后，如果还缺源码上下文，再考虑 inspect_codex_project 或 search_codex_files。',
+        '如果要继续在 compose.json 里定位字段，优先用 subagent_codex_lookup，并在 question 里带上英文 id、类型名或字段名，不要只拿中文名盲搜。',
         '如果这两个 JSON 其中任何一个因为过大而被截断，下一步优先用 subagent_codex_lookup 在对应 JSON 内定向找字段，不要再反复读取开头。'
       ].join('\n'));
     }
@@ -775,7 +780,7 @@ export class CodexReadonlyTools {
       `也可以是：${TOOL_REQUEST_START}{"tool":"list_codex_directory","path":".","max_entries":50}${TOOL_REQUEST_END}`,
       `或者：${TOOL_REQUEST_START}{"tool":"search_codex_files","query":"router","limit":10}${TOOL_REQUEST_END}`,
       `或者：${TOOL_REQUEST_START}{"tool":"read_codex_file","path":"某个相对路径","start_line":1,"end_line":200,"max_chars":12000}${TOOL_REQUEST_END}`,
-      `或者：${TOOL_REQUEST_START}{"tool":"subagent_codex_lookup","path":"compose(MustRead_if_the_questions_are_about_data_patch).json","question":"找 item 相关的 float 字段，例如 radioactivity、charge、explosiveness","max_results":4}${TOOL_REQUEST_END}`,
+      `或者：${TOOL_REQUEST_START}{"tool":"subagent_codex_lookup","path":"compose(MustRead_if_the_questions_are_about_data_patch).json","question":"围绕 block.silicon-arc-furnace / silicon-arc-furnace 查继承类型、可配字段和相关 item 字段","max_results":4}${TOOL_REQUEST_END}`,
       `或者：${TOOL_REQUEST_START}{"tool":"read_bot_memory","max_chars":16000}${TOOL_REQUEST_END}`,
       `或者：${TOOL_REQUEST_START}{"tool":"append_bot_memory","memory":"蓝图中的N倍速是单位生产速度"}${TOOL_REQUEST_END}`,
       `或者：${TOOL_REQUEST_START}{"tool":"send_prompt_image","name":"cain"}${TOOL_REQUEST_END}`,
@@ -1079,6 +1084,7 @@ export class CodexReadonlyTools {
       target_commitish: String(release?.target_commitish ?? '').trim(),
       prerelease: release?.prerelease === true,
       draft: release?.draft === true,
+      author: String(release?.author?.login ?? '').trim() || null,
       published_at: String(release?.published_at ?? '').trim() || null,
       created_at: String(release?.created_at ?? '').trim() || null,
       html_url: String(release?.html_url ?? '').trim() || null,

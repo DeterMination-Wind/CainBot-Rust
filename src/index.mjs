@@ -38,8 +38,8 @@ const projectRoot = path.resolve(srcDir, '..');
 const GROUP_CARD_SYNC_RETRY_MS = 10 * 60 * 1000;
 const SHUTDOWN_VOTE_REQUIRED_COUNT = 3;
 const SHUTDOWN_VOTE_TTL_MS = 10 * 60 * 1000;
-const SHUTDOWN_VOTE_FILTER_MODEL = 'gpt-5-codex-mini';
-const LOW_INFORMATION_REPLY_FILTER_MODEL = 'gpt-5-codex-mini';
+const SHUTDOWN_VOTE_FILTER_MODEL = 'deepseek-ai/deepseek-v3.2';
+const LOW_INFORMATION_REPLY_FILTER_MODEL = 'deepseek-ai/deepseek-v3.2';
 const SHUTDOWN_VOTE_PROMPT = '确定要关闭此bot的功能吗，大于两个人回复本消息"Y"将确认此操作';
 const OWNER_LOG_MAX_CHARS = 1500;
 const GROUP_INVITE_POLL_INTERVAL_MS = 60 * 1000;
@@ -206,25 +206,52 @@ function parseLowInformationDecision(raw) {
     return {
       allow: parsed?.allow !== false,
       fallback: String(parsed?.fallback ?? '').trim(),
-      reason: String(parsed?.reason ?? '').trim()
+      reason: String(parsed?.reason ?? '').trim(),
+      startGroupFileDownload: parsed?.start_group_file_download === true,
+      requestText: String(parsed?.request_text ?? '').trim()
     };
   } catch {
     return {
       allow: true,
       fallback: '',
-      reason: 'parse-failed'
+      reason: 'parse-failed',
+      startGroupFileDownload: false,
+      requestText: ''
     };
   }
+}
+
+function buildLowInformationFallback(sourceText, replyText = '') {
+  const source = String(sourceText ?? '').trim();
+  const reply = String(replyText ?? '').trim();
+  const combined = `${source}\n${reply}`;
+  if (/(mindustry|mindustryx|mdt|牡丹亭|datapatch|方块|建筑|炮塔|单位|物品|液体|状态|星球|天气|字段|超速|投影|穹顶)/i.test(combined)) {
+    return '还没定位到具体字段。';
+  }
+  if (/(模组|mod|插件|脚本|源码|仓库|项目|目录|构建|编译|报错|服务端|服务器)/i.test(combined)) {
+    return '还没定位到具体位置。';
+  }
+  return '还没定位到具体答案。';
 }
 
 async function maybeFilterLowInformationReply(qaClient, logger, sourceText, replyText, options = {}) {
   const normalizedReply = String(replyText ?? '').trim();
   if (!normalizedReply) {
-    return '';
+    return {
+      text: '',
+      startGroupFileDownload: false,
+      requestText: '',
+      reason: 'empty-reply'
+    };
   }
   const normalizedSource = String(sourceText ?? '').trim();
   if (!normalizedSource) {
-    return normalizedReply;
+    return {
+      text: normalizedReply,
+      startGroupFileDownload: false,
+      requestText: '',
+      reason: ''
+    };
   }
 
   try {
@@ -236,8 +263,13 @@ async function maybeFilterLowInformationReply(qaClient, logger, sourceText, repl
           '如果回复只是把用户问题换词重复、空泛复述、没有新增信息、没有具体定位、没有实际帮助，就判定 allow=false。',
           '如果回复给出了具体做法、具体定位、明确结论、有效下一步，判定 allow=true。',
           '当用户在问“怎么改/怎么做/在哪里/哪个字段”时，像“改对应字段”“看对应对象”“去改相关配置”这类话都算低信息空话。',
-          '只输出 JSON：{"allow":boolean,"fallback":"可选的替代短句","reason":"简短原因"}',
-          'fallback 只在 allow=false 且需要替代短句时填写，否则留空。'
+          '像“需要查文档再确认”“请提供更多上下文/配置名称我才能定位”“还没能读取对应文件/JSON，因此不敢确定”“收到，先读取某文件”这类把工作往后推、但没有给出读取结果的回复，一律判定 allow=false。',
+          '如果这类问题本来就应该先读文件或调工具确认，而拟发送回复里既没有真实读取结果，也没有具体字段/路径/对象名/版本结论，也一律 allow=false。',
+          '如果用户原话本身是要安装包、jar、zip、apk、客户端、最新版文件、release 资产、插件包、服务器插件、SA 插件，而拟发送回复只是“帮你交给下载流程”“等我给你找文件”“我去走下载流程”这种口头承诺但没有真实调用，那么应判定 allow=false，并设置 start_group_file_download=true。',
+          '出现 start_group_file_download=true 时，request_text 默认填写用户原话；除非用户原话缺关键信息且你能更精确重写，否则不要改写。',
+          '只输出 JSON：{"allow":boolean,"fallback":"可选的替代短句","reason":"简短原因","start_group_file_download":boolean,"request_text":"可选，默认用用户原话"}',
+          'fallback 只在 allow=false 且需要替代短句时填写，否则留空。',
+          '如果当前模式是 fallback，并且这条回复属于“先去查文档/先去读文件”的空话，fallback 应改成一句更硬的纠偏短句，明确要求先读取对应文件或工具结果后再回答，不要复述原空话。'
         ].join('\n')
       },
       {
@@ -255,16 +287,44 @@ async function maybeFilterLowInformationReply(qaClient, logger, sourceText, repl
 
     const decision = parseLowInformationDecision(raw);
     if (decision.allow) {
-      return normalizedReply;
+      return {
+        text: normalizedReply,
+        startGroupFileDownload: false,
+        requestText: '',
+        reason: decision.reason
+      };
     }
     logger.info(`已拦截低信息回复：${decision.reason || 'no-reason'} | source=${normalizedSource.slice(0, 80)} | reply=${normalizedReply.slice(0, 80)}`);
-    if (options.onLowInformation === 'fallback') {
-      return decision.fallback || '还没定位到具体改法。';
+    if (decision.startGroupFileDownload) {
+      return {
+        text: '',
+        startGroupFileDownload: true,
+        requestText: decision.requestText || normalizedSource,
+        reason: decision.reason
+      };
     }
-    return '';
+    if (options.onLowInformation === 'fallback') {
+      return {
+        text: buildLowInformationFallback(normalizedSource, normalizedReply),
+        startGroupFileDownload: false,
+        requestText: '',
+        reason: decision.reason
+      };
+    }
+    return {
+      text: '',
+      startGroupFileDownload: false,
+      requestText: '',
+      reason: decision.reason
+    };
   } catch (error) {
     logger.warn(`低信息回复判定失败，回退为原回复：${error.message}`);
-    return normalizedReply;
+    return {
+      text: normalizedReply,
+      startGroupFileDownload: false,
+      requestText: '',
+      reason: 'filter-error'
+    };
   }
 }
 
@@ -455,6 +515,91 @@ async function sendLongReply(napcatClient, context, messageId, text) {
   return await napcatClient.replyText(context, messageId, text);
 }
 
+function createReplyLineStreamSession(napcatClient, logger, context, messageId) {
+  let pending = '';
+  let bufferedSegments = [];
+  let sentSegments = 0;
+  let queue = Promise.resolve();
+
+  const bufferSegment = (segment) => {
+    const text = String(segment ?? '').trim();
+    if (!text) {
+      return;
+    }
+    bufferedSegments.push(text);
+  };
+
+  const enqueueSend = (segment) => {
+    const text = String(segment ?? '').trim();
+    if (!text) {
+      return;
+    }
+    const replyTarget = sentSegments === 0 ? messageId : null;
+    sentSegments += 1;
+    queue = queue.then(async () => {
+      try {
+        await sendLongReply(napcatClient, context, replyTarget, text);
+      } catch (error) {
+        logger.warn(`流式回复发送失败：${error.message}`);
+      }
+    });
+  };
+
+  const drainCompletedLines = () => {
+    pending = pending.replace(/\r/g, '');
+    let newlineIndex = pending.indexOf('\n');
+    while (newlineIndex >= 0) {
+      const segment = pending.slice(0, newlineIndex);
+      pending = pending.slice(newlineIndex + 1);
+      bufferSegment(segment);
+      newlineIndex = pending.indexOf('\n');
+    }
+  };
+
+  const flushPendingToBuffer = () => {
+    const tail = pending.trim();
+    pending = '';
+    if (tail) {
+      bufferSegment(tail);
+    }
+  };
+
+  return {
+    pushDelta(delta) {
+      pending += String(delta ?? '');
+      drainCompletedLines();
+    },
+    discardPending() {
+      pending = '';
+      bufferedSegments = [];
+    },
+    async flushPending() {
+      flushPendingToBuffer();
+    },
+    hasBufferedAny() {
+      return bufferedSegments.length > 0 || String(pending ?? '').trim().length > 0;
+    },
+    async sendBuffered(overrideText = '') {
+      flushPendingToBuffer();
+      const normalizedOverride = String(overrideText ?? '').trim();
+      const segments = normalizedOverride ? [normalizedOverride] : bufferedSegments.slice();
+      bufferedSegments = [];
+      if (segments.length === 0) {
+        return false;
+      }
+      segments.forEach(enqueueSend);
+      await queue;
+      return true;
+    },
+    hasStreamedAny() {
+      return sentSegments > 0;
+    },
+    async wait() {
+      await queue;
+    }
+  };
+}
+
 function compactErrorReplyText(error) {
   const source = String(error?.message ?? error ?? '').trim();
   if (!source) {
@@ -469,11 +614,55 @@ function compactErrorReplyText(error) {
 }
 
 async function sendChatResultIfPresent(config, qaClient, logger, napcatClient, context, messageId, result, options = {}) {
-  const replyText = await maybeFilterLowInformationReply(qaClient, logger, options?.sourceText, result?.text, options);
-  if (!replyText) {
+  const streamReplySession = options?.streamReplySession && typeof options.streamReplySession === 'object'
+    ? options.streamReplySession
+    : null;
+  await streamReplySession?.flushPending?.();
+  const review = await maybeFilterLowInformationReply(qaClient, logger, options?.sourceText, result?.text, options);
+  if (review.startGroupFileDownload && options?.groupFileDownloadManager && context?.messageType === 'group') {
+    streamReplySession?.discardPending?.();
+    const handoff = await options.groupFileDownloadManager.startGroupDownloadFlowFromTool(
+      context,
+      {
+        message_id: String(messageId ?? '').trim(),
+        raw_message: String(review.requestText || options?.sourceText || '').trim()
+      },
+      {
+        request_text: review.requestText || options?.sourceText || ''
+      }
+    ).catch((error) => {
+      logger.warn(`低信息回复改走下载流程失败：${error.message}`);
+      return null;
+    });
+    if (handoff?.started === true) {
+      logger.info(`低信息回复已改为启用下载流程：source=${String(options?.sourceText ?? '').slice(0, 80)}`);
+      return;
+    }
+    const handoffReason = String(handoff?.reason ?? '').trim();
+    if (handoffReason) {
+      await sendLongReply(napcatClient, context, messageId, handoffReason);
+      return;
+    }
+  }
+  if (!review.text) {
+    streamReplySession?.discardPending?.();
     return;
   }
-  await sendLongReply(napcatClient, context, messageId, replyText);
+  const normalizedOriginal = String(result?.text ?? '').trim();
+  const normalizedReviewed = String(review.text ?? '').trim();
+  if (
+    streamReplySession
+    && normalizedOriginal
+    && normalizedOriginal === normalizedReviewed
+    && streamReplySession.hasBufferedAny?.()
+  ) {
+    const sent = await streamReplySession.sendBuffered();
+    if (sent) {
+      return;
+    }
+  }
+  streamReplySession?.discardPending?.();
+  await sendLongReply(napcatClient, context, messageId, review.text);
 }
 
 function extractMessageIdsFromSendResults(results) {
@@ -876,6 +1065,7 @@ async function handleCommand(params) {
       if (context.messageType === 'group' && !chatSessionManager.isGroupEnabled(context.groupId)) {
         throw new Error('当前群未启用 Cain 问答。请先由 bot 主人执行 /e 启用，或把群号加入 qa.enabledGroupIds。');
       }
+      const streamReplySession = createReplyLineStreamSession(napcatClient, logger, context, event.message_id);
       const chatInput = appendExtraSectionsToChatInput(
         await buildChatInput(napcatClient, event, {
           argument: command.argument,
@@ -885,10 +1075,16 @@ async function handleCommand(params) {
         }),
         getTrackedMsavSections(msavMapAnalyzer, event)
       );
+      chatInput.runtimeContext = {
+        ...(chatInput.runtimeContext ?? {}),
+        answerStreamSession: streamReplySession
+      };
       const result = await chatSessionManager.chat(context, chatInput);
       await sendChatResultIfPresent(config, qaClient, logger, napcatClient, context, event.message_id, result, {
         sourceText: command.argument || plainTextFromMessage(event?.message, event?.raw_message),
-        onLowInformation: 'fallback'
+        onLowInformation: 'fallback',
+        streamReplySession,
+        groupFileDownloadManager
       });
       return true;
     }
@@ -1056,7 +1252,7 @@ async function main() {
   const runtimeConfigStore = new RuntimeConfigStore(
     config.bot.runtimeConfigFile,
     configDir,
-    {},
+    { qa: config.qa },
     logger
   );
   await runtimeConfigStore.load();
@@ -1677,6 +1873,7 @@ async function main() {
       }
 
       if (context.messageType === 'group' && chatSessionManager.isGroupEnabled(context.groupId) && eventMentionsSelf(event, config.bot.displayName)) {
+        const streamReplySession = createReplyLineStreamSession(napcatClient, logger, context, event.message_id);
         const chatInput = appendExtraSectionsToChatInput(
           await buildChatInput(napcatClient, event, {
             argument: text,
@@ -1686,10 +1883,16 @@ async function main() {
           }),
           getTrackedMsavSections(msavMapAnalyzer, event)
         );
+        chatInput.runtimeContext = {
+          ...(chatInput.runtimeContext ?? {}),
+          answerStreamSession: streamReplySession
+        };
         const result = await chatSessionManager.chat(context, chatInput);
         await sendChatResultIfPresent(config, qaClient, logger, napcatClient, context, event.message_id, result, {
           sourceText: text,
-          onLowInformation: 'fallback'
+          onLowInformation: 'fallback',
+          streamReplySession,
+          groupFileDownloadManager
         });
         return;
       }
@@ -1714,6 +1917,7 @@ async function main() {
         }
         const filterResult = await chatSessionManager.shouldSuggestReply(context, event);
         if (filterResult.shouldPrompt) {
+          const streamReplySession = createReplyLineStreamSession(napcatClient, logger, context, event.message_id);
           const chatInput = appendExtraSectionsToChatInput(
             await buildChatInput(napcatClient, event, {
               argument: text,
@@ -1723,10 +1927,16 @@ async function main() {
             }),
             getTrackedMsavSections(msavMapAnalyzer, event)
           );
+          chatInput.runtimeContext = {
+            ...(chatInput.runtimeContext ?? {}),
+            answerStreamSession: streamReplySession
+          };
           const result = await chatSessionManager.chat(context, chatInput);
           await sendChatResultIfPresent(config, qaClient, logger, napcatClient, context, event.message_id, result, {
             sourceText: text,
-            onLowInformation: 'suppress'
+            onLowInformation: 'suppress',
+            streamReplySession,
+            groupFileDownloadManager
           });
           await chatSessionManager.markHinted(context, event.message_id);
           return;

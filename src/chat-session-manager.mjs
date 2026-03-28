@@ -191,6 +191,62 @@ function normalizeMemoryCaptureDecision(raw) {
   };
 }
 
+function normalizeHallucinationCheckDecision(raw, fallbackAnswer = '') {
+  const parsed = parseJsonObject(raw, {});
+  const answer = String(
+    parsed?.answer
+    ?? parsed?.revised_answer
+    ?? parsed?.rewrite
+    ?? parsed?.final_answer
+    ?? fallbackAnswer
+  ).trim();
+  return {
+    approved: parsed?.approved !== false,
+    answer,
+    reason: String(parsed?.reason ?? '').trim()
+  };
+}
+
+function stringifyReviewMessageContent(content) {
+  if (typeof content === 'string') {
+    return content.trim();
+  }
+  if (content == null) {
+    return '';
+  }
+  try {
+    return JSON.stringify(content, null, 2).trim();
+  } catch {
+    return String(content).trim();
+  }
+}
+
+function buildReviewTranscript(messages, maxChars = 24000, maxMessages = 16) {
+  const normalized = Array.isArray(messages) ? messages.slice(-maxMessages) : [];
+  if (normalized.length === 0) {
+    return '';
+  }
+
+  const lines = [];
+  let totalChars = 0;
+  for (let index = normalized.length - 1; index >= 0; index -= 1) {
+    const message = normalized[index];
+    const role = String(message?.role ?? 'unknown').trim() || 'unknown';
+    const content = stringifyReviewMessageContent(message?.content);
+    if (!content) {
+      continue;
+    }
+    const line = `[${role}]\n${content}`;
+    const nextChars = totalChars + line.length + 2;
+    if (lines.length > 0 && nextChars > maxChars) {
+      break;
+    }
+    lines.unshift(line);
+    totalChars = nextChars;
+  }
+  return lines.join('\n\n');
+}
+
 function looksLikeCorrectionCandidate(text) {
   const normalized = String(text ?? '').replace(/\s+/g, ' ').trim();
   if (!normalized || normalized.length < 4) {
@@ -292,7 +348,7 @@ function looksLikeMindustryQuestion(text) {
   if (!normalized) {
     return false;
   }
-  return /(mindustry|mindustryx|mdt|牡丹亭|datapatch|content|方块|建筑|炮塔|工厂|单位|物品|液体|状态|星球|天气|地图|mod|模组|字段|继承|类|电弧硅炉|硅炉|电弧)/i.test(normalized);
+  return /(mindustry|mindustryx|mdt|牡丹亭|datapatch|content|方块|建筑|炮塔|工厂|单位|物品|液体|状态|星球|天气|地图|mod|模组|字段|继承|类|电弧硅炉|硅炉|电弧|超速|穹顶|投影|加速|倍率|范围)/i.test(normalized);
 }
 
 function looksLikeCodexRoutingQuestion(text) {
@@ -301,6 +357,89 @@ function looksLikeCodexRoutingQuestion(text) {
     return false;
   }
   return /(模组|mod|插件|plugin|脚本|script|源码|源代码|仓库|repo|github|项目|工程|目录|文件夹|构建|编译|gradle|java|kotlin|报错|报异常|堆栈|服务端|服务器|scriptagent|shenyu|betterhotkey|neon|mindustryjav modtemplate|template)/i.test(normalized);
+}
+
+function requiresConcreteLookup(text) {
+  const normalized = String(text ?? '').trim();
+  if (!normalized) {
+    return false;
+  }
+  if (looksLikeMindustryQuestion(normalized) || looksLikeCodexRoutingQuestion(normalized)) {
+    return true;
+  }
+  return /(怎么改|改什么|改哪里|在哪里|哪个字段|哪个配置|哪一项|哪一个|倍率|范围|数值|英文名|id|路径|release|tag|commit)/i.test(normalized);
+}
+
+function looksLikeDeferringLowInformationAnswer(text) {
+  const normalized = String(text ?? '').replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return false;
+  }
+  return /(我先去读|我先读|先读取|先去看|我先看|先查|需要查|查文档|还没读取|还没读到|还没定位|不敢确定|请提供更多上下文|请提供更多信息|才能定位|确认后再|再告诉你|再给你具体|收到，先读取|请先读取对应的 .*再回复|不能只说不确定)/i.test(normalized);
+}
+
+const MINDUSTRY_BUNDLE_NAME_PATTERN = /^(block|item|unit|liquid|status|planet|weather)\.([^.]+)\.name$/i;
+
+function decodePropertiesText(text) {
+  return String(text ?? '')
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)))
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\f/g, '\f')
+    .replace(/\\\\/g, '\\');
+}
+
+function normalizeBundleName(text) {
+  return String(text ?? '')
+    .replace(/\[[^\]]*]/g, '')
+    .replace(/:[^:\s]+:/g, ' ')
+    .replace(/\{[^}]*}/g, ' ')
+    .replace(/[()（）【】[\]{}"'`~!@#$%^&*+=|\\/<>?,.;:，。！？、·\-_]/g, '')
+    .replace(/\s+/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function parseMindustryBundleEntries(text) {
+  const lines = String(text ?? '').split(/\r?\n/);
+  const entries = [];
+  for (const rawLine of lines) {
+    const line = String(rawLine ?? '').trim();
+    if (!line || line.startsWith('#') || line.startsWith('!')) {
+      continue;
+    }
+
+    const pairMatch = line.match(/^(.*?)\s*[=:]\s*(.*)$/);
+    if (!pairMatch) {
+      continue;
+    }
+
+    const key = String(pairMatch[1] ?? '').trim();
+    const match = key.match(MINDUSTRY_BUNDLE_NAME_PATTERN);
+    if (!match) {
+      continue;
+    }
+
+    const value = decodePropertiesText(String(pairMatch[2] ?? '').trim());
+    const localizedName = String(value ?? '').trim();
+    if (!localizedName) {
+      continue;
+    }
+
+    const kind = String(match[1] ?? '').toLowerCase();
+    const id = String(match[2] ?? '').trim();
+    const qualifiedId = `${kind}.${id}`;
+    entries.push({
+      key,
+      kind,
+      id,
+      qualifiedId,
+      localizedName,
+      normalizedLocalizedName: normalizeBundleName(localizedName)
+    });
+  }
+  return entries;
 }
 
 function extractKnowledgeTokens(text) {
@@ -360,12 +499,83 @@ function scoreKnowledgeEntry(entry, tokens) {
   return score;
 }
 
+function resolveMindustryBundleMatches(text, bundleEntries, maxResults = 6) {
+  const source = String(text ?? '').trim();
+  if (!source || !Array.isArray(bundleEntries) || bundleEntries.length === 0) {
+    return [];
+  }
+
+  const normalizedSource = normalizeBundleName(source);
+  const rawTokens = source.match(/[\p{Script=Han}A-Za-z0-9_.:-]{1,}/gu) ?? [];
+  const normalizedTokens = new Set(
+    rawTokens
+      .map((token) => normalizeBundleName(token))
+      .filter(Boolean)
+  );
+
+  const scored = bundleEntries
+    .map((entry) => {
+      const localizedName = String(entry?.localizedName ?? '').trim();
+      const normalizedLocalized = String(entry?.normalizedLocalizedName ?? '').trim();
+      if (!localizedName || !normalizedLocalized) {
+        return null;
+      }
+
+      let score = 0;
+      if (source.includes(localizedName)) {
+        score += Math.max(30, localizedName.length * 12);
+      }
+      if (normalizedSource.includes(normalizedLocalized)) {
+        score += Math.max(20, normalizedLocalized.length * 10);
+      }
+      if (normalizedTokens.has(normalizedLocalized)) {
+        score += Math.max(18, normalizedLocalized.length * 8);
+      }
+      for (const token of normalizedTokens) {
+        if (!token || token.length < 2 || token === normalizedLocalized) {
+          continue;
+        }
+        if (normalizedLocalized.includes(token)) {
+          score += Math.max(8, token.length * 4);
+        }
+      }
+      if (score <= 0) {
+        return null;
+      }
+
+      return {
+        ...entry,
+        score
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => right.score - left.score || left.localizedName.localeCompare(right.localizedName, 'zh-CN'));
+
+  const seen = new Set();
+  const results = [];
+  for (const entry of scored) {
+    const key = `${entry.qualifiedId}:${entry.localizedName}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    results.push(entry);
+    if (results.length >= maxResults) {
+      break;
+    }
+  }
+  return results;
+}
+
 const ANSWER_QUALITY_GUARD_PROMPT = [
   '补充硬性规则：',
   '1. 不要把用户问题换词重复一遍来凑回答。',
   '2. 用户问“怎么改/怎么做/在哪里/哪个字段”时，回答里必须给出至少一个具体定位：文件、目录、类名、对象名、字段名、命令，或明确的下一步读取目标。',
   '3. 如果暂时给不出具体定位，就直接说“还没定位到具体位置/改法”，不要说“改对应字段”“看对应对象”“去改相关配置”这类空话。',
-  '4. 宁可明确表示还没定位，也不要输出低信息复述。'
+  '4. 宁可明确表示还没定位，也不要输出低信息复述。',
+  '5. 只要某个事实能通过工具精确确认，就必须先调工具，不要靠记忆、常识或自行推断硬答。',
+  '6. 如果问题是在查英文名、内部 id、对象名、字段名、文件路径、版本 tag、release、提交记录或源码位置，默认先调工具，再组织回答。',
+  '7. Mindustry 问题里出现中文物品名、建筑名、单位名、液体名、状态名、星球名、天气名时，先查 bundle_zh_CN.properties 确认英文名或 id，再继续查 JSON 或源码。'
 ].join('\n');
 
 function formatJsonSnippet(value, maxChars = 2400) {
@@ -513,10 +723,11 @@ export class ChatSessionManager {
         this.stateStore.getChatSession(sessionKey).messages,
         this.config.answer.contextWindowMessages
       );
+      const lookupSeedText = String(normalizedInput.text || normalizedInput.historyText).trim();
       const systemPrompt = await this.#buildAnswerSystemPrompt(context);
-      const ragPrompt = await this.#maybeBuildRagPrompt(normalizedInput.historyText);
-      const codexFolderGuidePrompt = await this.#maybeBuildCodexFolderGuidePrompt(normalizedInput.historyText);
-      const mindustryPrompt = await this.#maybeBuildMindustryKnowledgePrompt(normalizedInput.historyText);
+      const ragPrompt = await this.#maybeBuildRagPrompt(lookupSeedText);
+      const codexFolderGuidePrompt = await this.#maybeBuildCodexFolderGuidePrompt(lookupSeedText);
+      const mindustryPrompt = await this.#maybeBuildMindustryKnowledgePrompt(lookupSeedText);
       const userContent = [
         '以下是当前共享上下文：',
         timelineText,
@@ -533,7 +744,11 @@ export class ChatSessionManager {
         { role: 'user', content: normalizedInput.images.length > 0 ? this.#buildMultimodalUserContent(userContent, normalizedInput.images) : userContent }
       ];
 
-      const completion = await this.#completeWithReadonlyTools(context, normalizedInput.runtimeContext, requestMessages);
+      const completionRuntimeContext = {
+        ...(normalizedInput.runtimeContext ?? {}),
+        lookupSeedText
+      };
+      const completion = await this.#completeWithReadonlyTools(context, completionRuntimeContext, requestMessages);
       const assistantEntry = {
         role: 'assistant',
         kind: completion.notice === 'group-file-download-started' ? 'tool-handoff' : 'answer',
@@ -737,6 +952,7 @@ export class ChatSessionManager {
             '你负责从群聊上下文中判断：Cain 是否刚被群友纠正了一个适合写入长期记忆的事实错误。',
             '只有当最近上下文里确实出现了 Cain 先回答错、随后群友给出更正事实时，should_append 才能为 true。',
             '只保留可长期复用的稳定事实；不要记录闲聊、情绪、一次性事件、个人偏好、时间戳、用户名、群号。',
+            '特别排除时效性信息：版本号、release tag、最新版本、最新 release、commit hash 等随时会变的数据不应写入记忆。',
             '如果当前消息只是补充讨论、玩笑、猜测，或无法确认 Cain 之前说错了，就返回 false。',
             '输出必须是 JSON：{"should_append":boolean,"memory":"简短事实句","reason":"简短原因"}。',
             'memory 最多 40 字，不能为空；如果 should_append=false，则 memory 置空字符串。'
@@ -827,8 +1043,13 @@ export class ChatSessionManager {
       }
 
       const tokens = extractKnowledgeTokens(text);
+      const bundleMatches = resolveMindustryBundleMatches(text, knowledge.bundleEntries);
+      const searchTokens = [
+        ...tokens,
+        ...bundleMatches.flatMap((entry) => [entry.localizedName, entry.id, entry.qualifiedId, entry.kind])
+      ].filter(Boolean).slice(0, 24);
       const instanceCandidates = knowledge.instances
-        .map((entry) => ({ entry, score: scoreKnowledgeEntry(entry, tokens) }))
+        .map((entry) => ({ entry, score: scoreKnowledgeEntry(entry, searchTokens) }))
         .filter((item) => item.score > 0)
         .sort((left, right) => right.score - left.score || String(left.entry?.type ?? '').localeCompare(String(right.entry?.type ?? ''), 'zh-CN'))
         .slice(0, 3);
@@ -848,7 +1069,7 @@ export class ChatSessionManager {
 
       if (schemaCandidates.length < 2) {
         const additionalSchema = knowledge.compose
-          .map((entry) => ({ entry, score: scoreKnowledgeEntry(entry, tokens) }))
+          .map((entry) => ({ entry, score: scoreKnowledgeEntry(entry, searchTokens) }))
           .filter((item) => item.score > 0 && !seenSchemaTypes.has(String(item.entry?.type ?? '').trim()))
           .sort((left, right) => right.score - left.score || String(left.entry?.type ?? '').localeCompare(String(right.entry?.type ?? ''), 'zh-CN'))
           .slice(0, 2 - schemaCandidates.length)
@@ -864,17 +1085,29 @@ export class ChatSessionManager {
       }
 
       this.logger.info(
-        `Mindustry JSON 自动预读：query=${JSON.stringify(String(text ?? '').slice(0, 120))} tokens=${JSON.stringify(tokens)} ` +
+        `Mindustry JSON 自动预读：query=${JSON.stringify(String(text ?? '').slice(0, 120))} tokens=${JSON.stringify(searchTokens)} ` +
+        `bundle=${bundleMatches.map((entry) => entry.qualifiedId).join(',') || '(none)'} ` +
         `instances=${instanceCandidates.map((item) => item.entry.type).join(',') || '(none)'} ` +
         `schemas=${schemaCandidates.map((item) => item.type).join(',') || '(none)'}`
       );
 
       const lines = [
         '【Mindustry 必读 JSON 已由系统预读】',
+        `中文名映射路径：${knowledge.bundlePath}`,
         `实例库路径：${knowledge.instancePath}`,
         `结构库路径：${knowledge.composePath}`,
         '下面这些片段已经来自那两个强制要求的本地 JSON；不要再声称“我还没读取到这两个 JSON”。'
       ];
+
+      if (bundleMatches.length > 0) {
+        lines.push('bundle_zh_CN.properties 中文名解析：');
+        bundleMatches.forEach((entry, index) => {
+          lines.push(`${index + 1}. ${entry.localizedName} -> ${entry.qualifiedId}`);
+        });
+        lines.push('如果还需要继续查 compose.json，请优先用上面的英文 id 或 qualified id 调用 subagent_codex_lookup，不要只拿中文名盲搜。');
+      } else {
+        lines.push('当前问题里没有从 bundle_zh_CN.properties 明确解析出稳定的中文名映射；如果后续要查具体物品/建筑/单位，先去 bundle_zh_CN.properties 确认英文 id，再查 compose.json。');
+      }
 
       if (instanceCandidates.length > 0) {
         lines.push('实例库命中条目：');
@@ -954,21 +1187,27 @@ export class ChatSessionManager {
 
     const composePath = path.resolve(codexRoot, 'compose(MustRead_if_the_questions_are_about_data_patch).json');
     const instancePath = path.resolve(codexRoot, 'mindustryx-content(MustRead_if_the_questions_are_about_mindustry_instances).json');
+    const bundlePath = path.resolve(codexRoot, 'Mindustry-master', 'core', 'assets', 'bundles', 'bundle_zh_CN.properties');
     if (!(await pathExists(composePath)) || !(await pathExists(instancePath))) {
       return null;
     }
 
-    const [composeText, instanceText] = await Promise.all([
+    const [composeText, instanceText, bundleText] = await Promise.all([
       fs.readFile(composePath, 'utf8'),
-      fs.readFile(instancePath, 'utf8')
+      fs.readFile(instancePath, 'utf8'),
+      pathExists(bundlePath)
+        ? fs.readFile(bundlePath, 'utf8')
+        : Promise.resolve('')
     ]);
     const compose = JSON.parse(composeText);
     const instances = JSON.parse(instanceText);
     this.mindustryKnowledgeCache = {
       composePath,
       instancePath,
+      bundlePath,
       compose: Array.isArray(compose) ? compose : [],
-      instances: Array.isArray(instances) ? instances : []
+      instances: Array.isArray(instances) ? instances : [],
+      bundleEntries: parseMindustryBundleEntries(bundleText)
     };
     return this.mindustryKnowledgeCache;
   }
@@ -1086,6 +1325,44 @@ export class ChatSessionManager {
     const contextBudget = Number(this.config.answer.maxContextChars ?? 80000) || 80000;
     const workingMessages = [...messages];
     const repeatedTruncatedReads = new Map();
+    const lookupSeedText = String(runtimeContext?.lookupSeedText ?? '').trim();
+    const answerStreamSession = runtimeContext?.answerStreamSession && typeof runtimeContext.answerStreamSession === 'object'
+      ? runtimeContext.answerStreamSession
+      : null;
+    const buildCompletionOptions = () => {
+      const completionOptions = {
+        model: this.config.answer.model,
+        temperature: this.config.answer.temperature
+      };
+      if (answerStreamSession && typeof answerStreamSession.pushDelta === 'function') {
+        const streamState = { emitted: false };
+        completionOptions.onTextDelta = (delta) => answerStreamSession.pushDelta(delta);
+        completionOptions.streamState = streamState;
+      }
+      return completionOptions;
+    };
+    const discardPendingStreamText = () => {
+      if (answerStreamSession && typeof answerStreamSession.discardPending === 'function') {
+        answerStreamSession.discardPending();
+      }
+    };
+
+    const finalizeCompletion = async (text = '', notice = '') => {
+      const normalizedText = String(text ?? '').trim();
+      if (notice || !normalizedText) {
+        return { text: normalizedText, notice };
+      }
+      const checkedText = await this.#maybeRunHallucinationCheck(
+        context,
+        runtimeContext,
+        [...workingMessages, { role: 'assistant', content: normalizedText }],
+        normalizedText
+      );
+      return {
+        text: String(checkedText ?? normalizedText).trim() || normalizedText,
+        notice
+      };
+    };
 
     const completeDirectAnswer = async (assistantText, reason = '') => {
       if (assistantText) {
@@ -1099,27 +1376,37 @@ export class ChatSessionManager {
         ].filter(Boolean).join('\n')
       });
 
-      const finalText = await this.chatClient.complete(workingMessages, {
-        model: this.config.answer.model,
-        temperature: this.config.answer.temperature
-      });
-      return { text: finalText, notice: '' };
+      const finalText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+      return await finalizeCompletion(finalText, '');
     };
 
     for (let round = 0; round < hardToolRounds; round += 1) {
-      const assistantText = await this.chatClient.complete(workingMessages, {
-        model: this.config.answer.model,
-        temperature: this.config.answer.temperature
-      });
+      const assistantText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
 
       if (!toolEnabled) {
-        return { text: assistantText, notice: '' };
+        return await finalizeCompletion(assistantText, '');
       }
 
       const toolParsing = this.codexTools.parseToolCalls(assistantText);
       if (toolParsing.calls.length === 0) {
-        return { text: assistantText, notice: '' };
+        if (toolEnabled && requiresConcreteLookup(lookupSeedText) && looksLikeDeferringLowInformationAnswer(assistantText)) {
+          discardPendingStreamText();
+          this.logger.info(`低信息占位回答回炉：query=${JSON.stringify(lookupSeedText.slice(0, 120))} reply=${JSON.stringify(String(assistantText ?? '').slice(0, 120))}`);
+          workingMessages.push({ role: 'assistant', content: assistantText });
+          workingMessages.push({
+            role: 'user',
+            content: [
+              '系统纠偏：上一条回答是低信息占位话术，不能直接发给用户。',
+              '这类问题必须先读取本地文件、JSON、名称表、源码或其他只读工具结果，再给出具体字段、对象名、路径、数值或结论。',
+              '不要再说“我先看”“还没读取到”“请补充上下文”“需要查文档再确认”之类的话。',
+              '下一条要么请求一个只读工具，要么直接基于已有读取结果回答。'
+            ].join('\n')
+          });
+          continue;
+        }
+        return await finalizeCompletion(assistantText, '');
       }
+      discardPendingStreamText();
 
       if (estimateMessageChars(workingMessages) + estimateContentChars(assistantText) >= Math.max(contextBudget - 4000, Math.floor(contextBudget * 0.9))) {
         return await completeDirectAnswer(assistantText, '系统提示：当前上下文已经接近上限，请停止调用工具并直接回答。');
@@ -1186,10 +1473,11 @@ export class ChatSessionManager {
       }
 
       if (toolRequest.tool === 'start_group_file_download' && toolResult?.started === true) {
-        return {
-          text: '',
-          notice: 'group-file-download-started'
-        };
+        discardPendingStreamText();
+        return await finalizeCompletion(
+          '',
+          'group-file-download-started'
+        );
       }
 
       workingMessages.push({ role: 'assistant', content: assistantText });
@@ -1205,6 +1493,84 @@ export class ChatSessionManager {
     }
 
     return await completeDirectAnswer('', '系统提示：请基于现有信息直接回答用户。');
+  }
+
+  async #maybeRunHallucinationCheck(context, runtimeContext, supportingMessages, draftText) {
+    const reviewConfig = this.config.hallucinationCheck ?? {};
+    if (reviewConfig.enabled !== true) {
+      return draftText;
+    }
+
+    const candidateText = String(draftText ?? '').trim();
+    if (!candidateText) {
+      return draftText;
+    }
+
+    const transcript = buildReviewTranscript(supportingMessages);
+    if (!transcript) {
+      return draftText;
+    }
+
+    const maxRounds = Math.max(1, Math.min(6, Number(reviewConfig.maxToolRounds ?? 3) || 3));
+    let candidate = candidateText;
+
+    for (let round = 0; round < maxRounds; round += 1) {
+      let raw = '';
+      try {
+        raw = await this.chatClient.complete([
+          {
+            role: 'system',
+            content: [
+              '你是 Cain 的回答事实校对器。',
+              '你只能依据提供的上下文和候选回答本身做判断，不要引入上下文里没有的新事实。',
+              '如果候选回答里有无法从上下文支撑的具体事实、版本号、路径、字段名、对象名、数量、结论，就把这部分改写成更保守且明确不确定的说法。',
+              '如果候选回答已经足够稳妥，就保持原意，不要为了改而改。',
+              '不要使用 Markdown。',
+              '只输出 JSON：{"approved":boolean,"answer":"最终可发送的回答","reason":"简短原因"}。',
+              'approved=true 时，answer 也必须填写最终可发送版本。'
+            ].join('\n')
+          },
+          {
+            role: 'user',
+            content: [
+              `会话类型：${context?.messageType === 'group' ? 'group' : 'private'}`,
+              runtimeContext?.lookupSeedText
+                ? `用户核心问题：${String(runtimeContext.lookupSeedText).trim()}`
+                : '',
+              '以下是候选回答生成时可见的上下文：',
+              transcript,
+              '',
+              '以下是当前候选回答：',
+              candidate
+            ].filter(Boolean).join('\n\n')
+          }
+        ], {
+          model: String(reviewConfig.model ?? this.config.answer.model ?? '').trim() || this.config.answer.model,
+          temperature: Number(reviewConfig.temperature ?? 0.1) || 0.1
+        });
+      } catch (error) {
+        this.logger.warn(`幻觉检查失败，回退原回答：${error.message}`);
+        return candidate;
+      }
+
+      const decision = normalizeHallucinationCheckDecision(raw, candidate);
+      if (decision.approved) {
+        if (decision.answer !== candidate) {
+          this.logger.info(`幻觉检查修订回答已通过：${decision.reason || 'no-reason'}`);
+        }
+        return decision.answer || candidate;
+      }
+
+      if (!decision.answer || decision.answer === candidate) {
+        this.logger.warn(`幻觉检查未给出有效修订，保留原回答：${decision.reason || 'no-reason'}`);
+        return candidate;
+      }
+
+      this.logger.info(`幻觉检查修订候选回答：round=${round + 1} reason=${decision.reason || 'no-reason'}`);
+      candidate = decision.answer;
+    }
+
+    return candidate;
   }
 
   async #runExclusive(sessionKey, task) {

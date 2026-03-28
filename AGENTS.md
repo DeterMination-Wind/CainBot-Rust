@@ -36,6 +36,13 @@ CC Switch 本地数据目录：
 
 - `C:\Users\华硕\.cc-switch`
 
+Linux 部署目标约定：
+
+- 机器人目录：`/Cainbot`
+- 依赖数据根目录：`/Wind_Data`
+- `qa.answer.codexRoot` / `issueRepair.codexRoot` 应指向 `/Wind_Data/codex`
+- 本地构建目录英文名固定为 `/Wind_Data/codex/builds`
+
 ## 现在不要改坏的行为
 
 - 不要把 AI 报错直接发到群里，除非用户明确要求
@@ -123,6 +130,108 @@ CC Switch 本地数据目录：
 - 继续拦截“改对应字段”“看相关对象”这类空话
 - 群主动回复场景低信息时优先抑制
 - 显式问答场景低信息时可以回退为短句
+
+## Linux 迁移踩坑
+
+### 1. 不要在 Linux 上继续用中文构建目录名
+
+这次已经把 Linux 的构建目录统一改成：
+
+- `/Wind_Data/codex/builds`
+
+原因：
+
+- 之前从 Windows 用 `pscp` 传目录时，中文目录名 `构建` 在远端实际落成了乱码目录
+- 后续 `config.json`、shell、日志和远端排查都容易被终端编码误导
+- 代码默认值已经改成英文 `builds`，不要再改回中文
+
+相关文件：
+
+- `src/config.mjs`
+- `src/group-file-download-manager.mjs`
+- `config.example.json`
+
+### 2. 用 `pscp` 同步源码时一定看目标路径
+
+这次实际踩过的坑：
+
+- 把 `src/config.mjs` 和 `src/group-file-download-manager.mjs` 误传到了 `/Cainbot/` 根目录
+- 正确目标其实应该是 `/Cainbot/src/`
+
+要求：
+
+- 用 `pscp` 上传单文件前先确认远端完整目标路径
+- 传完后至少确认一次目标文件是否真的在预期目录
+- 不要因为“文件名一样”就默认已经覆盖了运行中的源码
+
+### 3. Linux 上的硬编码路径不要再指向仓库相对目录
+
+Linux 部署后，和模组、仓库、构建产物相关的路径应该统一收口到 `/Wind_Data`
+
+至少保持：
+
+- `issueRepair.codexRoot = /Wind_Data/codex`
+- `qa.answer.codexRoot = /Wind_Data/codex`
+- `qa.answer.localBuildRoot = /Wind_Data/codex/builds`
+- `qa.answer.vanillaRepoRoot = /Wind_Data/codex/Mindustry-master`
+- `qa.answer.xRepoRoot = /Wind_Data/codex/MindustryX-main`
+- `qa.answer.rag.roots[alias=codex].path = /Wind_Data/codex`
+
+不要把 Linux 实际运行配置再改回 `../codex/...` 这种仅适合本地开发目录结构的写法。
+
+### 4. NapCat 在 root 下运行要带 `--no-sandbox`
+
+远端 NapCat 当前路径：
+
+- `/root/Napcat/opt/QQ/qq`
+
+已验证：
+
+- 直接以 root 跑 Electron，不带 `--no-sandbox` 会直接报错退出
+- 可运行方式是配合虚拟显示：
+
+```bash
+xvfb-run -a /root/Napcat/opt/QQ/qq --no-sandbox
+```
+
+如果后续要做 systemd 或守护脚本，别漏掉这两个前提：
+
+- 需要图形环境替代层，例如 `xvfb-run`
+- root 运行时需要 `--no-sandbox`
+
+### 5. CainBot 报 `fetch failed` 时先查 NapCat 的 3000 端口
+
+这次 Linux 端 `cainbot` 服务本身可以启动，`CC Switch` 代理也能起来，但日志里持续出现：
+
+- SSE 连接断开
+- 群邀请轮询失败
+- `fetch failed`
+
+这里不要先怀疑 CainBot 主逻辑。优先检查：
+
+- `http://127.0.0.1:3000`
+- NapCat OneBot HTTP / SSE 是否真的在监听
+- QQ 是否已经完成登录，NapCat 插件是否真正加载
+
+只要 `127.0.0.1:3000` 没起来，CainBot 侧大概率只会表现为各种 `fetch failed`。
+
+### 6. Linux 上的 CC Switch 能装，但需要图形环境
+
+已验证 Ubuntu 24.04 arm64 可安装：
+
+- `CC-Switch-v3.12.3-Linux-arm64.deb`
+
+注意点：
+
+- 纯 SSH 下直接启动通常会因为没有显示环境失败
+- 可用 `xvfb-run -a /usr/bin/cc-switch`
+- 迁移本地配置时，数据库可能被锁，直接复制正在使用的 db 可能失败
+- 更稳妥的方式是复制备份库到 `/root/.cc-switch/cc-switch.db`
+
+确认代理成功的方式：
+
+- 检查 `127.0.0.1:15721` 是否在监听
+- 查看 `/tmp/cc-switch.log`
 
 ## 配置修改原则
 
