@@ -38,8 +38,8 @@ const projectRoot = path.resolve(srcDir, '..');
 const GROUP_CARD_SYNC_RETRY_MS = 10 * 60 * 1000;
 const SHUTDOWN_VOTE_REQUIRED_COUNT = 3;
 const SHUTDOWN_VOTE_TTL_MS = 10 * 60 * 1000;
-const SHUTDOWN_VOTE_FILTER_MODEL = 'deepseek-ai/deepseek-v3.2';
-const LOW_INFORMATION_REPLY_FILTER_MODEL = 'deepseek-ai/deepseek-v3.2';
+const SHUTDOWN_VOTE_FILTER_MODEL = null;
+const LOW_INFORMATION_REPLY_FILTER_MODEL = null;
 const SHUTDOWN_VOTE_PROMPT = '确定要关闭此bot的功能吗，大于两个人回复本消息"Y"将确认此操作';
 const OWNER_LOG_MAX_CHARS = 1500;
 const GROUP_INVITE_POLL_INTERVAL_MS = 60 * 1000;
@@ -281,7 +281,7 @@ async function maybeFilterLowInformationReply(qaClient, logger, sourceText, repl
         ].join('\n')
       }
     ], {
-      model: LOW_INFORMATION_REPLY_FILTER_MODEL,
+      model: options?.lowInformationFilterModel || LOW_INFORMATION_REPLY_FILTER_MODEL || 'gpt-5.4-mini',
       temperature: 0.1
     });
 
@@ -1083,6 +1083,7 @@ async function handleCommand(params) {
       await sendChatResultIfPresent(config, qaClient, logger, napcatClient, context, event.message_id, result, {
         sourceText: command.argument || plainTextFromMessage(event?.message, event?.raw_message),
         onLowInformation: 'fallback',
+        lowInformationFilterModel: config.qa.lowInformationFilterModel,
         streamReplySession,
         groupFileDownloadManager
       });
@@ -1310,7 +1311,8 @@ async function main() {
     logger,
     {
       downloadRoot: path.join(projectRoot, 'data', 'release-downloads'),
-      chatClient: qaClient
+      chatClient: qaClient,
+      platformClassifyModel: config.qa.platformClassifyModel
     }
   );
   const msavMapAnalyzer = new MsavMapAnalyzer({
@@ -1610,7 +1612,7 @@ async function main() {
         ].join('\n')
       }
     ], {
-      model: SHUTDOWN_VOTE_FILTER_MODEL,
+      model: config.qa.shutdownVoteFilterModel || SHUTDOWN_VOTE_FILTER_MODEL || 'gpt-5.4-mini',
       temperature: 0.1
     });
     const parsed = extractJsonObject(raw);
@@ -1891,6 +1893,7 @@ async function main() {
         await sendChatResultIfPresent(config, qaClient, logger, napcatClient, context, event.message_id, result, {
           sourceText: text,
           onLowInformation: 'fallback',
+          lowInformationFilterModel: config.qa.lowInformationFilterModel,
           streamReplySession,
           groupFileDownloadManager
         });
@@ -1935,6 +1938,7 @@ async function main() {
           await sendChatResultIfPresent(config, qaClient, logger, napcatClient, context, event.message_id, result, {
             sourceText: text,
             onLowInformation: 'suppress',
+            lowInformationFilterModel: config.qa.lowInformationFilterModel,
             streamReplySession,
             groupFileDownloadManager
           });

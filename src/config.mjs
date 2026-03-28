@@ -245,6 +245,9 @@ export async function loadConfig(configPath) {
       externalExclusiveGroupsRefreshMs: raw?.qa?.externalExclusiveGroupsRefreshMs ?? 5000,
       passHintText: String(raw?.qa?.passHintText ?? '如果此问题无人回答，可以试试 at 我再问，或者输入 /chat 来询问 bot。').trim()
         || '如果此问题无人回答，可以试试 at 我再问，或者输入 /chat 来询问 bot。',
+      shutdownVoteFilterModel: String(raw?.qa?.shutdownVoteFilterModel ?? raw?.qa?.filter?.model ?? 'gpt-5.4-mini').trim() || 'gpt-5.4-mini',
+      lowInformationFilterModel: String(raw?.qa?.lowInformationFilterModel ?? raw?.qa?.filter?.model ?? 'gpt-5.4-mini').trim() || 'gpt-5.4-mini',
+      platformClassifyModel: String(raw?.qa?.platformClassifyModel ?? raw?.qa?.filter?.model ?? 'gpt-5.4-mini').trim() || 'gpt-5.4-mini',
       client: {
         enabled: true,
         baseUrl: qaBaseUrl,
@@ -314,7 +317,7 @@ export async function loadConfig(configPath) {
       },
       hallucinationCheck: {
         enabled: raw?.qa?.hallucinationCheck?.enabled ?? true,
-        model: raw?.qa?.hallucinationCheck?.model ?? 'openai/gpt-oss-120b',
+        model: raw?.qa?.hallucinationCheck?.model ?? 'claude-opus-4-6',
         maxToolRounds: raw?.qa?.hallucinationCheck?.maxToolRounds ?? 3,
         temperature: raw?.qa?.hallucinationCheck?.temperature ?? 0.1
       }

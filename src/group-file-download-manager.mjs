@@ -18,7 +18,7 @@ const GITHUB_API_BASE_URL = 'https://api.github.com';
 const MAX_CONCURRENT_DOWNLOADS = 5;
 const PREFERRED_MIRROR_TTL_MS = 8 * 60 * 60 * 1000;
 const BUILD_TIMEOUT_MS = 60 * 60 * 1000;
-const PLATFORM_CLASSIFY_MODEL = 'deepseek-ai/deepseek-v3.2';
+const PLATFORM_CLASSIFY_MODEL = null;
 const GITHUB_DOWNLOAD_MIRRORS = [
   'https://github.chenc.dev',
   'https://ghproxy.cfd',
@@ -739,6 +739,7 @@ function buildGitMirrorProbeUrl(base, sourceUrl) {
 export class GroupFileDownloadManager {
   constructor(config, runtimeConfigStore, napcatClient, logger, options = {}) {
     this.githubConfig = config?.github ?? {};
+    this.platformClassifyModel = String(options.platformClassifyModel ?? config?.platformClassifyModel ?? '').trim() || null;
     this.runtimeConfigStore = runtimeConfigStore;
     this.napcatClient = napcatClient;
     this.logger = logger;
@@ -1348,7 +1349,7 @@ export class GroupFileDownloadManager {
           content: normalizedText
         }
       ], {
-        model: PLATFORM_CLASSIFY_MODEL,
+        model: this.platformClassifyModel || PLATFORM_CLASSIFY_MODEL || 'gpt-5.4-mini',
         temperature: 0.1
       });
       const match = String(raw ?? '').match(/\{[\s\S]*\}/);

@@ -193,16 +193,9 @@ function normalizeMemoryCaptureDecision(raw) {
 
 function normalizeHallucinationCheckDecision(raw, fallbackAnswer = '') {
   const parsed = parseJsonObject(raw, {});
-  const answer = String(
-    parsed?.answer
-    ?? parsed?.revised_answer
-    ?? parsed?.rewrite
-    ?? parsed?.final_answer
-    ?? fallbackAnswer
-  ).trim();
   return {
     approved: parsed?.approved !== false,
-    answer,
+    feedback: String(parsed?.feedback ?? '').trim(),
     reason: String(parsed?.reason ?? '').trim()
   };
 }
@@ -1347,19 +1340,36 @@ export class ChatSessionManager {
       }
     };
 
+    let hallucinationRetried = false;
+
     const finalizeCompletion = async (text = '', notice = '') => {
       const normalizedText = String(text ?? '').trim();
       if (notice || !normalizedText) {
         return { text: normalizedText, notice };
       }
-      const checkedText = await this.#maybeRunHallucinationCheck(
+      const checkResult = await this.#maybeRunHallucinationCheck(
         context,
         runtimeContext,
         [...workingMessages, { role: 'assistant', content: normalizedText }],
         normalizedText
       );
+      if (checkResult && typeof checkResult === 'object' && checkResult.hallucinationFeedback && !hallucinationRetried) {
+        hallucinationRetried = true;
+        discardPendingStreamText();
+        this.logger.info(`幻觉检查打回主模型重答：feedback=${checkResult.hallucinationFeedback}`);
+        workingMessages.push({ role: 'assistant', content: normalizedText });
+        workingMessages.push({
+          role: 'user',
+          content: [
+            `系统校对纠偏：你上一条回答被事实校对器打回，原因：${checkResult.hallucinationFeedback}`,
+            '请基于已有的工具结果重新组织回答，去掉无法确认的具体事实。如果确实不确定，就明确说不确定。不要使用 Markdown。'
+          ].join('\n')
+        });
+        const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+        return { text: String(retryText ?? '').trim() || normalizedText, notice };
+      }
       return {
-        text: String(checkedText ?? normalizedText).trim() || normalizedText,
+        text: (typeof checkResult === 'string' ? checkResult : normalizedText) || normalizedText,
         notice
       };
     };
@@ -1511,66 +1521,102 @@ export class ChatSessionManager {
       return draftText;
     }
 
-    const maxRounds = Math.max(1, Math.min(6, Number(reviewConfig.maxToolRounds ?? 3) || 3));
-    let candidate = candidateText;
+    const toolEnabled = Boolean(this.codexTools && await this.codexTools.isEnabled());
+    const maxToolRounds = Math.max(1, Math.min(6, Number(reviewConfig.maxToolRounds ?? 3) || 3));
+    const reviewModel = String(reviewConfig.model ?? this.config.answer.model ?? '').trim() || this.config.answer.model;
+    const reviewTemperature = Number(reviewConfig.temperature ?? 0.1) || 0.1;
 
-    for (let round = 0; round < maxRounds; round += 1) {
+    const toolInstructions = toolEnabled
+      ? [
+        '',
+        '如果你需要核实候选回答中的某个具体事实（版本号、文件路径、字段名、release tag 等），可以调用只读工具来验证。',
+        '工具调用格式与主模型相同，用特殊标记包裹单个 JSON 工具请求。',
+        '每次只能调用一个工具。收到工具结果后再做最终判断。',
+        '如果不需要调工具就能判断，直接输出 JSON 结果即可。'
+      ].join('\n')
+      : '';
+
+    const systemContent = [
+      '你是 Cain 的回答事实校对器。',
+      '你的任务是检查候选回答是否存在幻觉（即声称了上下文中没有依据的具体事实）。',
+      '幻觉包括：声称某文件/字段/版本/release 存在但上下文中未确认、给出和工具结果矛盾的数值或路径、凭空编造不在上下文中的具体细节。',
+      '如果候选回答已经足够稳妥或只是闲聊/观点，直接 approved=true，不要为了改而改。',
+      '不要使用 Markdown。',
+      toolInstructions,
+      '最终输出必须是 JSON：{"approved":boolean,"feedback":"如果有幻觉，简短说明哪里不对，最多80字；没有则留空","reason":"简短原因"}。'
+    ].filter(Boolean).join('\n');
+
+    const checkMessages = [
+      { role: 'system', content: systemContent },
+      {
+        role: 'user',
+        content: [
+          `会话类型：${context?.messageType === 'group' ? 'group' : 'private'}`,
+          runtimeContext?.lookupSeedText
+            ? `用户核心问题：${String(runtimeContext.lookupSeedText).trim()}`
+            : '',
+          '以下是候选回答生成时可见的上下文：',
+          transcript,
+          '',
+          '以下是当前候选回答：',
+          candidateText
+        ].filter(Boolean).join('\n\n')
+      }
+    ];
+
+    for (let round = 0; round < maxToolRounds; round += 1) {
       let raw = '';
       try {
-        raw = await this.chatClient.complete([
-          {
-            role: 'system',
-            content: [
-              '你是 Cain 的回答事实校对器。',
-              '你只能依据提供的上下文和候选回答本身做判断，不要引入上下文里没有的新事实。',
-              '如果候选回答里有无法从上下文支撑的具体事实、版本号、路径、字段名、对象名、数量、结论，就把这部分改写成更保守且明确不确定的说法。',
-              '如果候选回答已经足够稳妥，就保持原意，不要为了改而改。',
-              '不要使用 Markdown。',
-              '只输出 JSON：{"approved":boolean,"answer":"最终可发送的回答","reason":"简短原因"}。',
-              'approved=true 时，answer 也必须填写最终可发送版本。'
-            ].join('\n')
-          },
-          {
-            role: 'user',
-            content: [
-              `会话类型：${context?.messageType === 'group' ? 'group' : 'private'}`,
-              runtimeContext?.lookupSeedText
-                ? `用户核心问题：${String(runtimeContext.lookupSeedText).trim()}`
-                : '',
-              '以下是候选回答生成时可见的上下文：',
-              transcript,
-              '',
-              '以下是当前候选回答：',
-              candidate
-            ].filter(Boolean).join('\n\n')
-          }
-        ], {
-          model: String(reviewConfig.model ?? this.config.answer.model ?? '').trim() || this.config.answer.model,
-          temperature: Number(reviewConfig.temperature ?? 0.1) || 0.1
+        raw = await this.chatClient.complete(checkMessages, {
+          model: reviewModel,
+          temperature: reviewTemperature
         });
       } catch (error) {
         this.logger.warn(`幻觉检查失败，回退原回答：${error.message}`);
-        return candidate;
+        return candidateText;
       }
 
-      const decision = normalizeHallucinationCheckDecision(raw, candidate);
-      if (decision.approved) {
-        if (decision.answer !== candidate) {
-          this.logger.info(`幻觉检查修订回答已通过：${decision.reason || 'no-reason'}`);
+      if (toolEnabled) {
+        const toolParsing = this.codexTools.parseToolCalls(raw);
+        if (toolParsing.calls.length > 0) {
+          const toolRequest = toolParsing.calls[0];
+          this.logger.info(`幻觉检查触发工具：${summarizeToolRequest(toolRequest)}`);
+          let toolResult;
+          try {
+            toolResult = await this.codexTools.execute(toolRequest, { context, ...runtimeContext });
+          } catch (error) {
+            toolResult = { tool: String(toolRequest.tool ?? 'unknown'), error: error.message };
+          }
+          if (toolResult?.error) {
+            this.logger.warn(`幻觉检查工具失败 ${toolRequest.tool}: ${toolResult.error}`);
+          } else {
+            this.logger.info(`幻觉检查工具结果：${summarizeToolResult(toolResult)}`);
+          }
+          checkMessages.push({ role: 'assistant', content: raw });
+          checkMessages.push({
+            role: 'user',
+            content: [
+              '以下是你请求的只读工具结果：',
+              this.codexTools.formatToolResult(toolResult),
+              '请根据工具结果做最终判断，输出 JSON。'
+            ].join('\n')
+          });
+          continue;
         }
-        return decision.answer || candidate;
       }
 
-      if (!decision.answer || decision.answer === candidate) {
-        this.logger.warn(`幻觉检查未给出有效修订，保留原回答：${decision.reason || 'no-reason'}`);
-        return candidate;
+      const decision = normalizeHallucinationCheckDecision(raw, candidateText);
+      if (decision.approved) {
+        this.logger.info(`幻觉检查通过：${decision.reason || 'no-reason'}`);
+        return candidateText;
       }
 
-      this.logger.info(`幻觉检查修订候选回答：round=${round + 1} reason=${decision.reason || 'no-reason'}`);
-      candidate = decision.answer;
+      const feedback = String(decision.feedback ?? decision.reason ?? '').trim();
+      this.logger.info(`幻觉检查未通过，打回主模型重答：${feedback || 'no-feedback'}`);
+      return { hallucinationFeedback: feedback || '校对器认为回答中存在未经验证的事实' };
     }
 
-    return candidate;
+    return candidateText;
   }
 
   async #runExclusive(sessionKey, task) {
