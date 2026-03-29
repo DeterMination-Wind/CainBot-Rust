@@ -146,6 +146,10 @@ pub struct QaAnswerConfig {
     pub vanilla_repo_root: Option<PathBuf>,
     pub x_repo_root: Option<PathBuf>,
     pub memory_file: Option<PathBuf>,
+    pub structured_memory_file: Option<PathBuf>,
+    pub knowledge_dir: Option<PathBuf>,
+    pub memory_model: String,
+    pub record_group_memory: bool,
     pub enable_codex_readonly_tools: bool,
 }
 
@@ -379,6 +383,16 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
                     &config_dir,
                     get_string(&raw, &["qa", "answer", "memoryFile"]).unwrap_or_else(|| "./data/cain-longterm-memory.txt".to_string()),
                 ),
+                structured_memory_file: resolve_maybe_relative(
+                    &config_dir,
+                    get_string(&raw, &["qa", "answer", "structuredMemoryFile"]).unwrap_or_else(|| "./data/memory.json".to_string()),
+                ),
+                knowledge_dir: resolve_maybe_relative(
+                    &config_dir,
+                    get_string(&raw, &["qa", "answer", "knowledgeDir"]).unwrap_or_else(|| "./data/Knowledge".to_string()),
+                ),
+                memory_model: get_string(&raw, &["qa", "answer", "memoryModel"]).unwrap_or_default(),
+                record_group_memory: get_bool(&raw, &["qa", "answer", "recordGroupMemory"]).unwrap_or(true),
                 enable_codex_readonly_tools: get_bool(&raw, &["qa", "answer", "enableCodexReadonlyTools"]).unwrap_or(true),
             },
             topic_closure: QaTopicClosureConfig {
@@ -408,6 +422,14 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
         && let Some(parent) = memory_file.parent()
     {
         ensure_dir(parent).await?;
+    }
+    if let Some(structured_memory_file) = config.qa.answer.structured_memory_file.as_ref()
+        && let Some(parent) = structured_memory_file.parent()
+    {
+        ensure_dir(parent).await?;
+    }
+    if let Some(knowledge_dir) = config.qa.answer.knowledge_dir.as_ref() {
+        ensure_dir(knowledge_dir).await?;
     }
 
     Ok(LoadedConfig {

@@ -107,6 +107,45 @@ impl StateStore {
         self.state.lock().await.clone()
     }
 
+    // JS QA worker 会直接落盘 chatSessions，这里按需把磁盘上的最新聊天会话合回内存，
+    // 只刷新 chatSessions，避免覆盖 Rust 侧 issueRepair 等其他状态。
+    pub async fn refresh_chat_sessions_from_disk(&self) -> Result<()> {
+        let mut parsed = match fs::read_to_string(&self.file_path).await {
+            Ok(text) => serde_json::from_str::<StateData>(&text)
+                .with_context(|| format!("解析状态文件失败: {}", self.file_path.display()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => StateData::default(),
+            Err(error) => {
+                return Err(error).with_context(|| format!("读取状态文件失败: {}", self.file_path.display()));
+            }
+        };
+        if parsed.version == 0 {
+            parsed.version = 6;
+        }
+
+        let journal_file = match OpenOptions::new().read(true).open(&self.journal_path).await {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| format!("读取状态 journal 失败: {}", self.journal_path.display()));
+            }
+        };
+        if let Some(journal_file) = journal_file {
+            let reader = BufReader::new(journal_file);
+            let mut lines = reader.lines();
+            while let Some(line) = lines.next_line().await? {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let op: StateJournalOp = serde_json::from_str(&line)
+                    .with_context(|| format!("解析状态 journal 失败: {}", self.journal_path.display()))?;
+                apply_state_journal_op(&mut parsed, op);
+            }
+        }
+
+        self.state.lock().await.chat_sessions = parsed.chat_sessions;
+        Ok(())
+    }
+
     pub async fn get_chat_session(&self, session_key: &str) -> Result<ChatSession> {
         let normalized_key = session_key.trim();
         if normalized_key.is_empty() {
