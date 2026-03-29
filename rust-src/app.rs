@@ -12,6 +12,7 @@ use crate::event_utils::{
     plain_text_from_event,
 };
 use crate::group_file_download_worker::GroupFileDownloadWorker;
+use crate::issue_repair_manager::IssueRepairManager;
 use crate::logger::Logger;
 use crate::message_input::{BuildChatInputOptions, build_chat_input, build_translation_input};
 use crate::napcat_client::{NapCatClient, NapCatClientConfig};
@@ -189,7 +190,20 @@ impl AppRuntime {
         let group_file_download_worker = self.group_file_download_worker.clone();
         let mut codex_bridge_server =
             CodexBridgeServer::new(self.config.codex_bridge.clone(), self.napcat_client.clone(), self.logger.clone());
-        let _codex_bridge_info = codex_bridge_server.start().await?;
+        let codex_bridge_info = codex_bridge_server.start().await?;
+        let issue_repair_manager = self.qa_client.clone().map(|chat_client| {
+            IssueRepairManager::new(
+                self.config.issue_repair.clone(),
+                chat_client,
+                self.napcat_client.clone(),
+                self.state_store.clone(),
+                self.logger.clone(),
+                codex_bridge_info.clone(),
+            )
+        });
+        if let Some(manager) = issue_repair_manager.as_ref() {
+            manager.initialize().await?;
+        }
         let event_logger = self.logger.clone();
         let event_runtime_store = self.runtime_config_store.clone();
         let event_napcat_client = self.napcat_client.clone();
@@ -200,6 +214,7 @@ impl AppRuntime {
         let event_config = self.config.clone();
         let event_chat_session_manager = self.chat_session_manager.clone();
         let event_group_file_download_worker = group_file_download_worker.clone();
+        let event_issue_repair_manager = issue_repair_manager.clone();
         let owner_user_id = self.owner_user_id.clone();
         let bot_display_name = self.bot_display_name.clone();
         self.napcat_client
@@ -215,6 +230,7 @@ impl AppRuntime {
                 let translator = event_translator.clone();
                 let chat_session_manager = event_chat_session_manager.clone();
                 let group_file_download_worker = event_group_file_download_worker.clone();
+                let issue_repair_manager = event_issue_repair_manager.clone();
                 let owner_user_id = owner_user_id.clone();
                 async move {
                     log_event_summary(&event_logger, &event).await;
@@ -228,6 +244,7 @@ impl AppRuntime {
                         translator.as_ref(),
                         chat_session_manager.as_ref(),
                         &group_file_download_worker,
+                        issue_repair_manager.as_ref(),
                         &event,
                         &enabled_static_groups,
                         &owner_user_id,
@@ -371,6 +388,7 @@ async fn handle_message_event(
     translator: Option<&OpenAiTranslator>,
     chat_session_manager: Option<&ChatSessionManager>,
     group_file_download_worker: &GroupFileDownloadWorker,
+    issue_repair_manager: Option<&IssueRepairManager>,
     event: &Value,
     static_group_ids: &[String],
     owner_user_id: &str,
@@ -429,6 +447,13 @@ async fn handle_message_event(
         if group_file_download_worker
             .handle_group_message(&context, event, &text)
             .await?
+        {
+            return Ok(());
+        }
+        if let Some(issue_repair_manager) = issue_repair_manager
+            && issue_repair_manager
+                .handle_incoming_message(&context, event, &text)
+                .await?
         {
             return Ok(());
         }

@@ -12,6 +12,7 @@ use tokio::fs;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::logger::Logger;
+use crate::event_utils::EventContext;
 use crate::utils::{build_reply_message, join_url, sleep_ms, split_text};
 
 #[derive(Debug, Clone)]
@@ -132,6 +133,18 @@ impl NapCatClient {
                 "group_id": group_id.trim(),
                 "user_id": user_id.trim(),
                 "no_cache": no_cache
+            }),
+        )
+        .await
+    }
+
+    pub async fn set_group_card(&self, group_id: &str, user_id: &str, card: &str) -> Result<Value> {
+        self.call(
+            "set_group_card",
+            json!({
+                "group_id": group_id.trim(),
+                "user_id": user_id.trim(),
+                "card": card.trim()
             }),
         )
         .await
@@ -342,6 +355,14 @@ impl NapCatClient {
             ]),
         )
         .await
+    }
+
+    pub async fn send_context_message(&self, context: &EventContext, message: impl Into<Value>) -> Result<Value> {
+        if context.message_type == "group" {
+            self.send_group_message(&context.group_id, message.into()).await
+        } else {
+            self.send_private_message(&context.user_id, message.into()).await
+        }
     }
 
     pub async fn delete_message(&self, message_id: &str) -> Result<Value> {
