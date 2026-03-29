@@ -393,7 +393,7 @@ function buildResponsesRequestVariants(messages, baseUrl) {
   }
 
   const flattenedInput = buildFlattenedResponsesInput(messages);
-  if (flattenedInput && !isCcSwitchProxy(baseUrl)) {
+  if (flattenedInput) {
     variants.push({
       name: 'flattened-string',
       body: { input: flattenedInput }
@@ -435,7 +435,16 @@ function isCcSwitchProxy(baseUrl) {
   }
 }
 
-function getTransportOrder(baseUrl) {
+function prefersStreamingChatCompletions(baseUrl, model, options = {}) {
+  return isCcSwitchProxy(baseUrl)
+    && /gpt-5\.3-codex/i.test(String(model ?? '').trim())
+    && typeof options?.onTextDelta === 'function';
+}
+
+function getTransportOrder(baseUrl, model = '', options = {}) {
+  if (prefersStreamingChatCompletions(baseUrl, model, options)) {
+    return ['chat', 'responses'];
+  }
   return shouldPreferResponsesApi(baseUrl)
     ? ['responses', 'chat']
     : ['chat', 'responses'];
@@ -743,8 +752,8 @@ export class OpenAiChatClient {
     this.transportSuppressedUntil.delete(transport);
   }
 
-  #getAvailableTransports() {
-    const preferred = getTransportOrder(this.config.baseUrl);
+  #getAvailableTransports(model = '', options = {}) {
+    const preferred = getTransportOrder(this.config.baseUrl, model, options);
     const available = preferred.filter((transport) => !this.#isTransportSuppressed(transport));
     return available.length > 0 ? available : preferred;
   }
@@ -893,7 +902,8 @@ export class OpenAiChatClient {
       headers.Connection = 'close';
     }
 
-    const transports = this.#getAvailableTransports();
+    const requestedModel = String(options.model ?? this.config.model ?? '').trim();
+    const transports = this.#getAvailableTransports(requestedModel, options);
     const proxyManagedFailover = isCcSwitchProxy(this.config.baseUrl);
     let lastError = null;
 

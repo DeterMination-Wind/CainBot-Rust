@@ -187,6 +187,10 @@ pub fn build_help_text(bot_display_name: &str) -> String {
         "/e 启用 | /e 禁用 开关群问答".to_string(),
         "/e 过滤心跳 启用 [N] | 关闭".to_string(),
         "/e 文件下载 启用 [群文件夹名] | 关闭".to_string(),
+        "".to_string(),
+        "远程运维命令：".to_string(),
+        "napcat-start-assassin  启动刺客插件".to_string(),
+        "napcat-stop-assassin   停止刺客插件".to_string(),
     ]
     .join("\n")
 }
