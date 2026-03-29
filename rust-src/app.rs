@@ -157,7 +157,18 @@ impl AppRuntime {
             ))
             .await;
         let chat_session_manager = if qa_client.is_some() {
-            Some(ChatSessionManager::start(&project_root, &config_path, logger.clone()).await?)
+            Some(
+                ChatSessionManager::start(
+                    &project_root,
+                    &config_path,
+                    config.qa.clone(),
+                    qa_client.clone().expect("qa_client must exist when starting chat_session_manager"),
+                    state_store.clone(),
+                    logger.clone(),
+                    runtime_config_store.clone(),
+                )
+                .await?,
+            )
         } else {
             None
         };

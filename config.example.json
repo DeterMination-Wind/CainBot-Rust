@@ -94,6 +94,10 @@
       "vanillaRepoRoot": "../codex/Mindustry-master",
       "xRepoRoot": "../codex/MindustryX-main",
       "memoryFile": "./data/cain-longterm-memory.txt",
+      "structuredMemoryFile": "./data/memory.json",
+      "knowledgeDir": "./data/Knowledge",
+      "memoryModel": "",
+      "recordGroupMemory": true,
       "enableCodexReadonlyTools": true,
       "github": {
         "enabled": true,

@@ -60,6 +60,7 @@ function normalizeChatSessions(value) {
 class MergingChatStateStore {
   constructor(filePath) {
     this.filePath = filePath;
+    this.journalPath = filePath.replace(/(\.[^./\\]+)?$/, '.journal.jsonl');
     this.chatSessions = {};
   }
 
@@ -73,6 +74,18 @@ class MergingChatStateStore {
         throw error;
       }
       this.chatSessions = {};
+    }
+    try {
+      const journalText = await fs.readFile(this.journalPath, 'utf8');
+      const lines = journalText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      for (const line of lines) {
+        const op = JSON.parse(line);
+        this.#applyJournalOp(op);
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        throw error;
+      }
     }
   }
 
@@ -125,6 +138,22 @@ class MergingChatStateStore {
     normalized.version = Number(normalized.version ?? 6) || 6;
     normalized.chatSessions = this.chatSessions;
     await fs.writeFile(this.filePath, JSON.stringify(normalized, null, 2), 'utf8');
+    await fs.rm(this.journalPath, { force: true }).catch(() => {});
+  }
+
+  #applyJournalOp(op) {
+    const action = String(op?.op ?? '').trim();
+    if (action === 'append_chat_session_entry') {
+      this.appendChatSessionEntry(op?.session_key, op?.entry, Number(op?.max_messages ?? 80) || 80);
+      return;
+    }
+    if (action === 'set_chat_session_hinted_message') {
+      this.setChatSessionHintedMessage(op?.session_key, op?.message_id);
+      return;
+    }
+    if (action === 'clear_chat_session') {
+      this.clearChatSession(op?.session_key);
+    }
   }
 }
 

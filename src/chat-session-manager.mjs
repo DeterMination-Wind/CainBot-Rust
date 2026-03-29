@@ -492,6 +492,117 @@ function scoreKnowledgeEntry(entry, tokens) {
   return score;
 }
 
+const RESERVED_STRUCTURED_MEMORY_KEYS = new Set(['设定', '群记忆', '知识缓存', '知识搜索', '知识库', '人物关系']);
+const MAX_SELECTED_STRUCTURED_KNOWLEDGE_ITEMS = 12;
+
+function createStructuredMemoryDefault() {
+  return {
+    全局: {
+      设定: [],
+      群记忆: {},
+      知识缓存: {},
+      知识搜索: {},
+      人物关系: {}
+    }
+  };
+}
+
+function normalizeKnowledgeMap(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([key, item]) => [String(key ?? '').trim(), String(item ?? '').trim()])
+      .filter(([key, item]) => key && item)
+  );
+}
+
+function normalizeStringList(value) {
+  return Array.from(new Set(
+    (Array.isArray(value) ? value : [])
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean)
+  ));
+}
+
+function normalizeStructuredMemory(value) {
+  const fallback = createStructuredMemoryDefault();
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const rawGlobal = source?.全局 && typeof source.全局 === 'object' && !Array.isArray(source.全局)
+    ? source.全局
+    : {};
+  const normalizedGlobal = { ...rawGlobal };
+  normalizedGlobal.设定 = normalizeStringList(rawGlobal.设定);
+  normalizedGlobal.群记忆 = normalizeKnowledgeMap(rawGlobal.群记忆);
+  normalizedGlobal.知识缓存 = normalizeKnowledgeMap(rawGlobal.知识缓存);
+  normalizedGlobal.知识搜索 = normalizeKnowledgeMap(rawGlobal.知识搜索);
+  normalizedGlobal.人物关系 = rawGlobal.人物关系 && typeof rawGlobal.人物关系 === 'object' && !Array.isArray(rawGlobal.人物关系)
+    ? rawGlobal.人物关系
+    : {};
+  return {
+    ...fallback,
+    ...source,
+    全局: {
+      ...fallback.全局,
+      ...normalizedGlobal
+    }
+  };
+}
+
+function getRecommendRank(word1Input, word2Input, gateRank = 1000, rate = 0.1) {
+  const word1 = String(word1Input ?? '').toLowerCase();
+  const word2 = String(word2Input ?? '').toLowerCase();
+  if (!word1 || !word2) {
+    return gateRank + 1;
+  }
+  if (word1.length > word2.length) {
+    return gateRank + 2;
+  }
+  const a = Array.from(word1);
+  const b = Array.from(word2);
+  const aLen = a.length;
+  const bLen = b.length;
+  const findFlag = word2.includes(word1) ? 0 : 1;
+
+  const lcs = Array.from({ length: bLen + 1 }, () => Array(aLen + 1).fill(0));
+  for (let i = 1; i <= aLen; i += 1) {
+    for (let j = 1; j <= bLen; j += 1) {
+      if (a[i - 1] === b[j - 1]) {
+        lcs[j][i] = lcs[j - 1][i - 1] + 1;
+      } else {
+        lcs[j][i] = Math.max(lcs[j - 1][i], lcs[j][i - 1]);
+      }
+    }
+  }
+  const lcsRank = lcs[bLen][aLen];
+
+  const distance = Array.from({ length: bLen + 1 }, (_, rowIndex) =>
+    Array.from({ length: aLen + 1 }, (_, columnIndex) => (rowIndex === 0 ? columnIndex : columnIndex === 0 ? rowIndex : 0))
+  );
+  for (let i = 1; i <= aLen; i += 1) {
+    for (let j = 1; j <= bLen; j += 1) {
+      if (a[i - 1] === b[j - 1]) {
+        distance[j][i] = distance[j - 1][i - 1];
+      } else {
+        distance[j][i] = Math.min(distance[j - 1][i - 1], distance[j - 1][i], distance[j][i - 1]) + 1;
+      }
+    }
+  }
+  const distanceRank = distance[bLen][aLen];
+  let rank = findFlag * (bLen * (aLen - lcsRank) + distanceRank + 1);
+  rank = Math.max(0, Math.floor((rank * rank) / Math.max(aLen, 1)));
+  rank = Math.floor(rank / Math.max(bLen, 1));
+  if (rank >= Math.floor(aLen * bLen * rate)) {
+    rank += gateRank;
+  }
+  return rank;
+}
+
+function getRecommendMatch(rank, gateRank = 1000) {
+  return Number(rank) < gateRank;
+}
+
 function resolveMindustryBundleMatches(text, bundleEntries, maxResults = 6) {
   const source = String(text ?? '').trim();
   if (!source || !Array.isArray(bundleEntries) || bundleEntries.length === 0) {
@@ -717,7 +828,8 @@ export class ChatSessionManager {
         this.config.answer.contextWindowMessages
       );
       const lookupSeedText = String(normalizedInput.text || normalizedInput.historyText).trim();
-      const systemPrompt = await this.#buildAnswerSystemPrompt(context);
+      const sessionMessages = this.stateStore.getChatSession(sessionKey).messages;
+      const systemPrompt = await this.#buildAnswerSystemPrompt(context, sessionMessages);
       const ragPrompt = await this.#maybeBuildRagPrompt(lookupSeedText);
       const codexFolderGuidePrompt = await this.#maybeBuildCodexFolderGuidePrompt(lookupSeedText);
       const mindustryPrompt = await this.#maybeBuildMindustryKnowledgePrompt(lookupSeedText);
@@ -756,6 +868,14 @@ export class ChatSessionManager {
         this.stateStore.appendChatSessionEntry(sessionKey, assistantEntry, this.config.answer.maxTimelineMessages);
       }
       await this.stateStore.save();
+      if (context.messageType === 'group' && assistantEntry.text) {
+        const snapshot = Array.isArray(this.stateStore.getChatSession(sessionKey).messages)
+          ? this.stateStore.getChatSession(sessionKey).messages.slice()
+          : [];
+        void this.#refreshStructuredGroupMemory(context.groupId, snapshot).catch((error) => {
+          this.logger.warn(`更新群记忆失败：${error.message}`);
+        });
+      }
       return {
         text: completion.text,
         notice: completion.notice || ''
@@ -990,7 +1110,7 @@ export class ChatSessionManager {
     return override?.filterPrompt || this.config.filter.prompt;
   }
 
-  async #buildAnswerSystemPrompt(context) {
+  async #buildAnswerSystemPrompt(context, sessionMessages = []) {
     const override = context.messageType === 'group'
       ? this.runtimeConfigStore?.getGroupQaOverride(context.groupId)
       : null;
@@ -1002,6 +1122,10 @@ export class ChatSessionManager {
         parts.push(memoryPrompt);
       }
     }
+    const structuredMemoryPrompt = await this.#buildStructuredMemoryPrompt(context, sessionMessages);
+    if (structuredMemoryPrompt) {
+      parts.push(structuredMemoryPrompt);
+    }
     if (this.localRagRetriever && await this.localRagRetriever.isEnabled()) {
       parts.push(this.localRagRetriever.getPromptInstructions());
     }
@@ -1009,6 +1133,219 @@ export class ChatSessionManager {
       parts.push(this.codexTools.getPromptInstructions());
     }
     return parts.filter(Boolean).join('\n\n');
+  }
+
+  async #buildStructuredMemoryPrompt(context, sessionMessages = []) {
+    const [memory, staticKnowledge] = await Promise.all([
+      this.#loadStructuredMemory(),
+      this.#loadStructuredKnowledge()
+    ]);
+    const globalMemory = memory?.全局 && typeof memory.全局 === 'object' ? memory.全局 : {};
+    const selectedKnowledge = this.#selectStructuredKnowledge(globalMemory, staticKnowledge, sessionMessages);
+    const lines = ['【Cain 结构化记忆/知识库】'];
+    const settings = normalizeStringList(globalMemory?.设定);
+    if (settings.length > 0) {
+      lines.push('全局设定：');
+      settings.slice(0, 8).forEach((item, index) => {
+        lines.push(`${index + 1}. ${item}`);
+      });
+    }
+    if (context.messageType === 'group') {
+      const longMemory = String(globalMemory?.群记忆?.[String(context.groupId ?? '').trim()] ?? '').trim();
+      lines.push(`本群长期记忆：${longMemory || '暂无'}`);
+    }
+    if (selectedKnowledge && Object.keys(selectedKnowledge).length > 0) {
+      lines.push(`命中的知识与关系：${JSON.stringify(selectedKnowledge, null, 2)}`);
+    }
+    return lines.length > 1 ? lines.join('\n') : '';
+  }
+
+  async #loadStructuredMemory() {
+    const memoryPath = String(this.config?.answer?.structuredMemoryFile ?? '').trim();
+    const fallback = createStructuredMemoryDefault();
+    if (!memoryPath) {
+      return fallback;
+    }
+    await fs.mkdir(path.dirname(memoryPath), { recursive: true });
+    try {
+      const text = await fs.readFile(memoryPath, 'utf8');
+      if (!String(text ?? '').trim()) {
+        await fs.writeFile(memoryPath, JSON.stringify(fallback, null, 2), 'utf8');
+        return fallback;
+      }
+      return normalizeStructuredMemory(JSON.parse(text));
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        await fs.writeFile(memoryPath, JSON.stringify(fallback, null, 2), 'utf8');
+        return fallback;
+      }
+      this.logger.warn(`读取结构化记忆失败：${error.message}`);
+      return fallback;
+    }
+  }
+
+  async #saveStructuredMemory(memory) {
+    const memoryPath = String(this.config?.answer?.structuredMemoryFile ?? '').trim();
+    if (!memoryPath) {
+      return;
+    }
+    await fs.mkdir(path.dirname(memoryPath), { recursive: true });
+    await fs.writeFile(memoryPath, JSON.stringify(normalizeStructuredMemory(memory), null, 2), 'utf8');
+  }
+
+  async #loadStructuredKnowledge() {
+    const knowledgeDir = String(this.config?.answer?.knowledgeDir ?? '').trim();
+    if (!knowledgeDir) {
+      return {};
+    }
+    await fs.mkdir(knowledgeDir, { recursive: true });
+    let entries = [];
+    try {
+      entries = await fs.readdir(knowledgeDir, { withFileTypes: true });
+    } catch (error) {
+      this.logger.warn(`读取知识库目录失败：${error.message}`);
+      return {};
+    }
+    const merged = {};
+    for (const entry of entries) {
+      if (!entry?.isFile?.()) {
+        continue;
+      }
+      const filePath = path.join(knowledgeDir, entry.name);
+      try {
+        const parsed = JSON.parse(await fs.readFile(filePath, 'utf8'));
+        Object.assign(merged, normalizeKnowledgeMap(parsed));
+      } catch (error) {
+        this.logger.warn(`加载知识库[${entry.name}]失败：${error.message}`);
+      }
+    }
+    return merged;
+  }
+
+  #selectStructuredKnowledge(globalMemory, staticKnowledge, sessionMessages = []) {
+    const timelineEntries = Array.isArray(sessionMessages)
+      ? sessionMessages.slice(-20)
+      : [];
+    if (timelineEntries.length === 0) {
+      return {};
+    }
+    const selected = {};
+    const selectedKnowledge = {};
+    const sources = [
+      ['知识缓存', normalizeKnowledgeMap(globalMemory?.知识缓存), 0.1],
+      ['知识库', normalizeKnowledgeMap(staticKnowledge), 0.15],
+      ['知识搜索', normalizeKnowledgeMap(globalMemory?.知识搜索), 0.1]
+    ];
+    for (const [sourceName, knowledgeMap, rate] of sources) {
+      for (const [keyword, content] of Object.entries(knowledgeMap)) {
+        if (Object.keys(selectedKnowledge).length >= MAX_SELECTED_STRUCTURED_KNOWLEDGE_ITEMS) {
+          break;
+        }
+        const matched = timelineEntries.some((entry) => {
+          const haystack = [
+            String(entry?.text ?? '').trim(),
+            String(entry?.rawText ?? '').trim()
+          ].filter(Boolean).join('\n');
+          const rank = getRecommendRank(keyword, haystack, 1000, rate);
+          return getRecommendMatch(rank, 1000);
+        });
+        if (matched) {
+          selectedKnowledge[keyword] = content;
+        }
+      }
+      if (Object.keys(selectedKnowledge).length >= MAX_SELECTED_STRUCTURED_KNOWLEDGE_ITEMS) {
+        break;
+      }
+    }
+    if (Object.keys(selectedKnowledge).length > 0) {
+      selected.知识搜索 = selectedKnowledge;
+    }
+
+    const relationshipMatches = {};
+    const relationships = globalMemory?.人物关系 && typeof globalMemory.人物关系 === 'object'
+      ? globalMemory.人物关系
+      : {};
+    for (const [userKey, relation] of Object.entries(relationships)) {
+      const hit = timelineEntries.some((entry) => {
+        if (String(entry?.userId ?? '').trim() === String(userKey ?? '').trim()) {
+          return true;
+        }
+        const relationArray = Array.isArray(relation) ? relation : [];
+        const aliasSource = Array.isArray(relationArray[0])
+          ? relationArray[0]
+          : typeof relationArray[0] === 'string'
+            ? [relationArray[0]]
+            : [];
+        const normalizedText = String(entry?.text ?? '').toLowerCase();
+        return aliasSource.some((alias) => normalizedText.includes(String(alias ?? '').trim().toLowerCase()));
+      });
+      if (hit) {
+        relationshipMatches[userKey] = relation;
+      }
+    }
+    if (Object.keys(relationshipMatches).length > 0) {
+      selected.人物关系 = relationshipMatches;
+    }
+
+    for (const [key, value] of Object.entries(globalMemory ?? {})) {
+      if (RESERVED_STRUCTURED_MEMORY_KEYS.has(key)) {
+        continue;
+      }
+      if (value == null) {
+        continue;
+      }
+      if (Array.isArray(value) && value.length === 0) {
+        continue;
+      }
+      if (!Array.isArray(value) && typeof value === 'object' && Object.keys(value).length === 0) {
+        continue;
+      }
+      if (typeof value === 'string' && !value.trim()) {
+        continue;
+      }
+      selected[key] = value;
+    }
+
+    return selected;
+  }
+
+  async #refreshStructuredGroupMemory(groupId, sessionMessages = []) {
+    const normalizedGroupId = String(groupId ?? '').trim();
+    if (!normalizedGroupId || this.config?.answer?.recordGroupMemory === false) {
+      return;
+    }
+    const memoryPath = String(this.config?.answer?.structuredMemoryFile ?? '').trim();
+    if (!memoryPath) {
+      return;
+    }
+    const timeline = buildTimelineBlock(sessionMessages, 20);
+    if (!timeline || timeline === '(暂无共享上下文)') {
+      return;
+    }
+    const raw = await this.chatClient.complete([
+      {
+        role: 'system',
+        content: '你负责把一个群最近聊天压缩成 120 字以内的长期记忆。不要流水账，只保留对后续聊天有价值的信息。只输出记忆文本。'
+      },
+      {
+        role: 'user',
+        content: timeline
+      }
+    ], {
+      model: this.config.answer.memoryModel || this.config.answer.model,
+      temperature: 0.3
+    });
+    const text = String(raw ?? '').trim();
+    if (!text) {
+      return;
+    }
+    const memory = await this.#loadStructuredMemory();
+    const normalized = normalizeStructuredMemory(memory);
+    if (!normalized.全局.群记忆 || typeof normalized.全局.群记忆 !== 'object') {
+      normalized.全局.群记忆 = {};
+    }
+    normalized.全局.群记忆[normalizedGroupId] = text;
+    await this.#saveStructuredMemory(normalized);
   }
 
   async #maybeBuildRagPrompt(text) {

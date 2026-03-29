@@ -299,6 +299,10 @@ export async function loadConfig(configPath) {
         ),
         promptImageRoot: resolveMaybeRelative(configDir, raw?.qa?.answer?.promptImageRoot ?? './prompts'),
         memoryFile: resolveMaybeRelative(configDir, raw?.qa?.answer?.memoryFile ?? './data/cain-longterm-memory.txt'),
+        structuredMemoryFile: resolveMaybeRelative(configDir, raw?.qa?.answer?.structuredMemoryFile ?? './data/memory.json'),
+        knowledgeDir: resolveMaybeRelative(configDir, raw?.qa?.answer?.knowledgeDir ?? './data/Knowledge'),
+        memoryModel: String(raw?.qa?.answer?.memoryModel ?? '').trim(),
+        recordGroupMemory: raw?.qa?.answer?.recordGroupMemory ?? true,
         enableCodexReadonlyTools: raw?.qa?.answer?.enableCodexReadonlyTools ?? answerRaw?.enableCodexReadonlyTools ?? true,
         github: {
           enabled: raw?.qa?.answer?.github?.enabled ?? true,
@@ -333,6 +337,17 @@ export async function loadConfig(configPath) {
   if (config.qa.answer.memoryFile) {
     await ensureDir(path.dirname(config.qa.answer.memoryFile));
     await fs.writeFile(config.qa.answer.memoryFile, await fs.readFile(config.qa.answer.memoryFile, 'utf8').catch(() => ''), 'utf8');
+  }
+  if (config.qa.answer.structuredMemoryFile) {
+    await ensureDir(path.dirname(config.qa.answer.structuredMemoryFile));
+    await fs.writeFile(
+      config.qa.answer.structuredMemoryFile,
+      await fs.readFile(config.qa.answer.structuredMemoryFile, 'utf8').catch(() => ''),
+      'utf8'
+    );
+  }
+  if (config.qa.answer.knowledgeDir) {
+    await ensureDir(config.qa.answer.knowledgeDir);
   }
   return { config, configDir, configPath: absoluteConfigPath };
 }
