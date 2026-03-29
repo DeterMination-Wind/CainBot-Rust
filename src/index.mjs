@@ -1512,6 +1512,7 @@ async function main() {
   });
 
   const codexReadonlyTools = new CodexReadonlyTools(config.qa.answer, logger, {
+    ownerUserId: config.bot.ownerUserId,
     memoryFile: config.qa.answer.memoryFile,
     promptImageRoot: config.qa.answer.promptImageRoot,
     readRecentMessages: async () => [],

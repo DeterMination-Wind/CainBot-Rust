@@ -408,6 +408,7 @@ async function main() {
 
   let pendingGroupFileDownloadRequest = null;
   const codexReadonlyTools = new CodexReadonlyTools(loaded.config.qa.answer, workerLogger, {
+    ownerUserId: loaded.config.bot.ownerUserId,
     memoryFile: loaded.config.qa.answer.memoryFile,
     promptImageRoot: loaded.config.qa.answer.promptImageRoot,
     readRecentMessages: async (params) => await readRecentMessages(napcatClient, params),

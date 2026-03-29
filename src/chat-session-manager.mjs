@@ -288,6 +288,10 @@ function summarizeToolRequest(toolRequest) {
       return `${tool} count=${toolRequest?.count ?? (tool === 'read_recent_chat_messages' ? 20 : 100)}`;
     case 'start_group_file_download':
       return `${tool} mode=${JSON.stringify(String(toolRequest?.mode ?? '').trim())} repoChoice=${JSON.stringify(String(toolRequest?.repo_choice ?? '').trim())} version=${JSON.stringify(String(toolRequest?.version_query ?? toolRequest?.version ?? '').trim())} commit=${JSON.stringify(String(toolRequest?.commit_hash ?? toolRequest?.commit ?? toolRequest?.sha ?? '').trim())} platform=${JSON.stringify(String(toolRequest?.platform_hint ?? toolRequest?.platform ?? '').trim())}`;
+    case 'run_bash_command':
+      return `${tool} cwd=${JSON.stringify(String(toolRequest?.cwd ?? '').trim() || '.')} command=${JSON.stringify(String(toolRequest?.command ?? toolRequest?.bash ?? '').trim())}`;
+    case 'run_python_script':
+      return `${tool} cwd=${JSON.stringify(String(toolRequest?.cwd ?? '').trim() || '.')} args=${JSON.stringify(Array.isArray(toolRequest?.args) ? toolRequest.args : [])} code=${JSON.stringify(String(toolRequest?.code ?? toolRequest?.script ?? '').trim().slice(0, 200))}`;
     case 'read_github_repo_releases':
       return `${tool} repo=${JSON.stringify(String(toolRequest?.repo ?? toolRequest?.repository ?? toolRequest?.url ?? '').trim())} maxReleases=${toolRequest?.max_releases ?? 10}`;
     case 'read_github_repo_commits':
@@ -327,6 +331,10 @@ function summarizeToolResult(toolResult) {
       return `${tool} returned=${toolResult?.returnedCount ?? 0} requested=${toolResult?.requestedCount ?? 0}`;
     case 'start_group_file_download':
       return `${tool} started=${toolResult?.started === true} state=${toolResult?.state ?? '(none)'} releaseTag=${toolResult?.release_tag ?? '(none)'}`;
+    case 'run_bash_command':
+      return `${tool} cwd=${toolResult?.cwd ?? '(unknown)'} exit=${toolResult?.exit_code ?? '(none)'} success=${toolResult?.succeeded === true}`;
+    case 'run_python_script':
+      return `${tool} cwd=${toolResult?.cwd ?? '(unknown)'} exit=${toolResult?.exit_code ?? '(none)'} success=${toolResult?.succeeded === true}`;
     case 'read_github_repo_releases':
       return `${tool} repo=${toolResult?.repo?.full_name ?? '(unknown)'} returned=${toolResult?.returnedCount ?? 0} latestTag=${toolResult?.latestTag ?? '(none)'}`;
     case 'read_github_repo_commits':
