@@ -744,7 +744,14 @@ export class GroupFileDownloadManager {
     this.napcatClient = napcatClient;
     this.logger = logger;
     this.chatClient = options.chatClient ?? null;
-    this.codexRoot = path.resolve(options.codexRoot ?? config?.codexRoot ?? path.join(process.cwd(), '..', 'codex'));
+    this.databaseRoot = path.resolve(
+      options.databaseRoot
+      ?? options.codexRoot
+      ?? config?.databaseRoot
+      ?? config?.codexRoot
+      ?? path.join(process.cwd(), '..', 'codex')
+    );
+    this.codexRoot = this.databaseRoot;
     this.localBuildRoot = path.resolve(options.localBuildRoot ?? config?.localBuildRoot ?? path.join(this.codexRoot, 'builds'));
     this.downloadRoot = path.resolve(options.downloadRoot ?? path.join(process.cwd(), 'data', 'release-downloads'));
     this.vanillaRepoRoot = path.resolve(options.vanillaRepoRoot ?? config?.vanillaRepoRoot ?? path.join(this.codexRoot, 'Mindustry-master'));
