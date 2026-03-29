@@ -93,6 +93,7 @@ struct ExternalExclusiveGroupsState {
 pub struct RuntimeConfigDefaults {
     pub qa_external_exclusive_groups_file: Option<PathBuf>,
     pub qa_external_exclusive_groups_refresh_ms: u64,
+    pub qa_external_exclusive_groups_stale_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -608,11 +609,16 @@ impl RuntimeConfigStore {
     async fn refresh_external_exclusive_groups_if_needed(&self) {
         let file_candidates = self.external_exclusive_candidates();
         if file_candidates.is_empty() {
-            *self.external_exclusive_groups.lock().await = ExternalExclusiveGroupsState::default();
+            *self.external_exclusive_groups.lock().await = ExternalExclusiveGroupsState {
+                checked_at_ms: current_time_ms(),
+                refresh_ms: self.external_exclusive_refresh_ms(),
+                ..Default::default()
+            };
             return;
         }
 
         let refresh_ms = self.external_exclusive_refresh_ms();
+        let stale_ms = self.external_exclusive_stale_ms();
         let now = current_time_ms();
         {
             let state = self.external_exclusive_groups.lock().await;
@@ -620,6 +626,7 @@ impl RuntimeConfigStore {
                 return;
             }
         }
+        let previous = self.external_exclusive_groups.lock().await.clone();
 
         for file_path in &file_candidates {
             match fs::metadata(file_path).await {
@@ -630,8 +637,10 @@ impl RuntimeConfigStore {
                         .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|value| value.as_millis() as u64)
                         .unwrap_or_default();
-                    let existing = self.external_exclusive_groups.lock().await.clone();
-                    if existing.file_path.as_ref() == Some(file_path) && existing.mtime_ms == mtime_ms {
+                    if now.saturating_sub(mtime_ms) > stale_ms {
+                        continue;
+                    }
+                    if previous.file_path.as_ref() == Some(file_path) && previous.mtime_ms == mtime_ms {
                         let mut state = self.external_exclusive_groups.lock().await;
                         state.checked_at_ms = now;
                         state.refresh_ms = refresh_ms;
@@ -653,19 +662,37 @@ impl RuntimeConfigStore {
                             }
                             Err(error) => {
                                 self.logger.warn(format!("解析外部互斥群文件失败：{error}")).await;
-                                break;
+                                if should_keep_previous_external_exclusive_state(&previous, file_path, now, stale_ms) {
+                                    let mut state = self.external_exclusive_groups.lock().await;
+                                    state.checked_at_ms = now;
+                                    state.refresh_ms = refresh_ms;
+                                    return;
+                                }
+                                continue;
                             }
                         },
                         Err(error) => {
                             self.logger.warn(format!("读取外部互斥群文件失败：{error}")).await;
-                            break;
+                            if should_keep_previous_external_exclusive_state(&previous, file_path, now, stale_ms) {
+                                let mut state = self.external_exclusive_groups.lock().await;
+                                state.checked_at_ms = now;
+                                state.refresh_ms = refresh_ms;
+                                return;
+                            }
+                            continue;
                         }
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => {
                     self.logger.warn(format!("读取外部互斥群文件失败：{error}")).await;
-                    break;
+                    if should_keep_previous_external_exclusive_state(&previous, file_path, now, stale_ms) {
+                        let mut state = self.external_exclusive_groups.lock().await;
+                        state.checked_at_ms = now;
+                        state.refresh_ms = refresh_ms;
+                        return;
+                    }
+                    continue;
                 }
             }
         }
@@ -701,6 +728,13 @@ impl RuntimeConfigStore {
 
     fn external_exclusive_refresh_ms(&self) -> u64 {
         self.defaults.qa_external_exclusive_groups_refresh_ms.max(250)
+    }
+
+    fn external_exclusive_stale_ms(&self) -> u64 {
+        self.defaults
+            .qa_external_exclusive_groups_stale_ms
+            .max(self.external_exclusive_refresh_ms().saturating_mul(3))
+            .max(1_000)
     }
 }
 
@@ -753,6 +787,17 @@ fn current_time_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|value| value.as_millis() as u64)
         .unwrap_or_default()
+}
+
+fn should_keep_previous_external_exclusive_state(
+    previous: &ExternalExclusiveGroupsState,
+    file_path: &PathBuf,
+    now: u64,
+    stale_ms: u64,
+) -> bool {
+    previous.file_path.as_ref() == Some(file_path)
+        && previous.mtime_ms > 0
+        && now.saturating_sub(previous.mtime_ms) <= stale_ms
 }
 
 const fn default_true() -> bool {

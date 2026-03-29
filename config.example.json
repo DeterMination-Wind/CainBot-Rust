@@ -64,6 +64,7 @@
     ],
     "externalExclusiveGroupsFile": "../../OlivOSAIChatAssassin/data/cainbot-exclusive-groups.json",
     "externalExclusiveGroupsRefreshMs": 5000,
+    "externalExclusiveGroupsStaleMs": 90000,
     "passHintText": "如果此问题无人回答，可以试试 at 我再问，或者输入 /chat 来询问 bot。",
     "requestTimeoutMs": 90000,
     "retryAttempts": 3,

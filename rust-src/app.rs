@@ -70,6 +70,7 @@ impl AppRuntime {
             RuntimeConfigDefaults {
                 qa_external_exclusive_groups_file: config.qa.external_exclusive_groups_file.clone(),
                 qa_external_exclusive_groups_refresh_ms: config.qa.external_exclusive_groups_refresh_ms,
+                qa_external_exclusive_groups_stale_ms: config.qa.external_exclusive_groups_stale_ms,
             },
             logger.clone(),
         );

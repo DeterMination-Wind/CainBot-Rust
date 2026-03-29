@@ -92,6 +92,7 @@ pub struct QaConfig {
     pub enabled_group_ids: Vec<String>,
     pub external_exclusive_groups_file: Option<PathBuf>,
     pub external_exclusive_groups_refresh_ms: u64,
+    pub external_exclusive_groups_stale_ms: u64,
     pub pass_hint_text: String,
     pub client: ChatClientConfig,
     pub filter: QaFilterConfig,
@@ -319,6 +320,9 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
             external_exclusive_groups_refresh_ms: get_i64(&raw, &["qa", "externalExclusiveGroupsRefreshMs"])
                 .unwrap_or(5_000)
                 .max(250) as u64,
+            external_exclusive_groups_stale_ms: get_i64(&raw, &["qa", "externalExclusiveGroupsStaleMs"])
+                .unwrap_or(90_000)
+                .max(1_000) as u64,
             pass_hint_text: get_string(&raw, &["qa", "passHintText"]).unwrap_or_else(|| {
                 "如果此问题无人回答，可以试试 at 我再问，或者输入 /chat 来询问 bot。".to_string()
             }),
