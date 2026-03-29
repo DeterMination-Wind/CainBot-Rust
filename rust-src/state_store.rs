@@ -191,6 +191,100 @@ impl StateStore {
         .await
     }
 
+    pub async fn list_issue_repair_offers(&self) -> Vec<Value> {
+        self.state
+            .lock()
+            .await
+            .issue_repair
+            .offers
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub async fn get_issue_repair_offer(&self, offer_id: &str) -> Option<Value> {
+        self.state
+            .lock()
+            .await
+            .issue_repair
+            .offers
+            .get(offer_id.trim())
+            .cloned()
+    }
+
+    pub async fn set_issue_repair_offer(&self, offer: Value) -> Result<()> {
+        let offer_id = offer
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("issue repair offer id 不能为空"))?
+            .to_string();
+        self.state
+            .lock()
+            .await
+            .issue_repair
+            .offers
+            .insert(offer_id, offer);
+        Ok(())
+    }
+
+    pub async fn delete_issue_repair_offer(&self, offer_id: &str) {
+        self.state
+            .lock()
+            .await
+            .issue_repair
+            .offers
+            .remove(offer_id.trim());
+    }
+
+    pub async fn list_issue_repair_sessions(&self) -> Vec<Value> {
+        self.state
+            .lock()
+            .await
+            .issue_repair
+            .sessions
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub async fn get_issue_repair_session(&self, session_id: &str) -> Option<Value> {
+        self.state
+            .lock()
+            .await
+            .issue_repair
+            .sessions
+            .get(session_id.trim())
+            .cloned()
+    }
+
+    pub async fn set_issue_repair_session(&self, session: Value) -> Result<()> {
+        let session_id = session
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("issue repair session id 不能为空"))?
+            .to_string();
+        self.state
+            .lock()
+            .await
+            .issue_repair
+            .sessions
+            .insert(session_id, session);
+        Ok(())
+    }
+
+    pub async fn delete_issue_repair_session(&self, session_id: &str) {
+        self.state
+            .lock()
+            .await
+            .issue_repair
+            .sessions
+            .remove(session_id.trim());
+    }
+
     // 只有显式 compact 时才重写整份 snapshot，避免高频业务更新反复 JSON stringify。
     pub async fn save(&self) -> Result<()> {
         let snapshot = self.state.lock().await.clone();

@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
+use tokio::fs;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::logger::Logger;
@@ -21,6 +22,10 @@ pub struct NapCatClientConfig {
     pub request_timeout_ms: u64,
     pub headers: BTreeMap<String, String>,
     pub max_concurrent_events: usize,
+    pub forward_threshold_chars: usize,
+    pub upload_retry_attempts: usize,
+    pub upload_retry_delay_ms: u64,
+    pub upload_stable_wait_ms: u64,
 }
 
 #[derive(Clone)]
@@ -128,6 +133,213 @@ impl NapCatClient {
                 "user_id": user_id.trim(),
                 "no_cache": no_cache
             }),
+        )
+        .await
+    }
+
+    pub async fn get_group_message_history(&self, group_id: &str, count: usize) -> Result<Value> {
+        self.call(
+            "get_group_msg_history",
+            json!({
+                "group_id": group_id.trim(),
+                "count": count.max(1),
+                "reverse_order": false,
+                "disable_get_url": true,
+                "parse_mult_msg": false,
+                "quick_reply": false
+            }),
+        )
+        .await
+    }
+
+    pub async fn get_friend_message_history(&self, user_id: &str, count: usize) -> Result<Value> {
+        self.call(
+            "get_friend_msg_history",
+            json!({
+                "user_id": user_id.trim(),
+                "count": count.max(1),
+                "reverse_order": false,
+                "disable_get_url": true,
+                "parse_mult_msg": false,
+                "quick_reply": false
+            }),
+        )
+        .await
+    }
+
+    pub async fn get_group_system_messages(&self, count: usize) -> Result<Value> {
+        self.call(
+            "get_group_system_msg",
+            json!({
+                "count": count.max(1)
+            }),
+        )
+        .await
+    }
+
+    pub async fn set_group_add_request(
+        &self,
+        flag: &str,
+        approve: bool,
+        reason: &str,
+        count: usize,
+        sub_type: &str,
+    ) -> Result<Value> {
+        let mut payload = json!({
+            "flag": flag.trim(),
+            "approve": approve,
+            "reason": reason.trim(),
+            "count": count.max(1)
+        });
+        if !sub_type.trim().is_empty() {
+            payload["sub_type"] = Value::String(sub_type.trim().to_string());
+        }
+        self.call("set_group_add_request", payload).await
+    }
+
+    pub async fn get_group_root_files(&self, group_id: &str, file_count: usize) -> Result<Value> {
+        self.call(
+            "get_group_root_files",
+            json!({
+                "group_id": group_id.trim(),
+                "file_count": file_count.max(1)
+            }),
+        )
+        .await
+    }
+
+    pub async fn create_group_file_folder(&self, group_id: &str, folder_name: &str) -> Result<Value> {
+        self.call(
+            "create_group_file_folder",
+            json!({
+                "group_id": group_id.trim(),
+                "folder_name": folder_name.trim()
+            }),
+        )
+        .await
+    }
+
+    pub async fn upload_group_file(
+        &self,
+        group_id: &str,
+        file_path: &str,
+        name: Option<&str>,
+        folder: Option<&str>,
+    ) -> Result<Value> {
+        let mut payload = json!({
+            "group_id": group_id.trim(),
+            "file": file_path.trim(),
+            "upload_file": true
+        });
+        if let Some(name) = name.map(str::trim).filter(|item| !item.is_empty()) {
+            payload["name"] = Value::String(name.to_string());
+        }
+        if let Some(folder) = folder.map(str::trim).filter(|item| !item.is_empty()) {
+            payload["folder"] = Value::String(folder.to_string());
+        }
+        self.call("upload_group_file", payload).await
+    }
+
+    pub async fn ensure_group_folder(&self, group_id: &str, folder_name: &str) -> Result<String> {
+        let normalized_folder = folder_name.trim();
+        if normalized_folder.is_empty() {
+            return Ok(String::new());
+        }
+        let root = self.get_group_root_files(group_id, 500).await?;
+        if let Some(found) = root
+            .get("folders")
+            .and_then(Value::as_array)
+            .and_then(|folders| {
+                folders.iter().find(|folder| {
+                    folder.get("folder_name").and_then(Value::as_str).unwrap_or_default().trim() == normalized_folder
+                })
+            })
+            .and_then(|folder| folder.get("folder_id"))
+        {
+            return Ok(value_to_string(found));
+        }
+        self.create_group_file_folder(group_id, normalized_folder).await?;
+        let refreshed = self.get_group_root_files(group_id, 500).await?;
+        refreshed
+            .get("folders")
+            .and_then(Value::as_array)
+            .and_then(|folders| {
+                folders.iter().find(|folder| {
+                    folder.get("folder_name").and_then(Value::as_str).unwrap_or_default().trim() == normalized_folder
+                })
+            })
+            .and_then(|folder| folder.get("folder_id"))
+            .map(value_to_string)
+            .filter(|item| !item.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("创建群文件夹失败：{group_id}/{normalized_folder}"))
+    }
+
+    pub async fn send_local_file_to_group(
+        &self,
+        group_id: &str,
+        file_path: &str,
+        file_name: Option<&str>,
+        folder_name: Option<&str>,
+        notify_text: Option<&str>,
+    ) -> Result<Value> {
+        let metadata = fs::metadata(file_path)
+            .await
+            .with_context(|| format!("文件不存在：{file_path}"))?;
+        if !metadata.is_file() {
+            bail!("目标不是普通文件：{file_path}");
+        }
+        let folder_id = if let Some(folder_name) = folder_name.map(str::trim).filter(|item| !item.is_empty()) {
+            self.ensure_group_folder(group_id, folder_name).await?
+        } else {
+            String::new()
+        };
+
+        wait_for_stable_file(file_path, self.config.upload_stable_wait_ms).await?;
+        let upload_result = self
+            .upload_group_file(
+                group_id,
+                file_path,
+                file_name,
+                if folder_id.is_empty() { None } else { Some(folder_id.as_str()) },
+            )
+            .await?;
+        if let Some(notify_text) = notify_text.map(str::trim).filter(|item| !item.is_empty()) {
+            let _ = self.send_group_message(group_id, Value::String(notify_text.to_string())).await?;
+        }
+        Ok(json!({
+            "groupId": group_id.trim(),
+            "filePath": file_path,
+            "fileName": file_name.unwrap_or_default(),
+            "folderName": folder_name.unwrap_or_default(),
+            "folderId": folder_id,
+            "uploadResult": upload_result
+        }))
+    }
+
+    pub async fn send_local_file_to_context(
+        &self,
+        message_type: &str,
+        target_id: &str,
+        file_path: &str,
+        file_name: Option<&str>,
+        folder_name: Option<&str>,
+    ) -> Result<Value> {
+        if message_type == "group" {
+            return self
+                .send_local_file_to_group(target_id, file_path, file_name, folder_name, None)
+                .await;
+        }
+        self.send_private_message(
+            target_id,
+            json!([
+                {
+                    "type": "file",
+                    "data": {
+                        "file": file_path,
+                        "name": file_name.unwrap_or_default()
+                    }
+                }
+            ]),
         )
         .await
     }
@@ -278,4 +490,32 @@ fn parse_sse_event(block: &[u8]) -> Result<Option<Value>> {
 
 fn find_sse_separator(buffer: &[u8]) -> Option<usize> {
     buffer.windows(2).position(|window| window == b"\n\n")
+}
+
+async fn wait_for_stable_file(file_path: &str, stable_wait_ms: u64) -> Result<()> {
+    let mut previous: Option<(u64, u128)> = None;
+    for _ in 0..3 {
+        let metadata = fs::metadata(file_path).await?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|value| value.as_millis())
+            .unwrap_or_default();
+        let current = (metadata.len(), modified);
+        if previous == Some(current) {
+            return Ok(());
+        }
+        previous = Some(current);
+        sleep_ms(stable_wait_ms.max(200)).await;
+    }
+    Ok(())
+}
+
+fn value_to_string(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.trim().to_string(),
+        Value::Number(number) => number.to_string(),
+        other => other.to_string(),
+    }
 }
