@@ -10,8 +10,9 @@ use crate::event_utils::{
     plain_text_from_event,
 };
 use crate::logger::Logger;
+use crate::message_input::{BuildChatInputOptions, build_chat_input, build_translation_input};
 use crate::napcat_client::{NapCatClient, NapCatClientConfig};
-use crate::openai_chat_client::{OpenAiChatClient, OpenAiChatClientConfig};
+use crate::openai_chat_client::{ChatMessage, CompleteOptions, OpenAiChatClient, OpenAiChatClientConfig};
 use crate::openai_translator::{OpenAiTranslator, OpenAiTranslatorConfig};
 use crate::runtime_config_store::{RuntimeConfigDefaults, RuntimeConfigStore};
 use crate::state_store::StateStore;
@@ -28,8 +29,8 @@ pub struct AppRuntime {
     pub bot_display_name: String,
     pub _state_store: StateStore,
     pub _webui_sync_store: WebUiSyncStore,
-    pub _qa_client: Option<OpenAiChatClient>,
-    pub _translator: Option<OpenAiTranslator>,
+    pub qa_client: Option<OpenAiChatClient>,
+    pub translator: Option<OpenAiTranslator>,
     pub _worker_supervisor: WorkerSupervisor,
 }
 
@@ -155,8 +156,8 @@ impl AppRuntime {
             bot_display_name: config.bot.display_name,
             _state_store: state_store,
             _webui_sync_store: webui_sync_store,
-            _qa_client: qa_client,
-            _translator: translator,
+            qa_client,
+            translator,
             _worker_supervisor: worker_supervisor,
         })
     }
@@ -166,6 +167,8 @@ impl AppRuntime {
         let event_runtime_store = self.runtime_config_store.clone();
         let event_napcat_client = self.napcat_client.clone();
         let enabled_static_groups = self.enabled_static_groups.clone();
+        let event_qa_client = self.qa_client.clone();
+        let event_translator = self.translator.clone();
         let bot_display_name = self.bot_display_name.clone();
         self.napcat_client
             .start_event_loop(move |event: Value| {
@@ -174,11 +177,16 @@ impl AppRuntime {
                 let napcat_client = event_napcat_client.clone();
                 let bot_display_name = bot_display_name.clone();
                 let enabled_static_groups = enabled_static_groups.clone();
+                let qa_client = event_qa_client.clone();
+                let translator = event_translator.clone();
                 async move {
                     log_event_summary(&event_logger, &event).await;
                     handle_message_event(
                         &event_logger,
                         &napcat_client,
+                        &event_runtime_store,
+                        qa_client.as_ref(),
+                        translator.as_ref(),
                         &event,
                         &enabled_static_groups,
                         &bot_display_name,
@@ -267,8 +275,11 @@ async fn handle_group_invite_stub(
 async fn handle_message_event(
     logger: &Logger,
     napcat_client: &NapCatClient,
+    runtime_config_store: &RuntimeConfigStore,
+    qa_client: Option<&OpenAiChatClient>,
+    translator: Option<&OpenAiTranslator>,
     event: &Value,
-    _static_group_ids: &[String],
+    static_group_ids: &[String],
     bot_display_name: &str,
 ) -> Result<()> {
     if !ensure_message_event(event)? {
@@ -277,6 +288,10 @@ async fn handle_message_event(
     let context = create_context_from_event(event);
     let text = plain_text_from_event(event);
     let command = parse_command_from_event(event);
+    let reply_message_id = event
+        .get("message_id")
+        .map(value_to_string)
+        .filter(|item| !item.is_empty());
 
     // 先把显式命令单独切出来，保证后续迁移会话逻辑时入口稳定。
     if let Some(command) = command {
@@ -285,28 +300,31 @@ async fn handle_message_event(
         } else {
             context.user_id.as_str()
         };
-        match command.name.as_str() {
-            "help" => {
-                napcat_client
-                    .reply_text(
-                        &context.message_type,
-                        target_id,
-                        event.get("message_id").and_then(Value::as_i64).map(|item| item.to_string()).as_deref(),
-                        &build_help_text(bot_display_name),
-                    )
-                    .await?;
-            }
-            "chat" | "translate" | "edit" => {
-                napcat_client
-                    .reply_text(
-                        &context.message_type,
-                        target_id,
-                        event.get("message_id").and_then(Value::as_i64).map(|item| item.to_string()).as_deref(),
-                        "Rust 版该命令正在迁移中，当前已完成基础层和性能层改造。",
-                    )
-                    .await?;
-            }
-            _ => {}
+        if let Err(error) = execute_command(
+            logger,
+            napcat_client,
+            runtime_config_store,
+            qa_client,
+            translator,
+            &context,
+            event,
+            static_group_ids,
+            bot_display_name,
+            &command,
+            target_id,
+            reply_message_id.as_deref(),
+        )
+        .await
+        {
+            logger.warn(format!("命令处理失败：{error:#}")).await;
+            napcat_client
+                .reply_text(
+                    &context.message_type,
+                    target_id,
+                    reply_message_id.as_deref(),
+                    &format!("命令执行失败：{error}"),
+                )
+                .await?;
         }
         return Ok(());
     }
@@ -327,4 +345,219 @@ async fn handle_message_event(
         }
     }
     Ok(())
+}
+
+async fn execute_command(
+    logger: &Logger,
+    napcat_client: &NapCatClient,
+    runtime_config_store: &RuntimeConfigStore,
+    qa_client: Option<&OpenAiChatClient>,
+    translator: Option<&OpenAiTranslator>,
+    context: &crate::event_utils::EventContext,
+    event: &Value,
+    static_group_ids: &[String],
+    bot_display_name: &str,
+    command: &crate::commands::ParsedCommand,
+    target_id: &str,
+    reply_message_id: Option<&str>,
+) -> Result<()> {
+    match command.name.as_str() {
+        "help" => {
+            napcat_client
+                .reply_text(
+                    &context.message_type,
+                    target_id,
+                    reply_message_id,
+                    &build_help_text(bot_display_name),
+                )
+                .await?;
+        }
+        "chat" => {
+            if context.message_type == "group"
+                && !runtime_config_store
+                    .is_qa_group_enabled(&context.group_id, static_group_ids)
+                    .await
+            {
+                bail!("当前群未启用 Cain 问答。请先由 bot 主人执行 /e 启用，或把群号加入 qa.enabledGroupIds。");
+            }
+            let Some(qa_client) = qa_client else {
+                bail!("当前未启用问答客户端。");
+            };
+            let chat_input = build_chat_input(
+                napcat_client,
+                event,
+                BuildChatInputOptions {
+                    argument: command.argument.clone(),
+                    allow_current_text_fallback: false,
+                    ai_runtime_prefix: format!(
+                        "当前 AI 身份：{bot_display_name}\n当前日期时间：{}",
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                    ),
+                },
+            )
+            .await?;
+            if !chat_input.has_content() {
+                bail!("没有可问答的内容；请直接写在命令后，或引用一条消息，或附带图片/文本文件。");
+            }
+            logger
+                .info(format!(
+                    "执行显式问答：source={}, sender={}, preview={}",
+                    if context.message_type == "group" {
+                        format!("group:{}", context.group_id)
+                    } else {
+                        format!("private:{}", context.user_id)
+                    },
+                    get_sender_name(event),
+                    chat_input
+                        .runtime_context
+                        .timeline_text
+                        .chars()
+                        .take(120)
+                        .collect::<String>()
+                ))
+                .await;
+            let answer = qa_client
+                .complete(
+                    &[ChatMessage {
+                        role: "user".to_string(),
+                        content: chat_input.to_openai_user_content(),
+                    }],
+                    CompleteOptions::default(),
+                )
+                .await?;
+            napcat_client
+                .reply_text(&context.message_type, target_id, reply_message_id, &answer)
+                .await?;
+        }
+        "translate" => {
+            let Some(translator) = translator else {
+                bail!("当前未启用翻译客户端。");
+            };
+            let source = build_translation_input(napcat_client, event, &command.argument).await?;
+            if !source.has_content() {
+                bail!("没有可翻译的内容；请直接写在命令后，或引用一条消息，或附带图片/文本文件。");
+            }
+            let translated = translator.translate(source.into_translation_input()).await?;
+            napcat_client
+                .reply_text(&context.message_type, target_id, reply_message_id, &translated)
+                .await?;
+        }
+        "edit" => {
+            let subcommand = command.positionals.first().map(String::as_str).unwrap_or_default();
+            if subcommand == "状态" {
+                let group_id = require_group_id(command, context)?;
+                let status = build_group_status_text(runtime_config_store, &group_id, static_group_ids).await;
+                napcat_client
+                    .reply_text(&context.message_type, target_id, reply_message_id, &status)
+                    .await?;
+            } else {
+                napcat_client
+                    .reply_text(
+                        &context.message_type,
+                        target_id,
+                        reply_message_id,
+                        "Rust 版 /e 目前已接入只读“状态”查询；其余编辑能力仍在迁移中。",
+                    )
+                    .await?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn require_group_id(command: &crate::commands::ParsedCommand, context: &crate::event_utils::EventContext) -> Result<String> {
+    let group_id = command
+        .flags
+        .get("group")
+        .map(String::as_str)
+        .unwrap_or(context.group_id.as_str())
+        .trim()
+        .to_string();
+    if group_id.is_empty() {
+        bail!("该命令需要群号；如果你在私聊里使用，请加 --group <群号>");
+    }
+    Ok(group_id)
+}
+
+async fn build_group_status_text(
+    runtime_config_store: &RuntimeConfigStore,
+    group_id: &str,
+    static_group_ids: &[String],
+) -> String {
+    let enabled = runtime_config_store
+        .is_qa_group_enabled(group_id, static_group_ids)
+        .await;
+    let group_entry = runtime_config_store
+        .get_qa_groups()
+        .await
+        .into_iter()
+        .find(|item| item.group_id == group_id);
+    let group_override = runtime_config_store.get_group_qa_override(group_id).await;
+    [
+        format!("当前群启用状态：{}", if enabled { "已启用" } else { "未启用" }),
+        format!(
+            "当前主动回复状态：{}",
+            if group_entry.as_ref().map(|item| item.proactive_reply_enabled).unwrap_or(true) {
+                "已启用"
+            } else {
+                "已关闭"
+            }
+        ),
+        format!(
+            "当前过滤心跳：{}",
+            if group_entry.as_ref().map(|item| item.filter_heartbeat_enabled).unwrap_or(false) {
+                format!(
+                    "已启用（每 {} 条候选消息审核一次）",
+                    group_entry
+                        .as_ref()
+                        .map(|item| item.filter_heartbeat_interval)
+                        .unwrap_or(10)
+                )
+            } else {
+                "已关闭".to_string()
+            }
+        ),
+        format!(
+            "当前文件下载状态：{}",
+            if group_entry.as_ref().map(|item| item.file_download_enabled).unwrap_or(false) {
+                "已启用"
+            } else {
+                "已关闭"
+            }
+        ),
+        format!(
+            "当前文件下载群文件夹：{}",
+            group_entry
+                .as_ref()
+                .map(|item| item.file_download_folder_name.as_str())
+                .filter(|item| !item.trim().is_empty())
+                .unwrap_or("(根目录)")
+        ),
+        String::new(),
+        "当前过滤 prompt：".to_string(),
+        group_override
+            .as_ref()
+            .map(|item| item.filter_prompt.as_str())
+            .filter(|item| !item.trim().is_empty())
+            .unwrap_or("(空)")
+            .to_string(),
+        String::new(),
+        "当前聊天 prompt：".to_string(),
+        group_override
+            .as_ref()
+            .map(|item| item.answer_prompt.as_str())
+            .filter(|item| !item.trim().is_empty())
+            .unwrap_or("(空)")
+            .to_string(),
+    ]
+    .join("\n")
+}
+
+fn value_to_string(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.trim().to_string(),
+        Value::Number(number) => number.to_string(),
+        other => other.to_string(),
+    }
 }

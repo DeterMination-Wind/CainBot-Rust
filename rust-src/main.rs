@@ -4,6 +4,7 @@ mod commands;
 mod event_utils;
 mod logger;
 mod message_attachment_reader;
+mod message_input;
 mod napcat_client;
 mod openai_chat_client;
 mod openai_translator;

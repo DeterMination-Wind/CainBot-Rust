@@ -110,6 +110,28 @@ impl NapCatClient {
         .await
     }
 
+    pub async fn get_message(&self, message_id: &str) -> Result<Value> {
+        self.call(
+            "get_msg",
+            json!({
+                "message_id": message_id.trim()
+            }),
+        )
+        .await
+    }
+
+    pub async fn get_group_member_info(&self, group_id: &str, user_id: &str, no_cache: bool) -> Result<Value> {
+        self.call(
+            "get_group_member_info",
+            json!({
+                "group_id": group_id.trim(),
+                "user_id": user_id.trim(),
+                "no_cache": no_cache
+            }),
+        )
+        .await
+    }
+
     pub async fn delete_message(&self, message_id: &str) -> Result<Value> {
         self.call(
             "delete_msg",
