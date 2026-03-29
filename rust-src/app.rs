@@ -155,15 +155,11 @@ impl AppRuntime {
                 loaded.config_path.display()
             ))
             .await;
-        let chat_session_manager = qa_client.clone().map(|chat_client| {
-            ChatSessionManager::new(
-                config.qa.clone(),
-                chat_client,
-                state_store.clone(),
-                logger.clone(),
-                runtime_config_store.clone(),
-            )
-        });
+        let chat_session_manager = if qa_client.is_some() {
+            Some(ChatSessionManager::start(&project_root, &config_path, logger.clone()).await?)
+        } else {
+            None
+        };
 
         logger.warn("业务层仍在迁移：文件下载、msav、issueRepair、codex bridge 还未接入。").await;
 
@@ -329,6 +325,9 @@ impl AppRuntime {
             .await?;
         background_stop.store(true, Ordering::SeqCst);
         group_file_download_worker.stop().await?;
+        if let Some(chat_session_manager) = self.chat_session_manager.as_ref() {
+            chat_session_manager.stop().await?;
+        }
         codex_bridge_server.stop().await?;
         self.logger.flush().await?;
         Ok(())
