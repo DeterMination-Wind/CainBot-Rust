@@ -12,6 +12,7 @@ mod message_input;
 mod napcat_client;
 mod openai_chat_client;
 mod openai_translator;
+mod qa_session_worker;
 mod runtime_config_store;
 mod state_store;
 mod utils;
