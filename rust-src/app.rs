@@ -1,4 +1,9 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use anyhow::{Result, bail};
 use serde_json::Value;
@@ -23,6 +28,12 @@ use crate::state_store::StateStore;
 use crate::utils::path_exists;
 use crate::webui_sync_store::WebUiSyncStore;
 use crate::worker_process::WorkerSupervisor;
+
+const GROUP_CARD_SYNC_RETRY_MS: u64 = 10 * 60 * 1000;
+const GROUP_INVITE_POLL_INTERVAL_MS: u64 = 60 * 1000;
+const SHUTDOWN_VOTE_REQUIRED_COUNT: usize = 3;
+const SHUTDOWN_VOTE_TTL_MS: u64 = 10 * 60 * 1000;
+const SHUTDOWN_VOTE_PROMPT: &str = "确定要关闭此bot的功能吗，大于两个人回复本消息\"Y\"将确认此操作";
 
 pub struct AppRuntime {
     pub config: Config,
@@ -204,6 +215,34 @@ impl AppRuntime {
         if let Some(manager) = issue_repair_manager.as_ref() {
             manager.initialize().await?;
         }
+        let shutdown_votes_by_group = Arc::new(tokio::sync::Mutex::new(HashMap::<String, ShutdownVote>::new()));
+        let shutdown_vote_message_to_group = Arc::new(tokio::sync::Mutex::new(HashMap::<String, String>::new()));
+        let group_nickname_sync_state = Arc::new(tokio::sync::Mutex::new(HashMap::<String, GroupNicknameSyncState>::new()));
+        let idle_activity_tokens = Arc::new(tokio::sync::Mutex::new(HashMap::<String, u64>::new()));
+        let background_stop = Arc::new(AtomicBool::new(false));
+
+        let invite_poll_logger = self.logger.clone();
+        let invite_poll_runtime_store = self.runtime_config_store.clone();
+        let invite_poll_napcat_client = self.napcat_client.clone();
+        let invite_poll_groups = self.enabled_static_groups.clone();
+        let invite_poll_stop = background_stop.clone();
+        tokio::spawn(async move {
+            while !invite_poll_stop.load(Ordering::SeqCst) {
+                if let Err(error) = poll_pending_group_invites(
+                    &invite_poll_logger,
+                    &invite_poll_runtime_store,
+                    &invite_poll_napcat_client,
+                    &invite_poll_groups,
+                )
+                .await
+                {
+                    invite_poll_logger
+                        .warn(format!("轮询待处理群邀请失败：{error:#}"))
+                        .await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(GROUP_INVITE_POLL_INTERVAL_MS)).await;
+            }
+        });
         let event_logger = self.logger.clone();
         let event_runtime_store = self.runtime_config_store.clone();
         let event_napcat_client = self.napcat_client.clone();
@@ -215,6 +254,10 @@ impl AppRuntime {
         let event_chat_session_manager = self.chat_session_manager.clone();
         let event_group_file_download_worker = group_file_download_worker.clone();
         let event_issue_repair_manager = issue_repair_manager.clone();
+        let event_shutdown_votes_by_group = shutdown_votes_by_group.clone();
+        let event_shutdown_vote_message_to_group = shutdown_vote_message_to_group.clone();
+        let event_group_nickname_sync_state = group_nickname_sync_state.clone();
+        let event_idle_activity_tokens = idle_activity_tokens.clone();
         let owner_user_id = self.owner_user_id.clone();
         let bot_display_name = self.bot_display_name.clone();
         self.napcat_client
@@ -231,9 +274,34 @@ impl AppRuntime {
                 let chat_session_manager = event_chat_session_manager.clone();
                 let group_file_download_worker = event_group_file_download_worker.clone();
                 let issue_repair_manager = event_issue_repair_manager.clone();
+                let shutdown_votes_by_group = event_shutdown_votes_by_group.clone();
+                let shutdown_vote_message_to_group = event_shutdown_vote_message_to_group.clone();
+                let group_nickname_sync_state = event_group_nickname_sync_state.clone();
+                let idle_activity_tokens = event_idle_activity_tokens.clone();
                 let owner_user_id = owner_user_id.clone();
                 async move {
                     log_event_summary(&event_logger, &event).await;
+                    let post_type = event.get("post_type").and_then(Value::as_str).unwrap_or_default();
+                    if post_type == "request" {
+                        handle_group_invite_stub(
+                            &event_logger,
+                            &event_runtime_store,
+                            &napcat_client,
+                            &enabled_static_groups,
+                            &event,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    if post_type == "notice" {
+                        handle_notice_event(
+                            &shutdown_votes_by_group,
+                            &shutdown_vote_message_to_group,
+                            &event,
+                        )
+                        .await;
+                        return Ok(());
+                    }
                     handle_message_event(
                         &config,
                         &event_logger,
@@ -245,24 +313,21 @@ impl AppRuntime {
                         chat_session_manager.as_ref(),
                         &group_file_download_worker,
                         issue_repair_manager.as_ref(),
+                        &shutdown_votes_by_group,
+                        &shutdown_vote_message_to_group,
+                        &group_nickname_sync_state,
+                        &idle_activity_tokens,
                         &event,
                         &enabled_static_groups,
                         &owner_user_id,
                         &bot_display_name,
                     )
                     .await?;
-                    handle_group_invite_stub(
-                        &event_logger,
-                        &event_runtime_store,
-                        &napcat_client,
-                        &enabled_static_groups,
-                        &event,
-                    )
-                    .await?;
                     Ok(())
                 }
             })
             .await?;
+        background_stop.store(true, Ordering::SeqCst);
         group_file_download_worker.stop().await?;
         codex_bridge_server.stop().await?;
         self.logger.flush().await?;
@@ -389,6 +454,10 @@ async fn handle_message_event(
     chat_session_manager: Option<&ChatSessionManager>,
     group_file_download_worker: &GroupFileDownloadWorker,
     issue_repair_manager: Option<&IssueRepairManager>,
+    shutdown_votes_by_group: &Arc<tokio::sync::Mutex<HashMap<String, ShutdownVote>>>,
+    shutdown_vote_message_to_group: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    group_nickname_sync_state: &Arc<tokio::sync::Mutex<HashMap<String, GroupNicknameSyncState>>>,
+    idle_activity_tokens: &Arc<tokio::sync::Mutex<HashMap<String, u64>>>,
     event: &Value,
     static_group_ids: &[String],
     owner_user_id: &str,
@@ -398,6 +467,9 @@ async fn handle_message_event(
         return Ok(());
     }
     let context = create_context_from_event(event);
+    if context.user_id == context.self_id && !context.self_id.is_empty() {
+        return Ok(());
+    }
     let text = plain_text_from_event(event);
     let command = parse_command_from_event(event);
     let reply_message_id = event
@@ -444,6 +516,48 @@ async fn handle_message_event(
     }
 
     if context.message_type == "group" {
+        ensure_group_nickname(
+            napcat_client,
+            logger,
+            config,
+            group_nickname_sync_state,
+            &context.group_id,
+            &context.self_id,
+        )
+        .await;
+        if let Some(chat_session_manager) = chat_session_manager {
+            touch_group_activity(idle_activity_tokens, chat_session_manager, context.group_id.clone(), logger.clone());
+            if maybe_handle_shutdown_vote_reply(
+                logger,
+                napcat_client,
+                chat_session_manager,
+                shutdown_votes_by_group,
+                shutdown_vote_message_to_group,
+                &context,
+                event,
+                &text,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+            if maybe_start_shutdown_vote(
+                config,
+                logger,
+                napcat_client,
+                qa_client,
+                chat_session_manager,
+                shutdown_votes_by_group,
+                shutdown_vote_message_to_group,
+                &context,
+                event,
+                &text,
+            )
+            .await?
+            {
+                return Ok(());
+            }
+        }
         if group_file_download_worker
             .handle_group_message(&context, event, &text)
             .await?
@@ -999,6 +1113,544 @@ fn format_group_status(status: &crate::chat_session_manager::GroupPromptStatus) 
         status.answer_prompt.clone(),
     ]
     .join("\n")
+}
+
+#[derive(Debug, Clone)]
+struct GroupNicknameSyncState {
+    status: String,
+    nickname: String,
+    updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ShutdownVote {
+    group_id: String,
+    message_ids: HashSet<String>,
+    voters: HashSet<String>,
+    expires_at_ms: u64,
+}
+
+async fn ensure_group_nickname(
+    napcat_client: &NapCatClient,
+    logger: &Logger,
+    config: &Config,
+    state: &Arc<tokio::sync::Mutex<HashMap<String, GroupNicknameSyncState>>>,
+    group_id: &str,
+    self_id: &str,
+) {
+    let target_nickname = config.bot.group_nickname.trim();
+    if group_id.trim().is_empty() || self_id.trim().is_empty() || target_nickname.is_empty() {
+        return;
+    }
+    let key = format!("{}:{}", group_id.trim(), self_id.trim());
+    {
+        let guard = state.lock().await;
+        if let Some(current) = guard.get(&key) {
+            if current.status == "pending" {
+                return;
+            }
+            if current.status == "ok" && current.nickname == target_nickname {
+                return;
+            }
+            if current.status == "failed"
+                && current.nickname == target_nickname
+                && current_time_ms().saturating_sub(current.updated_at_ms) < GROUP_CARD_SYNC_RETRY_MS
+            {
+                return;
+            }
+        }
+    }
+    state.lock().await.insert(
+        key.clone(),
+        GroupNicknameSyncState {
+            status: "pending".to_string(),
+            nickname: target_nickname.to_string(),
+            updated_at_ms: current_time_ms(),
+        },
+    );
+    match napcat_client
+        .get_group_member_info(group_id, self_id, true)
+        .await
+    {
+        Ok(info)
+            if info
+                .get("card")
+                .and_then(Value::as_str)
+                .map(|item| item.trim() == target_nickname)
+                .unwrap_or(false) =>
+        {
+            state.lock().await.insert(
+                key,
+                GroupNicknameSyncState {
+                    status: "ok".to_string(),
+                    nickname: target_nickname.to_string(),
+                    updated_at_ms: current_time_ms(),
+                },
+            );
+        }
+        _ => match napcat_client.set_group_card(group_id, self_id, target_nickname).await {
+            Ok(_) => {
+                state.lock().await.insert(
+                    key,
+                    GroupNicknameSyncState {
+                        status: "ok".to_string(),
+                        nickname: target_nickname.to_string(),
+                        updated_at_ms: current_time_ms(),
+                    },
+                );
+                logger
+                    .info(format!("已同步群 {group_id} 的 bot 群名片为 {target_nickname}"))
+                    .await;
+            }
+            Err(error) => {
+                state.lock().await.insert(
+                    key,
+                    GroupNicknameSyncState {
+                        status: "failed".to_string(),
+                        nickname: target_nickname.to_string(),
+                        updated_at_ms: current_time_ms(),
+                    },
+                );
+                logger
+                    .warn(format!("同步群 {group_id} 的 bot 群名片失败：{error:#}"))
+                    .await;
+            }
+        },
+    }
+}
+
+fn touch_group_activity(
+    idle_tokens: &Arc<tokio::sync::Mutex<HashMap<String, u64>>>,
+    chat_session_manager: &ChatSessionManager,
+    group_id: String,
+    logger: Logger,
+) {
+    if group_id.trim().is_empty() {
+        return;
+    }
+    let idle_tokens = idle_tokens.clone();
+    let chat_session_manager = chat_session_manager.clone();
+    tokio::spawn(async move {
+        let token = current_time_ms();
+        idle_tokens.lock().await.insert(group_id.clone(), token);
+        tokio::time::sleep(std::time::Duration::from_secs(15 * 60)).await;
+        let current = idle_tokens.lock().await.get(&group_id).copied();
+        if current != Some(token) || !chat_session_manager.is_group_enabled(&group_id).await {
+            return;
+        }
+        if let Ok((should_end, reason)) = chat_session_manager.maybe_close_group_topic(&group_id).await {
+            logger
+                .info(format!(
+                    "群 {group_id} 空闲话题判断：{}{}",
+                    if should_end { "结束" } else { "继续" },
+                    if reason.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({reason})")
+                    }
+                ))
+                .await;
+        }
+    });
+}
+
+async fn maybe_handle_shutdown_vote_reply(
+    logger: &Logger,
+    napcat_client: &NapCatClient,
+    chat_session_manager: &ChatSessionManager,
+    shutdown_votes_by_group: &Arc<tokio::sync::Mutex<HashMap<String, ShutdownVote>>>,
+    shutdown_vote_message_to_group: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    context: &crate::event_utils::EventContext,
+    event: &Value,
+    text: &str,
+) -> Result<bool> {
+    let Some(reply_id) = extract_reply_id_from_event(event) else {
+        return Ok(false);
+    };
+    let Some(group_id) = shutdown_vote_message_to_group.lock().await.get(&reply_id).cloned() else {
+        return Ok(false);
+    };
+    if !text_contains_shutdown_vote_approval(text) {
+        return Ok(true);
+    }
+    let mut votes = shutdown_votes_by_group.lock().await;
+    let Some(vote) = votes.get_mut(&group_id) else {
+        return Ok(false);
+    };
+    if vote.expires_at_ms <= current_time_ms() {
+        votes.remove(&group_id);
+        drop(votes);
+        clear_shutdown_vote_message_map(shutdown_vote_message_to_group, &group_id).await;
+        return Ok(false);
+    }
+    if !context.user_id.trim().is_empty() {
+        vote.voters.insert(context.user_id.clone());
+    }
+    if vote.voters.len() < SHUTDOWN_VOTE_REQUIRED_COUNT {
+        return Ok(true);
+    }
+    votes.remove(&group_id);
+    drop(votes);
+    clear_shutdown_vote_message_map(shutdown_vote_message_to_group, &group_id).await;
+    let _ = logger;
+    let _ = event;
+    chat_session_manager
+        .disable_group_proactive_replies(&context.group_id)
+        .await?;
+    napcat_client
+        .reply_text(
+            &context.message_type,
+            &context.group_id,
+            event.get("message_id").map(value_to_string).as_deref(),
+            "已根据投票关闭本群主动回复功能。仍可通过 @我 或 /chat 调用。",
+        )
+        .await?;
+    Ok(true)
+}
+
+async fn maybe_start_shutdown_vote(
+    config: &Config,
+    logger: &Logger,
+    napcat_client: &NapCatClient,
+    qa_client: Option<&OpenAiChatClient>,
+    chat_session_manager: &ChatSessionManager,
+    shutdown_votes_by_group: &Arc<tokio::sync::Mutex<HashMap<String, ShutdownVote>>>,
+    shutdown_vote_message_to_group: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    context: &crate::event_utils::EventContext,
+    event: &Value,
+    text: &str,
+) -> Result<bool> {
+    if !chat_session_manager.is_group_enabled(&context.group_id).await
+        || !chat_session_manager
+            .is_group_proactive_reply_enabled(&context.group_id)
+            .await
+        || !event_mentions_self(event, &config.bot.display_name)
+        || !text_looks_like_explicit_shutdown_request(text)
+    {
+        return Ok(false);
+    }
+    if let Some(vote) = shutdown_votes_by_group.lock().await.get(&context.group_id).cloned()
+        && vote.expires_at_ms > current_time_ms()
+    {
+        napcat_client
+            .reply_text(
+                &context.message_type,
+                &context.group_id,
+                event.get("message_id").map(value_to_string).as_deref(),
+                "当前群已有关闭投票在进行，直接回复那条投票消息 \"Y\" 即可。",
+            )
+            .await?;
+        return Ok(true);
+    }
+    let should_start = if let Some(qa_client) = qa_client {
+        classify_shutdown_vote_intent(qa_client, config, context, event, text).await?
+    } else {
+        looks_like_bot_opposition_candidate(text, &config.bot.display_name)
+    };
+    if !should_start {
+        return Ok(false);
+    }
+
+    let results = napcat_client
+        .reply_text(
+            &context.message_type,
+            &context.group_id,
+            event.get("message_id").map(value_to_string).as_deref(),
+            SHUTDOWN_VOTE_PROMPT,
+        )
+        .await?;
+    let message_ids = extract_message_ids_from_send_results(&results);
+    if message_ids.is_empty() {
+        return Ok(true);
+    }
+    shutdown_votes_by_group.lock().await.insert(
+        context.group_id.clone(),
+        ShutdownVote {
+            group_id: context.group_id.clone(),
+            message_ids: message_ids.iter().cloned().collect(),
+            voters: HashSet::new(),
+            expires_at_ms: current_time_ms() + SHUTDOWN_VOTE_TTL_MS,
+        },
+    );
+    let mut map = shutdown_vote_message_to_group.lock().await;
+    for message_id in &message_ids {
+        map.insert(message_id.clone(), context.group_id.clone());
+    }
+    drop(map);
+    schedule_shutdown_vote_expiry(
+        logger.clone(),
+        napcat_client.clone(),
+        shutdown_votes_by_group.clone(),
+        shutdown_vote_message_to_group.clone(),
+        context.group_id.clone(),
+    );
+    Ok(true)
+}
+
+fn schedule_shutdown_vote_expiry(
+    logger: Logger,
+    napcat_client: NapCatClient,
+    shutdown_votes_by_group: Arc<tokio::sync::Mutex<HashMap<String, ShutdownVote>>>,
+    shutdown_vote_message_to_group: Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    group_id: String,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(SHUTDOWN_VOTE_TTL_MS)).await;
+        let expired = {
+            let mut votes = shutdown_votes_by_group.lock().await;
+            match votes.get(&group_id) {
+                Some(vote) if vote.expires_at_ms <= current_time_ms() => votes.remove(&group_id),
+                _ => None,
+            }
+        };
+        if expired.is_some() {
+            clear_shutdown_vote_message_map(&shutdown_vote_message_to_group, &group_id).await;
+            if let Err(error) = napcat_client
+                .send_group_message(&group_id, Value::String("关闭投票 10 分钟内未通过，已自动关闭。".to_string()))
+                .await
+            {
+                logger
+                    .warn(format!("发送关闭投票超时提示失败：{error:#}"))
+                    .await;
+            }
+        }
+    });
+}
+
+async fn clear_shutdown_vote_message_map(
+    shutdown_vote_message_to_group: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    group_id: &str,
+) {
+    shutdown_vote_message_to_group
+        .lock()
+        .await
+        .retain(|_, value| value != group_id);
+}
+
+async fn classify_shutdown_vote_intent(
+    qa_client: &OpenAiChatClient,
+    config: &Config,
+    context: &crate::event_utils::EventContext,
+    event: &Value,
+    text: &str,
+) -> Result<bool> {
+    let raw = qa_client
+        .complete(
+            &[
+                crate::openai_chat_client::ChatMessage {
+                    role: "system".to_string(),
+                    content: Value::String(
+                        [
+                            "你负责判断一条 QQ 群消息是否是在明确要求关闭当前 bot 的功能。",
+                            "只有当消息明确要求关闭/停用/禁用这个 bot 时 should_start_vote 才为 true。",
+                            "输出 JSON：{\"should_start_vote\":boolean}。",
+                        ]
+                        .join("\n"),
+                    ),
+                },
+                crate::openai_chat_client::ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String(
+                        [
+                            format!("群号：{}", context.group_id),
+                            format!("发送者：{}", get_sender_name(event)),
+                            format!("消息内容：{text}"),
+                            format!("bot 名称：{}", config.bot.display_name),
+                        ]
+                        .join("\n"),
+                    ),
+                },
+            ],
+            crate::openai_chat_client::CompleteOptions {
+                model: Some(config.qa.shutdown_vote_filter_model.clone()),
+                temperature: Some(0.1),
+            },
+        )
+        .await?;
+    Ok(parse_json_object_field_bool(&raw, "should_start_vote").unwrap_or(false))
+}
+
+async fn poll_pending_group_invites(
+    logger: &Logger,
+    runtime_config_store: &RuntimeConfigStore,
+    napcat_client: &NapCatClient,
+    static_group_ids: &[String],
+) -> Result<()> {
+    let system_messages = napcat_client.get_group_system_messages(100).await?;
+    for invite in normalize_invited_requests(&system_messages) {
+        let request_id = invite
+            .get("request_id")
+            .or_else(|| invite.get("flag"))
+            .map(value_to_string)
+            .unwrap_or_default();
+        if request_id.is_empty() {
+            continue;
+        }
+        let group_id = invite
+            .get("group_id")
+            .map(value_to_string)
+            .unwrap_or_default();
+        if invite.get("checked").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let _ = runtime_config_store
+            .is_qa_group_enabled(&group_id, static_group_ids)
+            .await;
+        napcat_client
+            .set_group_add_request(&request_id, true, "", 100, "invite")
+            .await?;
+        logger
+            .info(format!("已通过系统消息轮询自动同意群邀请：group={group_id} request={request_id}"))
+            .await;
+    }
+    Ok(())
+}
+
+async fn handle_notice_event(
+    shutdown_votes_by_group: &Arc<tokio::sync::Mutex<HashMap<String, ShutdownVote>>>,
+    shutdown_vote_message_to_group: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
+    event: &Value,
+) {
+    let notice_type = event.get("notice_type").and_then(Value::as_str).unwrap_or_default();
+    if notice_type != "group_recall" && notice_type != "friend_recall" {
+        return;
+    }
+    let recalled_message_id = event
+        .get("message_id")
+        .or_else(|| event.get("msg_id"))
+        .map(value_to_string)
+        .unwrap_or_default();
+    if recalled_message_id.is_empty() {
+        return;
+    }
+    let removed_group = shutdown_vote_message_to_group.lock().await.remove(&recalled_message_id);
+    if let Some(group_id) = removed_group {
+        let should_remove_group = {
+            let mut votes = shutdown_votes_by_group.lock().await;
+            if let Some(vote) = votes.get_mut(&group_id) {
+                vote.message_ids.remove(&recalled_message_id);
+                vote.message_ids.is_empty()
+            } else {
+                false
+            }
+        };
+        if should_remove_group {
+            shutdown_votes_by_group.lock().await.remove(&group_id);
+        }
+    }
+}
+
+fn normalize_invited_requests(payload: &Value) -> Vec<Value> {
+    let mut deduped = HashMap::<String, Value>::new();
+    for item in payload
+        .get("invited_requests")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .chain(payload.get("InvitedRequest").and_then(Value::as_array).into_iter().flatten())
+    {
+        let request_id = item
+            .get("request_id")
+            .or_else(|| item.get("flag"))
+            .map(value_to_string)
+            .unwrap_or_default();
+        if !request_id.is_empty() {
+            deduped.entry(request_id).or_insert_with(|| item.clone());
+        }
+    }
+    deduped.into_values().collect()
+}
+
+fn extract_reply_id_from_event(event: &Value) -> Option<String> {
+    let message = event.get("message").unwrap_or(&Value::Null);
+    if let Some(items) = message.as_array()
+        && let Some(reply) = items.iter().find(|segment| segment.get("type").and_then(Value::as_str) == Some("reply"))
+    {
+        return reply
+            .get("data")
+            .and_then(|data| data.get("id"))
+            .map(value_to_string)
+            .filter(|item| !item.is_empty());
+    }
+    event.get("raw_message").and_then(Value::as_str).and_then(|raw| {
+        let marker = "[CQ:reply,id=";
+        let start = raw.find(marker)?;
+        let remain = &raw[start + marker.len()..];
+        let end = remain.find([',', ']']).unwrap_or(remain.len());
+        let reply_id = remain[..end].trim();
+        (!reply_id.is_empty()).then(|| reply_id.to_string())
+    })
+}
+
+fn parse_json_object_field_bool(text: &str, field: &str) -> Option<bool> {
+    let parsed = serde_json::from_str::<Value>(text.trim()).ok().or_else(|| {
+        let start = text.find('{')?;
+        let end = text.rfind('}')?;
+        serde_json::from_str::<Value>(&text[start..=end]).ok()
+    })?;
+    parsed.get(field).and_then(Value::as_bool)
+}
+
+fn looks_like_bot_opposition_candidate(text: &str, display_name: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    normalized.contains("机器人")
+        || normalized.contains("bot")
+        || normalized.contains("自动回复")
+        || normalized.contains("ai")
+        || normalized.contains("闭嘴")
+        || normalized.contains("别回复")
+        || normalized.contains("太吵")
+        || normalized.contains("关掉")
+        || normalized.contains("关闭")
+        || (!display_name.trim().is_empty() && normalized.contains(&display_name.trim().to_ascii_lowercase()))
+}
+
+fn text_looks_like_explicit_shutdown_request(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    [
+        "关闭这个机器人",
+        "关闭此机器人",
+        "关闭这个bot",
+        "关掉这个机器人",
+        "关掉这个bot",
+        "停用这个机器人",
+        "禁用这个机器人",
+        "停止这个机器人",
+        "关闭bot",
+        "关掉bot",
+    ]
+    .iter()
+    .any(|item| normalized.contains(item))
+}
+
+fn text_contains_shutdown_vote_approval(text: &str) -> bool {
+    let normalized = text.trim();
+    normalized == "Y" || normalized == "y" || normalized.split_whitespace().any(|item| item.eq_ignore_ascii_case("y"))
+}
+
+fn extract_message_ids_from_send_results(results: &[Value]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for value in results {
+        if let Some(message_id) = value
+            .get("message_id")
+            .or_else(|| value.get("messageId"))
+            .map(value_to_string)
+            .filter(|item| !item.is_empty())
+        {
+            ids.push(message_id);
+        }
+    }
+    ids
+}
+
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|item| item.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn value_to_string(value: &Value) -> String {
