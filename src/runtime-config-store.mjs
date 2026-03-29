@@ -170,6 +170,14 @@ export class RuntimeConfigStore {
     return Math.max(250, Math.trunc(numeric));
   }
 
+  #getExternalExclusiveGroupsStaleMs() {
+    const numeric = Number(this.defaults?.qa?.externalExclusiveGroupsStaleMs ?? 90000);
+    if (!Number.isFinite(numeric)) {
+      return Math.max(1000, this.#getExternalExclusiveGroupsRefreshMs() * 3);
+    }
+    return Math.max(1000, Math.trunc(numeric), this.#getExternalExclusiveGroupsRefreshMs() * 3);
+  }
+
   #clearExternalExclusiveGroups(filePath = '') {
     this.externalExclusiveGroups = {
       filePath,
@@ -180,6 +188,12 @@ export class RuntimeConfigStore {
     };
   }
 
+  #shouldKeepPreviousExternalExclusiveGroups(previous, filePath, now, staleMs) {
+    return previous?.filePath === filePath
+      && Number(previous?.mtimeMs ?? -1) > 0
+      && (now - Number(previous?.mtimeMs ?? 0)) <= staleMs;
+  }
+
   #refreshExternalExclusiveGroupsIfNeeded() {
     const fileCandidates = this.#getExternalExclusiveGroupsFileCandidates();
     if (fileCandidates.length === 0) {
@@ -188,7 +202,9 @@ export class RuntimeConfigStore {
     }
 
     const refreshMs = this.#getExternalExclusiveGroupsRefreshMs();
+    const staleMs = this.#getExternalExclusiveGroupsStaleMs();
     const now = Date.now();
+    const previous = { ...this.externalExclusiveGroups };
     this.externalExclusiveGroups.checkedAt = now;
     this.externalExclusiveGroups.refreshMs = refreshMs;
 
@@ -196,9 +212,12 @@ export class RuntimeConfigStore {
       try {
         const stat = syncFs.statSync(filePath);
         const mtimeMs = Number(stat?.mtimeMs ?? 0);
+        if ((now - mtimeMs) > staleMs) {
+          continue;
+        }
         if (
-          this.externalExclusiveGroups.filePath === filePath
-          && this.externalExclusiveGroups.mtimeMs === mtimeMs
+          previous.filePath === filePath
+          && previous.mtimeMs === mtimeMs
         ) {
           return;
         }
@@ -216,8 +235,12 @@ export class RuntimeConfigStore {
           continue;
         }
         this.logger.warn(`读取外部互斥群文件失败：${error.message}`);
-        this.#clearExternalExclusiveGroups(filePath);
-        return;
+        if (this.#shouldKeepPreviousExternalExclusiveGroups(previous, filePath, now, staleMs)) {
+          this.externalExclusiveGroups.checkedAt = now;
+          this.externalExclusiveGroups.refreshMs = refreshMs;
+          return;
+        }
+        continue;
       }
     }
     this.#clearExternalExclusiveGroups(fileCandidates[0] ?? '');

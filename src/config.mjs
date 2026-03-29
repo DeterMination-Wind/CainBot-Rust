@@ -243,6 +243,7 @@ export async function loadConfig(configPath) {
       enabledGroupIds: normalizeStringArray(raw?.qa?.enabledGroupIds),
       externalExclusiveGroupsFile: resolveMaybeRelative(configDir, raw?.qa?.externalExclusiveGroupsFile ?? ''),
       externalExclusiveGroupsRefreshMs: raw?.qa?.externalExclusiveGroupsRefreshMs ?? 5000,
+      externalExclusiveGroupsStaleMs: raw?.qa?.externalExclusiveGroupsStaleMs ?? 90000,
       passHintText: String(raw?.qa?.passHintText ?? '如果此问题无人回答，可以试试 at 我再问，或者输入 /chat 来询问 bot。').trim()
         || '如果此问题无人回答，可以试试 at 我再问，或者输入 /chat 来询问 bot。',
       shutdownVoteFilterModel: String(raw?.qa?.shutdownVoteFilterModel ?? raw?.qa?.filter?.model ?? 'gpt-5.4-mini').trim() || 'gpt-5.4-mini',
