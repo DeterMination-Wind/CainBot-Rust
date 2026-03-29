@@ -1,5 +1,7 @@
 mod app;
+mod chat_session_manager;
 mod config;
+mod codex_bridge_server;
 mod commands;
 mod event_utils;
 mod logger;

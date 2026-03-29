@@ -187,6 +187,78 @@ impl RuntimeConfigStore {
         static_group_ids.iter().any(|item| item.trim() == normalized)
     }
 
+    pub async fn is_qa_group_proactive_reply_enabled(&self, group_id: &str, static_group_ids: &[String]) -> bool {
+        let normalized = group_id.trim();
+        if normalized.is_empty() {
+            return false;
+        }
+        if !self.is_qa_group_enabled(normalized, static_group_ids).await {
+            return false;
+        }
+        self.get_qa_groups()
+            .await
+            .into_iter()
+            .find(|item| item.group_id == normalized)
+            .map(|item| item.proactive_reply_enabled)
+            .unwrap_or(true)
+    }
+
+    pub async fn is_qa_group_file_download_enabled(&self, group_id: &str) -> bool {
+        let normalized = group_id.trim();
+        if normalized.is_empty() {
+            return false;
+        }
+        self.get_qa_groups()
+            .await
+            .into_iter()
+            .find(|item| item.group_id == normalized)
+            .map(|item| item.file_download_enabled)
+            .unwrap_or(false)
+    }
+
+    pub async fn is_qa_group_filter_heartbeat_enabled(&self, group_id: &str, static_group_ids: &[String]) -> bool {
+        let normalized = group_id.trim();
+        if normalized.is_empty() {
+            return false;
+        }
+        if !self.is_qa_group_enabled(normalized, static_group_ids).await {
+            return false;
+        }
+        self.get_qa_groups()
+            .await
+            .into_iter()
+            .find(|item| item.group_id == normalized)
+            .map(|item| item.filter_heartbeat_enabled)
+            .unwrap_or(false)
+    }
+
+    pub async fn get_qa_group_filter_heartbeat_interval(&self, group_id: &str) -> u64 {
+        let normalized = group_id.trim();
+        if normalized.is_empty() {
+            return DEFAULT_FILTER_HEARTBEAT_INTERVAL;
+        }
+        self.get_qa_groups()
+            .await
+            .into_iter()
+            .find(|item| item.group_id == normalized)
+            .map(|item| item.filter_heartbeat_interval)
+            .unwrap_or(DEFAULT_FILTER_HEARTBEAT_INTERVAL)
+            .clamp(1, 1_000)
+    }
+
+    pub async fn get_qa_group_file_download_folder_name(&self, group_id: &str) -> String {
+        let normalized = group_id.trim();
+        if normalized.is_empty() {
+            return String::new();
+        }
+        self.get_qa_groups()
+            .await
+            .into_iter()
+            .find(|item| item.group_id == normalized)
+            .map(|item| item.file_download_folder_name)
+            .unwrap_or_default()
+    }
+
     pub async fn is_qa_group_externally_excluded(&self, group_id: &str) -> bool {
         let normalized = group_id.trim();
         if normalized.is_empty() {
@@ -290,6 +362,55 @@ impl RuntimeConfigStore {
                 } else {
                     true
                 },
+                filter_heartbeat_enabled: false,
+                filter_heartbeat_interval: DEFAULT_FILTER_HEARTBEAT_INTERVAL,
+                file_download_enabled: false,
+                file_download_folder_name: String::new(),
+                created_at: now_iso(),
+                updated_at: now_iso(),
+            });
+            "created".to_string()
+        };
+        let entry = data
+            .qa_groups
+            .iter()
+            .find(|item| item.group_id == normalized)
+            .cloned()
+            .map(normalize_qa_group)
+            .expect("qa group entry must exist after upsert");
+        drop(data);
+        self.save().await?;
+        Ok(QaGroupUpdateResult { action, entry })
+    }
+
+    pub async fn set_qa_group_proactive_reply_enabled(
+        &self,
+        group_id: &str,
+        enabled: bool,
+        static_group_ids: &[String],
+    ) -> Result<QaGroupUpdateResult> {
+        let normalized = group_id.trim();
+        if normalized.is_empty() {
+            anyhow::bail!("groupId 不能为空");
+        }
+        let current_enabled = self.is_qa_group_enabled(normalized, static_group_ids).await;
+        let mut data = self.data.lock().await;
+        let index = data.qa_groups.iter().position(|item| item.group_id == normalized);
+        let action = if let Some(index) = index {
+            let target = &mut data.qa_groups[index];
+            target.group_id = normalized.to_string();
+            target.enabled = current_enabled || target.enabled;
+            target.proactive_reply_enabled = enabled;
+            target.updated_at = now_iso();
+            if target.created_at.is_empty() {
+                target.created_at = now_iso();
+            }
+            "updated".to_string()
+        } else {
+            data.qa_groups.push(QaGroup {
+                group_id: normalized.to_string(),
+                enabled: current_enabled,
+                proactive_reply_enabled: enabled,
                 filter_heartbeat_enabled: false,
                 filter_heartbeat_interval: DEFAULT_FILTER_HEARTBEAT_INTERVAL,
                 file_download_enabled: false,

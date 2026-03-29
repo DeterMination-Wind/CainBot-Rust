@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use serde_json::Value;
 
-use crate::config::load_config;
+use crate::chat_session_manager::ChatSessionManager;
+use crate::config::{Config, load_config};
+use crate::codex_bridge_server::CodexBridgeServer;
 use crate::event_utils::{
     build_help_text, create_context_from_event, ensure_message_event, event_mentions_other_user,
     event_mentions_self, get_sender_name, is_question_intent_text, parse_command_from_event,
@@ -12,7 +14,7 @@ use crate::event_utils::{
 use crate::logger::Logger;
 use crate::message_input::{BuildChatInputOptions, build_chat_input, build_translation_input};
 use crate::napcat_client::{NapCatClient, NapCatClientConfig};
-use crate::openai_chat_client::{ChatMessage, CompleteOptions, OpenAiChatClient, OpenAiChatClientConfig};
+use crate::openai_chat_client::{OpenAiChatClient, OpenAiChatClientConfig};
 use crate::openai_translator::{OpenAiTranslator, OpenAiTranslatorConfig};
 use crate::runtime_config_store::{RuntimeConfigDefaults, RuntimeConfigStore};
 use crate::state_store::StateStore;
@@ -21,16 +23,18 @@ use crate::webui_sync_store::WebUiSyncStore;
 use crate::worker_process::WorkerSupervisor;
 
 pub struct AppRuntime {
+    pub config: Config,
     pub logger: Logger,
     pub napcat_client: NapCatClient,
     pub runtime_config_store: RuntimeConfigStore,
     pub enabled_static_groups: Vec<String>,
     pub owner_user_id: String,
     pub bot_display_name: String,
-    pub _state_store: StateStore,
+    pub state_store: StateStore,
     pub _webui_sync_store: WebUiSyncStore,
     pub qa_client: Option<OpenAiChatClient>,
     pub translator: Option<OpenAiTranslator>,
+    pub chat_session_manager: Option<ChatSessionManager>,
     pub _worker_supervisor: WorkerSupervisor,
 }
 
@@ -68,6 +72,10 @@ impl AppRuntime {
                 request_timeout_ms: config.napcat.request_timeout_ms,
                 headers: config.napcat.headers.clone(),
                 max_concurrent_events: config.napcat.max_concurrent_events,
+                forward_threshold_chars: config.napcat.forward_threshold_chars,
+                upload_retry_attempts: config.napcat.upload_retry_attempts,
+                upload_retry_delay_ms: config.napcat.upload_retry_delay_ms,
+                upload_stable_wait_ms: config.napcat.upload_stable_wait_ms,
             },
             logger.clone(),
         )?;
@@ -131,9 +139,17 @@ impl AppRuntime {
                 loaded.config_path.display()
             ))
             .await;
-        logger
-            .warn("业务层仍在迁移：聊天会话、文件下载、msav、issueRepair、codex bridge 还未接入。")
-            .await;
+        let chat_session_manager = qa_client.clone().map(|chat_client| {
+            ChatSessionManager::new(
+                config.qa.clone(),
+                chat_client,
+                state_store.clone(),
+                logger.clone(),
+                runtime_config_store.clone(),
+            )
+        });
+
+        logger.warn("业务层仍在迁移：文件下载、msav、issueRepair、codex bridge 还未接入。").await;
 
         if !config.bot.owner_user_id.trim().is_empty() {
             let _ = napcat_client
@@ -148,27 +164,35 @@ impl AppRuntime {
         }
 
         Ok(Self {
+            config: config.clone(),
             logger,
             napcat_client,
             runtime_config_store,
             enabled_static_groups: config.qa.enabled_group_ids,
             owner_user_id: config.bot.owner_user_id,
             bot_display_name: config.bot.display_name,
-            _state_store: state_store,
+            state_store,
             _webui_sync_store: webui_sync_store,
             qa_client,
             translator,
+            chat_session_manager,
             _worker_supervisor: worker_supervisor,
         })
     }
 
     pub async fn run(self) -> Result<()> {
+        let mut codex_bridge_server =
+            CodexBridgeServer::new(self.config.codex_bridge.clone(), self.napcat_client.clone(), self.logger.clone());
+        let _codex_bridge_info = codex_bridge_server.start().await?;
         let event_logger = self.logger.clone();
         let event_runtime_store = self.runtime_config_store.clone();
         let event_napcat_client = self.napcat_client.clone();
         let enabled_static_groups = self.enabled_static_groups.clone();
         let event_qa_client = self.qa_client.clone();
         let event_translator = self.translator.clone();
+        let event_state_store = self.state_store.clone();
+        let event_config = self.config.clone();
+        let event_chat_session_manager = self.chat_session_manager.clone();
         let owner_user_id = self.owner_user_id.clone();
         let bot_display_name = self.bot_display_name.clone();
         self.napcat_client
@@ -176,30 +200,44 @@ impl AppRuntime {
                 let event_logger = event_logger.clone();
                 let event_runtime_store = event_runtime_store.clone();
                 let napcat_client = event_napcat_client.clone();
+                let state_store = event_state_store.clone();
+                let config = event_config.clone();
                 let bot_display_name = bot_display_name.clone();
                 let enabled_static_groups = enabled_static_groups.clone();
                 let qa_client = event_qa_client.clone();
                 let translator = event_translator.clone();
+                let chat_session_manager = event_chat_session_manager.clone();
                 let owner_user_id = owner_user_id.clone();
                 async move {
                     log_event_summary(&event_logger, &event).await;
                     handle_message_event(
+                        &config,
                         &event_logger,
                         &napcat_client,
                         &event_runtime_store,
+                        &state_store,
                         qa_client.as_ref(),
                         translator.as_ref(),
+                        chat_session_manager.as_ref(),
                         &event,
                         &enabled_static_groups,
                         &owner_user_id,
                         &bot_display_name,
                     )
                     .await?;
-                    handle_group_invite_stub(&event_logger, &event_runtime_store, &enabled_static_groups, &event).await?;
+                    handle_group_invite_stub(
+                        &event_logger,
+                        &event_runtime_store,
+                        &napcat_client,
+                        &enabled_static_groups,
+                        &event,
+                    )
+                    .await?;
                     Ok(())
                 }
             })
             .await?;
+        codex_bridge_server.stop().await?;
         self.logger.flush().await?;
         Ok(())
     }
@@ -243,6 +281,7 @@ async fn log_event_summary(logger: &Logger, event: &Value) {
 async fn handle_group_invite_stub(
     logger: &Logger,
     runtime_config_store: &RuntimeConfigStore,
+    napcat_client: &NapCatClient,
     static_group_ids: &[String],
     event: &Value,
 ) -> Result<()> {
@@ -266,21 +305,61 @@ async fn handle_group_invite_stub(
     let enabled = runtime_config_store
         .is_qa_group_enabled(&group_id, static_group_ids)
         .await;
+    let flag = event
+        .get("flag")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let sub_type = event
+        .get("sub_type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     logger
         .info(format!(
             "收到群邀请请求：groupId={group_id}，当前群问答{}",
             if enabled { "已启用" } else { "未启用" }
         ))
         .await;
+    if flag.is_empty() {
+        logger
+            .warn(format!("群邀请请求缺少 flag，无法自动通过：groupId={group_id}"))
+            .await;
+        return Ok(());
+    }
+    match napcat_client
+        .set_group_add_request(&flag, true, "", 100, &sub_type)
+        .await
+    {
+        Ok(_) => {
+            logger
+                .info(format!(
+                    "已自动通过群邀请：groupId={group_id}, flag={flag}, subType={sub_type}"
+                ))
+                .await;
+        }
+        Err(error) => {
+            logger
+                .warn(format!(
+                    "自动通过群邀请失败：groupId={group_id}, flag={flag}, error={error:#}"
+                ))
+                .await;
+        }
+    }
     Ok(())
 }
 
 async fn handle_message_event(
+    config: &Config,
     logger: &Logger,
     napcat_client: &NapCatClient,
     runtime_config_store: &RuntimeConfigStore,
+    _state_store: &StateStore,
     qa_client: Option<&OpenAiChatClient>,
     translator: Option<&OpenAiTranslator>,
+    chat_session_manager: Option<&ChatSessionManager>,
     event: &Value,
     static_group_ids: &[String],
     owner_user_id: &str,
@@ -310,6 +389,7 @@ async fn handle_message_event(
             runtime_config_store,
             qa_client,
             translator,
+            chat_session_manager,
             &context,
             event,
             static_group_ids,
@@ -338,6 +418,82 @@ async fn handle_message_event(
         if event_mentions_other_user(event, bot_display_name) {
             return Ok(());
         }
+        if let Some(chat_session_manager) = chat_session_manager {
+            if chat_session_manager.is_group_enabled(&context.group_id).await {
+                chat_session_manager.record_incoming_message(&context, event, &text).await?;
+                if event_mentions_self(event, bot_display_name) {
+                    if let Some(qa_client) = qa_client {
+                        let input = build_chat_input(
+                            napcat_client,
+                            event,
+                            BuildChatInputOptions {
+                                argument: text.clone(),
+                                allow_current_text_fallback: true,
+                                ai_runtime_prefix: format!(
+                                    "当前 AI 身份：{}\n当前日期时间：{}",
+                                    config.bot.display_name,
+                                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                                ),
+                            },
+                        )
+                        .await?;
+                        let result = chat_session_manager.chat(&context, &input).await?;
+                        napcat_client
+                            .reply_text(
+                                &context.message_type,
+                                &context.group_id,
+                                reply_message_id.as_deref(),
+                                &result.text,
+                            )
+                            .await?;
+                        let _ = qa_client;
+                        return Ok(());
+                    }
+                }
+                if chat_session_manager.is_group_proactive_reply_enabled(&context.group_id).await
+                    && is_question_intent_text(&text)
+                {
+                    let (allowed, _, _) = chat_session_manager
+                        .should_run_group_proactive_filter(&context.group_id)
+                        .await;
+                    if allowed {
+                        let (should_prompt, reason) = chat_session_manager
+                            .should_suggest_reply(&context, event, &text)
+                            .await?;
+                        if should_prompt {
+                            logger.info(format!("群消息通过主动过滤：{reason}")).await;
+                            let input = build_chat_input(
+                                napcat_client,
+                                event,
+                                BuildChatInputOptions {
+                                    argument: text.clone(),
+                                    allow_current_text_fallback: true,
+                                    ai_runtime_prefix: format!(
+                                        "当前 AI 身份：{}\n当前日期时间：{}",
+                                        config.bot.display_name,
+                                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                                    ),
+                                },
+                            )
+                            .await?;
+                            let result = chat_session_manager.chat(&context, &input).await?;
+                            napcat_client
+                                .reply_text(
+                                    &context.message_type,
+                                    &context.group_id,
+                                    reply_message_id.as_deref(),
+                                    &result.text,
+                                )
+                                .await?;
+                            chat_session_manager
+                                .mark_hinted(&context, reply_message_id.as_deref().unwrap_or_default())
+                                .await?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
         if event_mentions_self(event, bot_display_name) || is_question_intent_text(&text) {
             logger
                 .info(format!(
@@ -356,8 +512,9 @@ async fn execute_command(
     logger: &Logger,
     napcat_client: &NapCatClient,
     runtime_config_store: &RuntimeConfigStore,
-    qa_client: Option<&OpenAiChatClient>,
+    _qa_client: Option<&OpenAiChatClient>,
     translator: Option<&OpenAiTranslator>,
+    chat_session_manager: Option<&ChatSessionManager>,
     context: &crate::event_utils::EventContext,
     event: &Value,
     static_group_ids: &[String],
@@ -379,15 +536,11 @@ async fn execute_command(
                 .await?;
         }
         "chat" => {
-            if context.message_type == "group"
-                && !runtime_config_store
-                    .is_qa_group_enabled(&context.group_id, static_group_ids)
-                    .await
-            {
+            if context.message_type == "group" && !runtime_config_store.is_qa_group_enabled(&context.group_id, static_group_ids).await {
                 bail!("当前群未启用 Cain 问答。请先由 bot 主人执行 /e 启用，或把群号加入 qa.enabledGroupIds。");
             }
-            let Some(qa_client) = qa_client else {
-                bail!("当前未启用问答客户端。");
+            let Some(chat_session_manager) = chat_session_manager else {
+                bail!("当前未启用聊天会话管理器。");
             };
             let chat_input = build_chat_input(
                 napcat_client,
@@ -422,15 +575,7 @@ async fn execute_command(
                         .collect::<String>()
                 ))
                 .await;
-            let answer = qa_client
-                .complete(
-                    &[ChatMessage {
-                        role: "user".to_string(),
-                        content: chat_input.to_openai_user_content(),
-                    }],
-                    CompleteOptions::default(),
-                )
-                .await?;
+            let answer = chat_session_manager.chat(context, &chat_input).await?.text;
             napcat_client
                 .reply_text(&context.message_type, target_id, reply_message_id, &answer)
                 .await?;
@@ -452,7 +597,11 @@ async fn execute_command(
             let subcommand = command.positionals.first().map(String::as_str).unwrap_or_default();
             if subcommand == "状态" {
                 let group_id = require_group_id(command, context)?;
-                let status = build_group_status_text(runtime_config_store, &group_id, static_group_ids).await;
+                let status = if let Some(chat_session_manager) = chat_session_manager {
+                    format_group_status(&chat_session_manager.get_group_prompt_status(&group_id).await)
+                } else {
+                    build_group_status_text(runtime_config_store, &group_id, static_group_ids).await
+                };
                 napcat_client
                     .reply_text(&context.message_type, target_id, reply_message_id, &status)
                     .await?;
@@ -464,7 +613,11 @@ async fn execute_command(
                 let result = runtime_config_store
                     .set_qa_group_enabled(&group_id, subcommand == "启用", Some(subcommand == "启用"))
                     .await?;
-                let status = build_group_status_text(runtime_config_store, &group_id, static_group_ids).await;
+                let status = if let Some(chat_session_manager) = chat_session_manager {
+                    format_group_status(&chat_session_manager.get_group_prompt_status(&group_id).await)
+                } else {
+                    build_group_status_text(runtime_config_store, &group_id, static_group_ids).await
+                };
                 napcat_client
                     .reply_text(
                         &context.message_type,
@@ -496,7 +649,11 @@ async fn execute_command(
                 let result = runtime_config_store
                     .set_qa_group_file_download_enabled(&group_id, action == "启用", static_group_ids, &folder_name)
                     .await?;
-                let status = build_group_status_text(runtime_config_store, &group_id, static_group_ids).await;
+                let status = if let Some(chat_session_manager) = chat_session_manager {
+                    format_group_status(&chat_session_manager.get_group_prompt_status(&group_id).await)
+                } else {
+                    build_group_status_text(runtime_config_store, &group_id, static_group_ids).await
+                };
                 napcat_client
                     .reply_text(
                         &context.message_type,
@@ -535,7 +692,11 @@ async fn execute_command(
                 let result = runtime_config_store
                     .set_qa_group_filter_heartbeat(&group_id, action == "启用", interval, static_group_ids)
                     .await?;
-                let status = build_group_status_text(runtime_config_store, &group_id, static_group_ids).await;
+                let status = if let Some(chat_session_manager) = chat_session_manager {
+                    format_group_status(&chat_session_manager.get_group_prompt_status(&group_id).await)
+                } else {
+                    build_group_status_text(runtime_config_store, &group_id, static_group_ids).await
+                };
                 napcat_client
                     .reply_text(
                         &context.message_type,
@@ -552,6 +713,51 @@ async fn execute_command(
                         ),
                     )
                     .await?;
+            } else if subcommand == "过滤" || subcommand == "聊天" {
+                let group_id = require_group_id(command, context)?;
+                ensure_group_manager_permission(napcat_client, event, context, owner_user_id).await?;
+                let instruction = get_edit_instruction(command, subcommand);
+                if instruction.is_empty() {
+                    bail!("/e {} 后必须跟修改要求。", subcommand);
+                }
+                let Some(chat_session_manager) = chat_session_manager else {
+                    bail!("当前未启用聊天会话管理器。");
+                };
+                let (prompt, reason) = if subcommand == "过滤" {
+                    chat_session_manager.update_filter_prompt(&group_id, &instruction).await?
+                } else {
+                    chat_session_manager.update_answer_prompt(&group_id, &instruction).await?
+                };
+                let status = format_group_status(&chat_session_manager.get_group_prompt_status(&group_id).await);
+                napcat_client
+                    .reply_text(
+                        &context.message_type,
+                        target_id,
+                        reply_message_id,
+                        &[
+                            "修改完成。".to_string(),
+                            if !reason.trim().is_empty() {
+                                format!("审核说明：{reason}")
+                            } else {
+                                String::new()
+                            },
+                            String::new(),
+                            if subcommand == "过滤" {
+                                "当前过滤 prompt：".to_string()
+                            } else {
+                                "当前聊天 prompt：".to_string()
+                            },
+                            prompt,
+                            String::new(),
+                            "当前完整状态：".to_string(),
+                            status,
+                        ]
+                        .into_iter()
+                        .filter(|item| !item.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    )
+                    .await?;
             } else {
                 napcat_client
                     .reply_text(
@@ -566,6 +772,17 @@ async fn execute_command(
         _ => {}
     }
     Ok(())
+}
+
+fn get_edit_instruction(command: &crate::commands::ParsedCommand, subcommand: &str) -> String {
+    let raw_args = command.raw_args.trim();
+    if raw_args.is_empty() {
+        return String::new();
+    }
+    if raw_args.starts_with(subcommand) {
+        return raw_args[subcommand.len()..].trim().to_string();
+    }
+    command.positionals.iter().skip(1).cloned().collect::<Vec<_>>().join(" ")
 }
 
 fn require_group_id(command: &crate::commands::ParsedCommand, context: &crate::event_utils::EventContext) -> Result<String> {
@@ -701,6 +918,43 @@ async fn build_group_status_text(
             .filter(|item| !item.trim().is_empty())
             .unwrap_or("(空)")
             .to_string(),
+    ]
+    .join("\n")
+}
+
+fn format_group_status(status: &crate::chat_session_manager::GroupPromptStatus) -> String {
+    [
+        format!("当前群启用状态：{}", if status.enabled { "已启用" } else { "未启用" }),
+        format!(
+            "当前主动回复状态：{}",
+            if status.proactive_reply_enabled { "已启用" } else { "已关闭" }
+        ),
+        format!(
+            "当前过滤心跳：{}",
+            if status.filter_heartbeat_enabled {
+                format!("已启用（每 {} 条候选消息审核一次）", status.filter_heartbeat_interval)
+            } else {
+                "已关闭".to_string()
+            }
+        ),
+        format!(
+            "当前文件下载状态：{}",
+            if status.file_download_enabled { "已启用" } else { "已关闭" }
+        ),
+        format!(
+            "当前文件下载群文件夹：{}",
+            if status.file_download_folder_name.trim().is_empty() {
+                "(根目录)"
+            } else {
+                status.file_download_folder_name.as_str()
+            }
+        ),
+        String::new(),
+        "当前过滤 prompt：".to_string(),
+        status.filter_prompt.clone(),
+        String::new(),
+        "当前聊天 prompt：".to_string(),
+        status.answer_prompt.clone(),
     ]
     .join("\n")
 }
