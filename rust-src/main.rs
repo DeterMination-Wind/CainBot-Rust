@@ -4,6 +4,7 @@ mod config;
 mod codex_bridge_server;
 mod commands;
 mod event_utils;
+mod group_file_download_worker;
 mod logger;
 mod message_attachment_reader;
 mod message_input;

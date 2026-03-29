@@ -11,6 +11,7 @@ use crate::event_utils::{
     event_mentions_self, get_sender_name, is_question_intent_text, parse_command_from_event,
     plain_text_from_event,
 };
+use crate::group_file_download_worker::GroupFileDownloadWorker;
 use crate::logger::Logger;
 use crate::message_input::{BuildChatInputOptions, build_chat_input, build_translation_input};
 use crate::napcat_client::{NapCatClient, NapCatClientConfig};
@@ -35,6 +36,7 @@ pub struct AppRuntime {
     pub qa_client: Option<OpenAiChatClient>,
     pub translator: Option<OpenAiTranslator>,
     pub chat_session_manager: Option<ChatSessionManager>,
+    pub group_file_download_worker: GroupFileDownloadWorker,
     pub _worker_supervisor: WorkerSupervisor,
 }
 
@@ -132,6 +134,8 @@ impl AppRuntime {
             None
         };
         let worker_supervisor = WorkerSupervisor::new(exe_path, logger.clone());
+        let group_file_download_worker =
+            GroupFileDownloadWorker::start(&project_root, &config_path, logger.clone()).await?;
 
         logger
             .info(format!(
@@ -176,11 +180,13 @@ impl AppRuntime {
             qa_client,
             translator,
             chat_session_manager,
+            group_file_download_worker,
             _worker_supervisor: worker_supervisor,
         })
     }
 
     pub async fn run(self) -> Result<()> {
+        let group_file_download_worker = self.group_file_download_worker.clone();
         let mut codex_bridge_server =
             CodexBridgeServer::new(self.config.codex_bridge.clone(), self.napcat_client.clone(), self.logger.clone());
         let _codex_bridge_info = codex_bridge_server.start().await?;
@@ -193,6 +199,7 @@ impl AppRuntime {
         let event_state_store = self.state_store.clone();
         let event_config = self.config.clone();
         let event_chat_session_manager = self.chat_session_manager.clone();
+        let event_group_file_download_worker = group_file_download_worker.clone();
         let owner_user_id = self.owner_user_id.clone();
         let bot_display_name = self.bot_display_name.clone();
         self.napcat_client
@@ -207,6 +214,7 @@ impl AppRuntime {
                 let qa_client = event_qa_client.clone();
                 let translator = event_translator.clone();
                 let chat_session_manager = event_chat_session_manager.clone();
+                let group_file_download_worker = event_group_file_download_worker.clone();
                 let owner_user_id = owner_user_id.clone();
                 async move {
                     log_event_summary(&event_logger, &event).await;
@@ -219,6 +227,7 @@ impl AppRuntime {
                         qa_client.as_ref(),
                         translator.as_ref(),
                         chat_session_manager.as_ref(),
+                        &group_file_download_worker,
                         &event,
                         &enabled_static_groups,
                         &owner_user_id,
@@ -237,6 +246,7 @@ impl AppRuntime {
                 }
             })
             .await?;
+        group_file_download_worker.stop().await?;
         codex_bridge_server.stop().await?;
         self.logger.flush().await?;
         Ok(())
@@ -360,6 +370,7 @@ async fn handle_message_event(
     qa_client: Option<&OpenAiChatClient>,
     translator: Option<&OpenAiTranslator>,
     chat_session_manager: Option<&ChatSessionManager>,
+    group_file_download_worker: &GroupFileDownloadWorker,
     event: &Value,
     static_group_ids: &[String],
     owner_user_id: &str,
@@ -415,6 +426,12 @@ async fn handle_message_event(
     }
 
     if context.message_type == "group" {
+        if group_file_download_worker
+            .handle_group_message(&context, event, &text)
+            .await?
+        {
+            return Ok(());
+        }
         if event_mentions_other_user(event, bot_display_name) {
             return Ok(());
         }
