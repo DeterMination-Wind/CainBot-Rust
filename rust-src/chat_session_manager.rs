@@ -1,7 +1,13 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
 
 use crate::event_utils::EventContext;
 use crate::logger::Logger;
@@ -43,25 +49,88 @@ pub struct GroupPromptStatus {
 
 #[derive(Clone)]
 pub struct ChatSessionManager {
-    worker: QaSessionWorker,
+    project_root: PathBuf,
+    config_path: PathBuf,
     logger: Logger,
+    worker: Arc<Mutex<Option<QaSessionWorker>>>,
+    active_requests: Arc<AtomicUsize>,
+    last_used_ms: Arc<AtomicU64>,
+    idle_timeout_ms: u64,
 }
 
 impl ChatSessionManager {
     pub async fn start(project_root: &Path, config_path: &Path, logger: Logger) -> Result<Self> {
-        Ok(Self {
-            worker: QaSessionWorker::start(project_root, config_path, logger.clone()).await?,
+        let manager = Self {
+            project_root: project_root.to_path_buf(),
+            config_path: config_path.to_path_buf(),
             logger,
-        })
+            worker: Arc::new(Mutex::new(None)),
+            active_requests: Arc::new(AtomicUsize::new(0)),
+            last_used_ms: Arc::new(AtomicU64::new(now_ms())),
+            idle_timeout_ms: 5 * 60 * 1000,
+        };
+        manager.spawn_idle_reaper();
+        Ok(manager)
     }
 
     pub async fn stop(&self) -> Result<()> {
-        self.worker.stop().await
+        if let Some(worker) = self.worker.lock().await.take() {
+            worker.stop().await?;
+        }
+        Ok(())
+    }
+
+    fn spawn_idle_reaper(&self) {
+        let worker = self.worker.clone();
+        let logger = self.logger.clone();
+        let active_requests = self.active_requests.clone();
+        let last_used_ms = self.last_used_ms.clone();
+        let idle_timeout_ms = self.idle_timeout_ms;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                if active_requests.load(Ordering::SeqCst) != 0 {
+                    continue;
+                }
+                let idle_for_ms = now_ms().saturating_sub(last_used_ms.load(Ordering::SeqCst));
+                if idle_for_ms < idle_timeout_ms {
+                    continue;
+                }
+                let maybe_worker = worker.lock().await.take();
+                if let Some(worker) = maybe_worker {
+                    logger
+                        .info(format!(
+                            "QA session worker 空闲超时，已回收常驻进程：idleMs={idle_for_ms}"
+                        ))
+                        .await;
+                    let _ = worker.stop().await;
+                }
+            }
+        });
+    }
+
+    async fn request(&self, action: &str, payload: Value) -> Result<Value> {
+        self.active_requests.fetch_add(1, Ordering::SeqCst);
+        self.last_used_ms.store(now_ms(), Ordering::SeqCst);
+        let worker = self.ensure_worker().await?;
+        let result = worker.request(action, payload).await;
+        self.last_used_ms.store(now_ms(), Ordering::SeqCst);
+        self.active_requests.fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+
+    async fn ensure_worker(&self) -> Result<QaSessionWorker> {
+        let mut guard = self.worker.lock().await;
+        if let Some(worker) = guard.as_ref() {
+            return Ok(worker.clone());
+        }
+        let worker = QaSessionWorker::start(&self.project_root, &self.config_path, self.logger.clone()).await?;
+        *guard = Some(worker.clone());
+        Ok(worker)
     }
 
     pub async fn is_group_enabled(&self, group_id: &str) -> bool {
         match self
-            .worker
             .request("is_group_enabled", json!({ "groupId": group_id.trim() }))
             .await
         {
@@ -77,7 +146,6 @@ impl ChatSessionManager {
 
     pub async fn is_group_proactive_reply_enabled(&self, group_id: &str) -> bool {
         match self
-            .worker
             .request(
                 "is_group_proactive_reply_enabled",
                 json!({ "groupId": group_id.trim() }),
@@ -96,7 +164,6 @@ impl ChatSessionManager {
 
     pub async fn get_group_prompt_status(&self, group_id: &str) -> GroupPromptStatus {
         match self
-            .worker
             .request("get_group_prompt_status", json!({ "groupId": group_id.trim() }))
             .await
         {
@@ -121,7 +188,6 @@ impl ChatSessionManager {
 
     pub async fn should_run_group_proactive_filter(&self, group_id: &str) -> (bool, u64, u64) {
         match self
-            .worker
             .request(
                 "should_run_group_proactive_filter",
                 json!({ "groupId": group_id.trim() }),
@@ -144,7 +210,6 @@ impl ChatSessionManager {
 
     pub async fn reset_group_filter_heartbeat(&self, group_id: &str) {
         let _ = self
-            .worker
             .request(
                 "reset_group_filter_heartbeat",
                 json!({ "groupId": group_id.trim() }),
@@ -160,7 +225,6 @@ impl ChatSessionManager {
         summary: &str,
     ) -> Result<()> {
         let _ = self
-            .worker
             .request(
                 "record_incoming_message",
                 json!({
@@ -175,7 +239,6 @@ impl ChatSessionManager {
 
     pub async fn mark_hinted(&self, context: &EventContext, message_id: &str) -> Result<()> {
         let _ = self
-            .worker
             .request(
                 "mark_hinted",
                 json!({
@@ -189,7 +252,6 @@ impl ChatSessionManager {
 
     pub async fn chat(&self, context: &EventContext, input: &ChatInput) -> Result<ChatResult> {
         let payload = self
-            .worker
             .request(
                 "chat",
                 json!({
@@ -224,7 +286,6 @@ impl ChatSessionManager {
         _summary: &str,
     ) -> Result<(bool, String)> {
         let payload = self
-            .worker
             .request(
                 "should_suggest_reply",
                 json!({
@@ -241,7 +302,6 @@ impl ChatSessionManager {
 
     pub async fn maybe_close_group_topic(&self, group_id: &str) -> Result<(bool, String)> {
         let payload = self
-            .worker
             .request("maybe_close_group_topic", json!({ "groupId": group_id.trim() }))
             .await?;
         Ok((
@@ -252,7 +312,6 @@ impl ChatSessionManager {
 
     pub async fn disable_group_proactive_replies(&self, group_id: &str) -> Result<GroupPromptStatus> {
         let payload = self
-            .worker
             .request(
                 "disable_group_proactive_replies",
                 json!({ "groupId": group_id.trim() }),
@@ -275,7 +334,6 @@ impl ChatSessionManager {
         event: &Value,
     ) -> Result<Option<String>> {
         let payload = self
-            .worker
             .request(
                 "maybe_capture_correction_memory",
                 json!({
@@ -307,7 +365,6 @@ impl ChatSessionManager {
         on_low_information: &str,
     ) -> Result<LowInformationReplyReview> {
         let payload = self
-            .worker
             .request(
                 "review_low_information_reply",
                 json!({
@@ -340,7 +397,6 @@ impl ChatSessionManager {
 
     async fn update_prompt(&self, action: &str, group_id: &str, instruction: &str) -> Result<(String, String)> {
         let payload = self
-            .worker
             .request(
                 action,
                 json!({
@@ -354,6 +410,13 @@ impl ChatSessionManager {
             payload.get("reason").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
         ))
     }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn event_context_json(context: &EventContext) -> Value {
