@@ -4,6 +4,15 @@ import fs from 'node:fs/promises';
 import { ensureDir, resolveMaybeRelative } from './utils.mjs';
 
 const DEFAULT_OPENAI_COMPAT_BASE_URL = 'http://127.0.0.1:15721/v1';
+const DEFAULT_STRUCTURED_MEMORY_FILE_TEXT = `${JSON.stringify({
+  全局: {
+    设定: [],
+    群记忆: {},
+    知识缓存: {},
+    知识搜索: {},
+    人物关系: {}
+  }
+}, null, 2)}\n`;
 
 async function readPromptFile(promptFile, fallbackText) {
   let promptText = String(fallbackText ?? '').trim();
@@ -340,9 +349,10 @@ export async function loadConfig(configPath) {
   }
   if (config.qa.answer.structuredMemoryFile) {
     await ensureDir(path.dirname(config.qa.answer.structuredMemoryFile));
+    const structuredMemoryContent = await fs.readFile(config.qa.answer.structuredMemoryFile, 'utf8').catch(() => '');
     await fs.writeFile(
       config.qa.answer.structuredMemoryFile,
-      await fs.readFile(config.qa.answer.structuredMemoryFile, 'utf8').catch(() => ''),
+      structuredMemoryContent.trim() ? structuredMemoryContent : DEFAULT_STRUCTURED_MEMORY_FILE_TEXT,
       'utf8'
     );
   }
