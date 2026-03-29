@@ -42,7 +42,9 @@ jobs:
         shell: powershell
         run: |
           $version = "${{ github.ref_name }}"
-          if ([string]::IsNullOrWhiteSpace($version)) {
+          if ("${{ github.ref }}" -eq "refs/heads/main") {
+            $version = "pre-main"
+          } elseif ([string]::IsNullOrWhiteSpace($version)) {
             $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
           }
           .\scripts\build-windows-portable.ps1 -Version $version

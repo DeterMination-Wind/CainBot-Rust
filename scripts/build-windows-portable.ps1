@@ -22,11 +22,16 @@ if ($normalizedVersion.StartsWith('v')) {
 if ([string]::IsNullOrWhiteSpace($normalizedVersion)) {
     throw 'Version 不能为空。'
 }
+$versionLabel = if ($normalizedVersion -match '^[0-9]') {
+    "v$normalizedVersion"
+} else {
+    $normalizedVersion
+}
 
 $outputRootPath = Join-Path $repoRoot $OutputRoot
-$stageRoot = Join-Path $outputRootPath ("CainBot-v{0}-windows-portable" -f $normalizedVersion)
+$stageRoot = Join-Path $outputRootPath ("CainBot-{0}-windows-portable" -f $versionLabel)
 $payloadRoot = Join-Path $stageRoot 'payload'
-$zipPath = Join-Path $outputRootPath ("CainBot-v{0}-windows-portable.zip" -f $normalizedVersion)
+$zipPath = Join-Path $outputRootPath ("CainBot-{0}-windows-portable.zip" -f $versionLabel)
 $hashPath = "$zipPath.sha256"
 
 Write-Step "构建 Rust release 二进制 v$normalizedVersion"
@@ -84,5 +89,6 @@ if ($env:GITHUB_OUTPUT) {
     Add-Content -Path $env:GITHUB_OUTPUT -Value ("zip_path={0}" -f $zipPath)
     Add-Content -Path $env:GITHUB_OUTPUT -Value ("sha256_path={0}" -f $hashPath)
 }
+
 
 
