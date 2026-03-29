@@ -44,6 +44,8 @@ const LOW_INFORMATION_REPLY_FILTER_MODEL = null;
 const SHUTDOWN_VOTE_PROMPT = '确定要关闭此bot的功能吗，大于两个人回复本消息"Y"将确认此操作';
 const OWNER_LOG_MAX_CHARS = 1500;
 const GROUP_INVITE_POLL_INTERVAL_MS = 60 * 1000;
+const GROUP_INVITE_POLL_MAX_BACKOFF_MS = 15 * 60 * 1000;
+const GROUP_INVITE_POLL_WARN_COOLDOWN_MS = 10 * 60 * 1000;
 
 const E_SUBCOMMANDS = new Set(['过滤', '聊天', '状态', '启用', '禁用', '文件下载', '过滤心跳', '启用刺客', '关闭刺客', '刺客状态']);
 let fatalLogger = null;
@@ -448,6 +450,26 @@ function buildHelpText(config) {
     '- /e 文件下载 启用 [群文件夹名] 与 /e 文件下载 关闭 仅当前群群主、管理员或 bot 主人可用。'
   ];
   return lines.join('\n');
+}
+
+function isGroupInvitePollTimeoutError(error) {
+  const message = String(error?.message ?? '');
+  if (!message) {
+    return false;
+  }
+  return message.includes('get_group_system_msg')
+    && message.includes('Timeout')
+    && message.includes('getSingleScreenNotifies');
+}
+
+function formatPollDelay(ms) {
+  const seconds = Math.max(1, Math.round(Number(ms ?? 0) / 1000));
+  if (seconds < 60) {
+    return `${seconds} 秒`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const remainSeconds = seconds % 60;
+  return remainSeconds > 0 ? `${minutes} 分 ${remainSeconds} 秒` : `${minutes} 分钟`;
 }
 
 function normalizeGroupIdList(values) {
@@ -1937,6 +1959,61 @@ async function main() {
 
   let shuttingDown = false;
   let groupInvitePollTimer = null;
+  let groupInvitePollBackoffMs = GROUP_INVITE_POLL_INTERVAL_MS;
+  let groupInvitePollConsecutiveFailures = 0;
+  let lastGroupInvitePollWarn = {
+    time: 0,
+    message: ''
+  };
+  const scheduleGroupInvitePoll = (delayMs = GROUP_INVITE_POLL_INTERVAL_MS) => {
+    if (shuttingDown) {
+      return;
+    }
+    if (groupInvitePollTimer) {
+      clearTimeout(groupInvitePollTimer);
+    }
+    groupInvitePollTimer = setTimeout(() => {
+      void runGroupInvitePoll();
+    }, Math.max(1_000, Math.trunc(delayMs)));
+  };
+  const logGroupInvitePollFailure = (error, delayMs) => {
+    const message = String(error?.message ?? error ?? '').trim() || '未知错误';
+    const now = Date.now();
+    const timeoutNoise = isGroupInvitePollTimeoutError(error);
+    const shouldWarn = !timeoutNoise
+      || groupInvitePollConsecutiveFailures <= 1
+      || lastGroupInvitePollWarn.message !== message
+      || (now - lastGroupInvitePollWarn.time) >= GROUP_INVITE_POLL_WARN_COOLDOWN_MS;
+    if (shouldWarn) {
+      const prefix = timeoutNoise ? '轮询待处理群邀请超时' : '轮询待处理群邀请失败';
+      logger.warn(`${prefix}：${message}；将在 ${formatPollDelay(delayMs)} 后重试`);
+      lastGroupInvitePollWarn = { time: now, message };
+    }
+  };
+  const runGroupInvitePoll = async () => {
+    if (shuttingDown) {
+      return;
+    }
+    try {
+      await pollPendingGroupInvites();
+      if (groupInvitePollConsecutiveFailures > 0) {
+        logger.info('待处理群邀请轮询已恢复。');
+      }
+      groupInvitePollConsecutiveFailures = 0;
+      groupInvitePollBackoffMs = GROUP_INVITE_POLL_INTERVAL_MS;
+      scheduleGroupInvitePoll(groupInvitePollBackoffMs);
+    } catch (error) {
+      groupInvitePollConsecutiveFailures += 1;
+      groupInvitePollBackoffMs = Math.min(
+        GROUP_INVITE_POLL_MAX_BACKOFF_MS,
+        groupInvitePollConsecutiveFailures <= 1
+          ? GROUP_INVITE_POLL_INTERVAL_MS
+          : groupInvitePollBackoffMs * 2
+      );
+      logGroupInvitePollFailure(error, groupInvitePollBackoffMs);
+      scheduleGroupInvitePoll(groupInvitePollBackoffMs);
+    }
+  };
   const shutdown = async (signal = 'shutdown') => {
     if (shuttingDown) {
       return;
@@ -1945,7 +2022,7 @@ async function main() {
     logger.info(`收到 ${signal}，准备停止 Cain Bot。`);
     napcatClient.stop();
     if (groupInvitePollTimer) {
-      clearInterval(groupInvitePollTimer);
+      clearTimeout(groupInvitePollTimer);
       groupInvitePollTimer = null;
     }
     for (const item of idleTimers.values()) {
@@ -1965,13 +2042,11 @@ async function main() {
   try {
     await pollPendingGroupInvites();
   } catch (error) {
-    logger.warn(`启动时检查待处理群邀请失败：${error.message}`);
+    groupInvitePollConsecutiveFailures = 1;
+    groupInvitePollBackoffMs = GROUP_INVITE_POLL_INTERVAL_MS;
+    logGroupInvitePollFailure(error, groupInvitePollBackoffMs);
   }
-  groupInvitePollTimer = setInterval(() => {
-    void pollPendingGroupInvites().catch((error) => {
-      logger.warn(`轮询待处理群邀请失败：${error.message}`);
-    });
-  }, GROUP_INVITE_POLL_INTERVAL_MS);
+  scheduleGroupInvitePoll(groupInvitePollBackoffMs);
   await napcatClient.startEventLoop(async (event) => {
     if (!event) {
       return;
