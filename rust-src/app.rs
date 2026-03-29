@@ -169,6 +169,7 @@ impl AppRuntime {
         let enabled_static_groups = self.enabled_static_groups.clone();
         let event_qa_client = self.qa_client.clone();
         let event_translator = self.translator.clone();
+        let owner_user_id = self.owner_user_id.clone();
         let bot_display_name = self.bot_display_name.clone();
         self.napcat_client
             .start_event_loop(move |event: Value| {
@@ -179,6 +180,7 @@ impl AppRuntime {
                 let enabled_static_groups = enabled_static_groups.clone();
                 let qa_client = event_qa_client.clone();
                 let translator = event_translator.clone();
+                let owner_user_id = owner_user_id.clone();
                 async move {
                     log_event_summary(&event_logger, &event).await;
                     handle_message_event(
@@ -189,6 +191,7 @@ impl AppRuntime {
                         translator.as_ref(),
                         &event,
                         &enabled_static_groups,
+                        &owner_user_id,
                         &bot_display_name,
                     )
                     .await?;
@@ -280,6 +283,7 @@ async fn handle_message_event(
     translator: Option<&OpenAiTranslator>,
     event: &Value,
     static_group_ids: &[String],
+    owner_user_id: &str,
     bot_display_name: &str,
 ) -> Result<()> {
     if !ensure_message_event(event)? {
@@ -309,6 +313,7 @@ async fn handle_message_event(
             &context,
             event,
             static_group_ids,
+            owner_user_id,
             bot_display_name,
             &command,
             target_id,
@@ -356,6 +361,7 @@ async fn execute_command(
     context: &crate::event_utils::EventContext,
     event: &Value,
     static_group_ids: &[String],
+    owner_user_id: &str,
     bot_display_name: &str,
     command: &crate::commands::ParsedCommand,
     target_id: &str,
@@ -450,6 +456,102 @@ async fn execute_command(
                 napcat_client
                     .reply_text(&context.message_type, target_id, reply_message_id, &status)
                     .await?;
+            } else if subcommand == "启用" || subcommand == "禁用" {
+                if context.user_id != owner_user_id {
+                    bail!("/e 启用 和 /e 禁用 仅 bot 主人可用。");
+                }
+                let group_id = require_group_id(command, context)?;
+                let result = runtime_config_store
+                    .set_qa_group_enabled(&group_id, subcommand == "启用", Some(subcommand == "启用"))
+                    .await?;
+                let status = build_group_status_text(runtime_config_store, &group_id, static_group_ids).await;
+                napcat_client
+                    .reply_text(
+                        &context.message_type,
+                        target_id,
+                        reply_message_id,
+                        &format!(
+                            "{}。\n\n{}",
+                            if result.action == "created" {
+                                "已创建群开关记录"
+                            } else {
+                                "已更新群开关记录"
+                            },
+                            status
+                        ),
+                    )
+                    .await?;
+            } else if subcommand == "文件下载" {
+                let group_id = require_group_id(command, context)?;
+                ensure_group_manager_permission(napcat_client, event, context, owner_user_id).await?;
+                let action = command.positionals.get(1).map(String::as_str).unwrap_or_default();
+                if action != "启用" && action != "关闭" {
+                    bail!("用法：/e 文件下载 启用 [群文件夹名]|关闭");
+                }
+                let folder_name = if action == "启用" {
+                    command.positionals.iter().skip(2).cloned().collect::<Vec<_>>().join(" ")
+                } else {
+                    String::new()
+                };
+                let result = runtime_config_store
+                    .set_qa_group_file_download_enabled(&group_id, action == "启用", static_group_ids, &folder_name)
+                    .await?;
+                let status = build_group_status_text(runtime_config_store, &group_id, static_group_ids).await;
+                napcat_client
+                    .reply_text(
+                        &context.message_type,
+                        target_id,
+                        reply_message_id,
+                        &format!(
+                            "{}。\n\n{}",
+                            if result.action == "created" {
+                                "已创建文件下载开关记录"
+                            } else {
+                                "已更新文件下载开关记录"
+                            },
+                            status
+                        ),
+                    )
+                    .await?;
+            } else if subcommand == "过滤心跳" {
+                let group_id = require_group_id(command, context)?;
+                ensure_group_manager_permission(napcat_client, event, context, owner_user_id).await?;
+                let action = command.positionals.get(1).map(String::as_str).unwrap_or_default();
+                if action != "启用" && action != "关闭" {
+                    bail!("用法：/e 过滤心跳 启用 [N]|关闭");
+                }
+                let interval = if action == "启用" {
+                    command
+                        .positionals
+                        .get(2)
+                        .and_then(|item| item.trim().parse::<u64>().ok())
+                        .unwrap_or(10)
+                } else {
+                    10
+                };
+                if action == "启用" && !(1..=1000).contains(&interval) {
+                    bail!("过滤心跳间隔必须是 1 到 1000 之间的整数。");
+                }
+                let result = runtime_config_store
+                    .set_qa_group_filter_heartbeat(&group_id, action == "启用", interval, static_group_ids)
+                    .await?;
+                let status = build_group_status_text(runtime_config_store, &group_id, static_group_ids).await;
+                napcat_client
+                    .reply_text(
+                        &context.message_type,
+                        target_id,
+                        reply_message_id,
+                        &format!(
+                            "{}。\n\n{}",
+                            if result.action == "created" {
+                                "已创建过滤心跳记录"
+                            } else {
+                                "已更新过滤心跳记录"
+                            },
+                            status
+                        ),
+                    )
+                    .await?;
             } else {
                 napcat_client
                     .reply_text(
@@ -478,6 +580,55 @@ fn require_group_id(command: &crate::commands::ParsedCommand, context: &crate::e
         bail!("该命令需要群号；如果你在私聊里使用，请加 --group <群号>");
     }
     Ok(group_id)
+}
+
+async fn ensure_group_manager_permission(
+    napcat_client: &NapCatClient,
+    event: &Value,
+    context: &crate::event_utils::EventContext,
+    owner_user_id: &str,
+) -> Result<()> {
+    let role = get_user_group_role(napcat_client, event, context, owner_user_id).await;
+    if role == "owner-bot" || role == "owner" || role == "admin" {
+        return Ok(());
+    }
+    bail!("只有该群群主、管理员或 bot 主人可以修改该项配置。");
+}
+
+async fn get_user_group_role(
+    napcat_client: &NapCatClient,
+    event: &Value,
+    context: &crate::event_utils::EventContext,
+    owner_user_id: &str,
+) -> String {
+    if context.user_id == owner_user_id {
+        return "owner-bot".to_string();
+    }
+    let sender_role = event
+        .get("sender")
+        .and_then(|sender| sender.get("role"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if sender_role == "owner" || sender_role == "admin" {
+        return sender_role;
+    }
+    if context.message_type != "group" || context.group_id.is_empty() || context.user_id.is_empty() {
+        return "member".to_string();
+    }
+    match napcat_client
+        .get_group_member_info(&context.group_id, &context.user_id, true)
+        .await
+    {
+        Ok(info) => info
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("member")
+            .trim()
+            .to_ascii_lowercase(),
+        Err(_) => "member".to_string(),
+    }
 }
 
 async fn build_group_status_text(
