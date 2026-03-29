@@ -19,8 +19,10 @@
 当前状态：
 
 - `cargo check` 已通过
+- `cargo test` 已通过（当前新增 7 个消息入口层单测）
 - 基础层已经能编译：配置、日志、状态文件、运行时配置、WebUI 同步文件、NapCat HTTP/SSE、OpenAI 客户端
 - 主循环目前只接了事件监听和群邀请占位逻辑
+- 已接入第一批消息入口能力：`/help`、`/chat`、`/tr`、`/e` 命令识别，`@bot`/`@他人` 检测，疑问句检测，文本附件读取骨架
 
 还没迁移的原版功能：
 
@@ -31,8 +33,8 @@
 - `codex-bridge-server.mjs`
 - `local-rag-retriever.mjs`
 - `codex-readonly-tools.mjs`
-- `message-attachment-reader.mjs`
-- `src/index.mjs` 里的完整消息分流、命令解析、低信息回复拦截、自动入群双保险、topic closure、shutdown vote
+- `message-attachment-reader.mjs` 的完整联网/图片混合输入路径还未全部迁完
+- `src/index.mjs` 里的完整消息分流、低信息回复拦截、自动入群双保险、topic closure、shutdown vote
 
 兼容原则：
 

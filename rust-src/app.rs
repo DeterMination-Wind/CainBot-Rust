@@ -4,6 +4,11 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::config::load_config;
+use crate::event_utils::{
+    build_help_text, create_context_from_event, ensure_message_event, event_mentions_other_user,
+    event_mentions_self, get_sender_name, is_question_intent_text, parse_command_from_event,
+    plain_text_from_event,
+};
 use crate::logger::Logger;
 use crate::napcat_client::{NapCatClient, NapCatClientConfig};
 use crate::openai_chat_client::{OpenAiChatClient, OpenAiChatClientConfig};
@@ -20,6 +25,7 @@ pub struct AppRuntime {
     pub runtime_config_store: RuntimeConfigStore,
     pub enabled_static_groups: Vec<String>,
     pub owner_user_id: String,
+    pub bot_display_name: String,
     pub _state_store: StateStore,
     pub _webui_sync_store: WebUiSyncStore,
     pub _qa_client: Option<OpenAiChatClient>,
@@ -146,6 +152,7 @@ impl AppRuntime {
             runtime_config_store,
             enabled_static_groups: config.qa.enabled_group_ids,
             owner_user_id: config.bot.owner_user_id,
+            bot_display_name: config.bot.display_name,
             _state_store: state_store,
             _webui_sync_store: webui_sync_store,
             _qa_client: qa_client,
@@ -157,14 +164,26 @@ impl AppRuntime {
     pub async fn run(self) -> Result<()> {
         let event_logger = self.logger.clone();
         let event_runtime_store = self.runtime_config_store.clone();
+        let event_napcat_client = self.napcat_client.clone();
         let enabled_static_groups = self.enabled_static_groups.clone();
+        let bot_display_name = self.bot_display_name.clone();
         self.napcat_client
             .start_event_loop(move |event: Value| {
                 let event_logger = event_logger.clone();
                 let event_runtime_store = event_runtime_store.clone();
+                let napcat_client = event_napcat_client.clone();
+                let bot_display_name = bot_display_name.clone();
                 let enabled_static_groups = enabled_static_groups.clone();
                 async move {
                     log_event_summary(&event_logger, &event).await;
+                    handle_message_event(
+                        &event_logger,
+                        &napcat_client,
+                        &event,
+                        &enabled_static_groups,
+                        &bot_display_name,
+                    )
+                    .await?;
                     handle_group_invite_stub(&event_logger, &event_runtime_store, &enabled_static_groups, &event).await?;
                     Ok(())
                 }
@@ -242,5 +261,70 @@ async fn handle_group_invite_stub(
             if enabled { "已启用" } else { "未启用" }
         ))
         .await;
+    Ok(())
+}
+
+async fn handle_message_event(
+    logger: &Logger,
+    napcat_client: &NapCatClient,
+    event: &Value,
+    _static_group_ids: &[String],
+    bot_display_name: &str,
+) -> Result<()> {
+    if !ensure_message_event(event)? {
+        return Ok(());
+    }
+    let context = create_context_from_event(event);
+    let text = plain_text_from_event(event);
+    let command = parse_command_from_event(event);
+
+    // 先把显式命令单独切出来，保证后续迁移会话逻辑时入口稳定。
+    if let Some(command) = command {
+        let target_id = if context.message_type == "group" {
+            context.group_id.as_str()
+        } else {
+            context.user_id.as_str()
+        };
+        match command.name.as_str() {
+            "help" => {
+                napcat_client
+                    .reply_text(
+                        &context.message_type,
+                        target_id,
+                        event.get("message_id").and_then(Value::as_i64).map(|item| item.to_string()).as_deref(),
+                        &build_help_text(bot_display_name),
+                    )
+                    .await?;
+            }
+            "chat" | "translate" | "edit" => {
+                napcat_client
+                    .reply_text(
+                        &context.message_type,
+                        target_id,
+                        event.get("message_id").and_then(Value::as_i64).map(|item| item.to_string()).as_deref(),
+                        "Rust 版该命令正在迁移中，当前已完成基础层和性能层改造。",
+                    )
+                    .await?;
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    if context.message_type == "group" {
+        if event_mentions_other_user(event, bot_display_name) {
+            return Ok(());
+        }
+        if event_mentions_self(event, bot_display_name) || is_question_intent_text(&text) {
+            logger
+                .info(format!(
+                    "捕获到后续可接管问答的候选消息：groupId={}, sender={}, text={}",
+                    context.group_id,
+                    get_sender_name(event),
+                    text.chars().take(120).collect::<String>()
+                ))
+                .await;
+        }
+    }
     Ok(())
 }
