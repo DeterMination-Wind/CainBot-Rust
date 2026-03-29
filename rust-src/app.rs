@@ -576,15 +576,6 @@ async fn handle_message_event(
         }
         if let Some(chat_session_manager) = chat_session_manager {
             if chat_session_manager.is_group_enabled(&context.group_id).await {
-                chat_session_manager.record_incoming_message(&context, event, &text).await?;
-                if let Err(error) = chat_session_manager
-                    .maybe_capture_correction_memory(&context, event)
-                    .await
-                {
-                    logger
-                        .warn(format!("后台长期记忆捕获失败：{error:#}"))
-                        .await;
-                }
                 if event_mentions_self(event, bot_display_name) {
                     if let Some(qa_client) = qa_client {
                         let input = build_chat_input(
@@ -616,6 +607,15 @@ async fn handle_message_event(
                         let _ = qa_client;
                         return Ok(());
                     }
+                }
+                chat_session_manager.record_incoming_message(&context, event, &text).await?;
+                if let Err(error) = chat_session_manager
+                    .maybe_capture_correction_memory(&context, event)
+                    .await
+                {
+                    logger
+                        .warn(format!("后台长期记忆捕获失败：{error:#}"))
+                        .await;
                 }
                 if chat_session_manager.is_group_proactive_reply_enabled(&context.group_id).await
                     && is_question_intent_text(&text)
