@@ -95,6 +95,12 @@ pub struct RuntimeConfigDefaults {
     pub qa_external_exclusive_groups_refresh_ms: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct QaGroupUpdateResult {
+    pub action: String,
+    pub entry: QaGroup,
+}
+
 #[derive(Clone)]
 pub struct RuntimeConfigStore {
     file_path: PathBuf,
@@ -247,6 +253,177 @@ impl RuntimeConfigStore {
             .iter()
             .find(|item| item.group_id == normalized)
             .cloned()
+    }
+
+    pub async fn set_qa_group_enabled(
+        &self,
+        group_id: &str,
+        enabled: bool,
+        proactive_reply_enabled: Option<bool>,
+    ) -> Result<QaGroupUpdateResult> {
+        let normalized = group_id.trim();
+        if normalized.is_empty() {
+            anyhow::bail!("groupId 不能为空");
+        }
+
+        let mut data = self.data.lock().await;
+        let index = data.qa_groups.iter().position(|item| item.group_id == normalized);
+        let action = if let Some(index) = index {
+            let target = &mut data.qa_groups[index];
+            target.group_id = normalized.to_string();
+            target.enabled = enabled;
+            if enabled {
+                target.proactive_reply_enabled = proactive_reply_enabled.unwrap_or(true);
+            }
+            target.filter_heartbeat_interval = target.filter_heartbeat_interval.clamp(1, 1_000);
+            target.updated_at = now_iso();
+            if target.created_at.is_empty() {
+                target.created_at = now_iso();
+            }
+            "updated".to_string()
+        } else {
+            data.qa_groups.push(QaGroup {
+                group_id: normalized.to_string(),
+                enabled,
+                proactive_reply_enabled: if enabled {
+                    proactive_reply_enabled.unwrap_or(true)
+                } else {
+                    true
+                },
+                filter_heartbeat_enabled: false,
+                filter_heartbeat_interval: DEFAULT_FILTER_HEARTBEAT_INTERVAL,
+                file_download_enabled: false,
+                file_download_folder_name: String::new(),
+                created_at: now_iso(),
+                updated_at: now_iso(),
+            });
+            "created".to_string()
+        };
+        let entry = data
+            .qa_groups
+            .iter()
+            .find(|item| item.group_id == normalized)
+            .cloned()
+            .map(normalize_qa_group)
+            .expect("qa group entry must exist after upsert");
+        drop(data);
+        self.save().await?;
+        Ok(QaGroupUpdateResult { action, entry })
+    }
+
+    pub async fn set_qa_group_file_download_enabled(
+        &self,
+        group_id: &str,
+        enabled: bool,
+        static_group_ids: &[String],
+        folder_name: &str,
+    ) -> Result<QaGroupUpdateResult> {
+        let normalized = group_id.trim();
+        if normalized.is_empty() {
+            anyhow::bail!("groupId 不能为空");
+        }
+        let normalized_folder_name = folder_name.trim().to_string();
+        let current_enabled = self.is_qa_group_enabled(normalized, static_group_ids).await;
+
+        let mut data = self.data.lock().await;
+        let index = data.qa_groups.iter().position(|item| item.group_id == normalized);
+        let action = if let Some(index) = index {
+            let target = &mut data.qa_groups[index];
+            target.group_id = normalized.to_string();
+            target.enabled = current_enabled || target.enabled;
+            target.file_download_enabled = enabled;
+            target.file_download_folder_name = if enabled {
+                normalized_folder_name
+            } else {
+                String::new()
+            };
+            target.filter_heartbeat_interval = target.filter_heartbeat_interval.clamp(1, 1_000);
+            target.updated_at = now_iso();
+            if target.created_at.is_empty() {
+                target.created_at = now_iso();
+            }
+            "updated".to_string()
+        } else {
+            data.qa_groups.push(QaGroup {
+                group_id: normalized.to_string(),
+                enabled: current_enabled,
+                proactive_reply_enabled: true,
+                filter_heartbeat_enabled: false,
+                filter_heartbeat_interval: DEFAULT_FILTER_HEARTBEAT_INTERVAL,
+                file_download_enabled: enabled,
+                file_download_folder_name: if enabled {
+                    normalized_folder_name
+                } else {
+                    String::new()
+                },
+                created_at: now_iso(),
+                updated_at: now_iso(),
+            });
+            "created".to_string()
+        };
+        let entry = data
+            .qa_groups
+            .iter()
+            .find(|item| item.group_id == normalized)
+            .cloned()
+            .map(normalize_qa_group)
+            .expect("qa group entry must exist after upsert");
+        drop(data);
+        self.save().await?;
+        Ok(QaGroupUpdateResult { action, entry })
+    }
+
+    pub async fn set_qa_group_filter_heartbeat(
+        &self,
+        group_id: &str,
+        enabled: bool,
+        interval: u64,
+        static_group_ids: &[String],
+    ) -> Result<QaGroupUpdateResult> {
+        let normalized = group_id.trim();
+        if normalized.is_empty() {
+            anyhow::bail!("groupId 不能为空");
+        }
+        let current_enabled = self.is_qa_group_enabled(normalized, static_group_ids).await;
+        let normalized_interval = interval.clamp(1, 1_000);
+
+        let mut data = self.data.lock().await;
+        let index = data.qa_groups.iter().position(|item| item.group_id == normalized);
+        let action = if let Some(index) = index {
+            let target = &mut data.qa_groups[index];
+            target.group_id = normalized.to_string();
+            target.enabled = current_enabled || target.enabled;
+            target.filter_heartbeat_enabled = enabled;
+            target.filter_heartbeat_interval = normalized_interval;
+            target.updated_at = now_iso();
+            if target.created_at.is_empty() {
+                target.created_at = now_iso();
+            }
+            "updated".to_string()
+        } else {
+            data.qa_groups.push(QaGroup {
+                group_id: normalized.to_string(),
+                enabled: current_enabled,
+                proactive_reply_enabled: true,
+                filter_heartbeat_enabled: enabled,
+                filter_heartbeat_interval: normalized_interval,
+                file_download_enabled: false,
+                file_download_folder_name: String::new(),
+                created_at: now_iso(),
+                updated_at: now_iso(),
+            });
+            "created".to_string()
+        };
+        let entry = data
+            .qa_groups
+            .iter()
+            .find(|item| item.group_id == normalized)
+            .cloned()
+            .map(normalize_qa_group)
+            .expect("qa group entry must exist after upsert");
+        drop(data);
+        self.save().await?;
+        Ok(QaGroupUpdateResult { action, entry })
     }
 
     pub async fn set_group_qa_override(&self, entry: GroupQaOverride) -> Result<String> {
@@ -463,4 +640,75 @@ const fn default_true() -> bool {
 
 const fn default_filter_heartbeat_interval() -> u64 {
     DEFAULT_FILTER_HEARTBEAT_INTERVAL
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use anyhow::Result;
+
+    use super::{RuntimeConfigDefaults, RuntimeConfigStore};
+    use crate::logger::Logger;
+
+    fn unique_temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "cainbot-rs-{name}-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ))
+    }
+
+    #[tokio::test]
+    async fn creates_group_switch_record() -> Result<()> {
+        let base_dir = unique_temp_path("runtime-config");
+        let file_path = base_dir.join("runtime-config.json");
+        let logger = Logger::new("error", None).await?;
+        let store = RuntimeConfigStore::new(
+            file_path,
+            base_dir,
+            RuntimeConfigDefaults::default(),
+            logger,
+        );
+
+        store.load().await?;
+        let result = store.set_qa_group_enabled("123", true, Some(true)).await?;
+        let groups = store.get_qa_groups().await;
+
+        assert_eq!(result.action, "created");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_id, "123");
+        assert!(groups[0].enabled);
+        assert!(groups[0].proactive_reply_enabled);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_download_record_keeps_static_enablement() -> Result<()> {
+        let base_dir = unique_temp_path("runtime-config-file-download");
+        let file_path = base_dir.join("runtime-config.json");
+        let logger = Logger::new("error", None).await?;
+        let store = RuntimeConfigStore::new(
+            file_path,
+            base_dir,
+            RuntimeConfigDefaults::default(),
+            logger,
+        );
+
+        store.load().await?;
+        let result = store
+            .set_qa_group_file_download_enabled("456", true, &["456".to_string()], "mods")
+            .await?;
+        let groups = store.get_qa_groups().await;
+
+        assert_eq!(result.action, "created");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_id, "456");
+        assert!(groups[0].enabled);
+        assert!(groups[0].file_download_enabled);
+        assert_eq!(groups[0].file_download_folder_name, "mods");
+        Ok(())
+    }
 }
