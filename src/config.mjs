@@ -4,6 +4,15 @@ import fs from 'node:fs/promises';
 import { ensureDir, resolveMaybeRelative } from './utils.mjs';
 
 const DEFAULT_OPENAI_COMPAT_BASE_URL = 'http://127.0.0.1:15721/v1';
+const DEFAULT_STRUCTURED_MEMORY_FILE_TEXT = `${JSON.stringify({
+  全局: {
+    设定: [],
+    群记忆: {},
+    知识缓存: {},
+    知识搜索: {},
+    人物关系: {}
+  }
+}, null, 2)}\n`;
 
 async function readPromptFile(promptFile, fallbackText) {
   let promptText = String(fallbackText ?? '').trim();
@@ -299,6 +308,10 @@ export async function loadConfig(configPath) {
         ),
         promptImageRoot: resolveMaybeRelative(configDir, raw?.qa?.answer?.promptImageRoot ?? './prompts'),
         memoryFile: resolveMaybeRelative(configDir, raw?.qa?.answer?.memoryFile ?? './data/cain-longterm-memory.txt'),
+        structuredMemoryFile: resolveMaybeRelative(configDir, raw?.qa?.answer?.structuredMemoryFile ?? './data/memory.json'),
+        knowledgeDir: resolveMaybeRelative(configDir, raw?.qa?.answer?.knowledgeDir ?? './data/Knowledge'),
+        memoryModel: String(raw?.qa?.answer?.memoryModel ?? '').trim(),
+        recordGroupMemory: raw?.qa?.answer?.recordGroupMemory ?? true,
         enableCodexReadonlyTools: raw?.qa?.answer?.enableCodexReadonlyTools ?? answerRaw?.enableCodexReadonlyTools ?? true,
         github: {
           enabled: raw?.qa?.answer?.github?.enabled ?? true,
@@ -333,6 +346,18 @@ export async function loadConfig(configPath) {
   if (config.qa.answer.memoryFile) {
     await ensureDir(path.dirname(config.qa.answer.memoryFile));
     await fs.writeFile(config.qa.answer.memoryFile, await fs.readFile(config.qa.answer.memoryFile, 'utf8').catch(() => ''), 'utf8');
+  }
+  if (config.qa.answer.structuredMemoryFile) {
+    await ensureDir(path.dirname(config.qa.answer.structuredMemoryFile));
+    const structuredMemoryContent = await fs.readFile(config.qa.answer.structuredMemoryFile, 'utf8').catch(() => '');
+    await fs.writeFile(
+      config.qa.answer.structuredMemoryFile,
+      structuredMemoryContent.trim() ? structuredMemoryContent : DEFAULT_STRUCTURED_MEMORY_FILE_TEXT,
+      'utf8'
+    );
+  }
+  if (config.qa.answer.knowledgeDir) {
+    await ensureDir(config.qa.answer.knowledgeDir);
   }
   return { config, configDir, configPath: absoluteConfigPath };
 }
