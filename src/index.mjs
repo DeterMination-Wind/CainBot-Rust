@@ -2020,7 +2020,8 @@ async function main() {
     }
     shuttingDown = true;
     logger.info(`收到 ${signal}，准备停止 Cain Bot。`);
-    napcatClient.stop();
+    logger.setNonInfoNotifier(null);
+    await napcatClient.stop();
     if (groupInvitePollTimer) {
       clearTimeout(groupInvitePollTimer);
       groupInvitePollTimer = null;
@@ -2032,7 +2033,10 @@ async function main() {
     await Promise.allSettled([
       codexBridgeServer.stop()
     ]);
-    await logger.flush();
+    await Promise.race([
+      logger.flush(),
+      sleep(5000)
+    ]);
   };
 
   process.once('SIGINT', () => { void shutdown('SIGINT'); });

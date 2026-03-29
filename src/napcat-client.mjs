@@ -62,15 +62,31 @@ export class NapCatClient {
     this.logger = logger;
     this.stopped = false;
     this.pendingEventTasks = new Set();
+    this.activeControllers = new Set();
+    this.activeEventReader = null;
     this.onReplySent = typeof config?.onReplySent === 'function' ? config.onReplySent : null;
   }
 
-  stop() {
+  async stop() {
     this.stopped = true;
+    for (const controller of this.activeControllers) {
+      try {
+        controller.abort();
+      } catch {}
+    }
+    if (this.activeEventReader?.cancel) {
+      try {
+        await this.activeEventReader.cancel();
+      } catch {}
+    }
+    if (this.pendingEventTasks.size > 0) {
+      await Promise.allSettled([...this.pendingEventTasks]);
+    }
   }
 
   async call(action, params = {}) {
     const controller = new AbortController();
+    this.activeControllers.add(controller);
     const timeout = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
     try {
       const response = await fetch(joinUrl(this.config.baseUrl, action), {
@@ -97,6 +113,7 @@ export class NapCatClient {
       return payload?.data ?? payload;
     } finally {
       clearTimeout(timeout);
+      this.activeControllers.delete(controller);
     }
   }
 
@@ -429,39 +446,57 @@ export class NapCatClient {
   }
 
   async #runEventStream(onEvent) {
+    const controller = new AbortController();
+    this.activeControllers.add(controller);
     const response = await fetch(joinUrl(this.config.eventBaseUrl || this.config.baseUrl, this.config.eventPath), {
       method: 'GET',
       headers: {
         Accept: 'text/event-stream',
         ...this.config.headers
-      }
+      },
+      signal: controller.signal
     });
 
     if (!response.ok || !response.body) {
+      this.activeControllers.delete(controller);
       throw new Error(`NapCat SSE 返回 HTTP ${response.status}`);
     }
 
     this.logger.info('NapCat SSE 已连接。');
     const reader = response.body.getReader();
+    this.activeEventReader = reader;
     const decoder = new TextDecoder();
     let buffer = '';
 
-    while (!this.stopped) {
-      const { done, value } = await reader.read();
-      if (done) {
-        throw new Error('NapCat SSE 连接已结束');
-      }
-      buffer += decoder.decode(value, { stream: true }).replace(/\r/g, '');
-
-      let delimiterIndex = buffer.indexOf('\n\n');
-      while (delimiterIndex >= 0) {
-        const chunk = buffer.slice(0, delimiterIndex);
-        buffer = buffer.slice(delimiterIndex + 2);
-        delimiterIndex = buffer.indexOf('\n\n');
-        const event = this.#parseSseEvent(chunk);
-        if (event) {
-          await this.#dispatchEvent(onEvent, event);
+    try {
+      while (!this.stopped) {
+        const { done, value } = await reader.read();
+        if (done) {
+          throw new Error('NapCat SSE 连接已结束');
         }
+        buffer += decoder.decode(value, { stream: true }).replace(/\r/g, '');
+
+        let delimiterIndex = buffer.indexOf('\n\n');
+        while (delimiterIndex >= 0) {
+          const chunk = buffer.slice(0, delimiterIndex);
+          buffer = buffer.slice(delimiterIndex + 2);
+          delimiterIndex = buffer.indexOf('\n\n');
+          const event = this.#parseSseEvent(chunk);
+          if (event) {
+            await this.#dispatchEvent(onEvent, event);
+          }
+        }
+      }
+    } finally {
+      this.activeEventReader = null;
+      this.activeControllers.delete(controller);
+      try {
+        reader.releaseLock();
+      } catch {}
+      if (response.body?.cancel) {
+        try {
+          await response.body.cancel();
+        } catch {}
       }
     }
   }
