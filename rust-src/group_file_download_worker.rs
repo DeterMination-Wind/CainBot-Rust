@@ -73,6 +73,34 @@ impl GroupFileDownloadWorker {
         Ok(response.get("handled").and_then(Value::as_bool).unwrap_or(false))
     }
 
+    pub async fn start_group_download_flow_from_tool(
+        &self,
+        context: &EventContext,
+        message_id: &str,
+        request_text: &str,
+        request: &Value,
+    ) -> Result<Value> {
+        let response = self
+            .request(
+                "start_group_download_flow_from_tool",
+                json!({
+                    "context": {
+                        "messageType": context.message_type,
+                        "groupId": context.group_id,
+                        "userId": context.user_id,
+                        "selfId": context.self_id
+                    },
+                    "event": {
+                        "message_id": message_id.trim(),
+                        "raw_message": request_text.trim()
+                    },
+                    "request": request
+                }),
+            )
+            .await?;
+        Ok(response.get("handled").cloned().unwrap_or(Value::Null))
+    }
+
     pub async fn stop(&self) -> Result<()> {
         let _ = self.request("shutdown", Value::Null).await;
         let mut handle = self.inner.lock().await;

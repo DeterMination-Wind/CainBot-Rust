@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use anyhow::{Result, bail};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::chat_session_manager::ChatSessionManager;
 use crate::config::{Config, load_config};
@@ -490,6 +490,7 @@ async fn handle_message_event(
             qa_client,
             translator,
             chat_session_manager,
+            group_file_download_worker,
             &context,
             event,
             static_group_ids,
@@ -593,14 +594,17 @@ async fn handle_message_event(
                         )
                         .await?;
                         let result = chat_session_manager.chat(&context, &input).await?;
-                        napcat_client
-                            .reply_text(
-                                &context.message_type,
-                                &context.group_id,
-                                reply_message_id.as_deref(),
-                                &result.text,
-                            )
-                            .await?;
+                        send_chat_result_if_present(
+                            chat_session_manager,
+                            group_file_download_worker,
+                            napcat_client,
+                            &context,
+                            reply_message_id.as_deref(),
+                            &result,
+                            &text,
+                            "fallback",
+                        )
+                        .await?;
                         let _ = qa_client;
                         return Ok(());
                     }
@@ -632,14 +636,17 @@ async fn handle_message_event(
                             )
                             .await?;
                             let result = chat_session_manager.chat(&context, &input).await?;
-                            napcat_client
-                                .reply_text(
-                                    &context.message_type,
-                                    &context.group_id,
-                                    reply_message_id.as_deref(),
-                                    &result.text,
-                                )
-                                .await?;
+                            send_chat_result_if_present(
+                                chat_session_manager,
+                                group_file_download_worker,
+                                napcat_client,
+                                &context,
+                                reply_message_id.as_deref(),
+                                &result,
+                                &text,
+                                "suppress",
+                            )
+                            .await?;
                             chat_session_manager
                                 .mark_hinted(&context, reply_message_id.as_deref().unwrap_or_default())
                                 .await?;
@@ -670,6 +677,7 @@ async fn execute_command(
     _qa_client: Option<&OpenAiChatClient>,
     translator: Option<&OpenAiTranslator>,
     chat_session_manager: Option<&ChatSessionManager>,
+    group_file_download_worker: &GroupFileDownloadWorker,
     context: &crate::event_utils::EventContext,
     event: &Value,
     static_group_ids: &[String],
@@ -730,10 +738,19 @@ async fn execute_command(
                         .collect::<String>()
                 ))
                 .await;
-            let answer = chat_session_manager.chat(context, &chat_input).await?.text;
-            napcat_client
-                .reply_text(&context.message_type, target_id, reply_message_id, &answer)
-                .await?;
+            let source_text = chat_input.runtime_context.timeline_text.clone();
+            let result = chat_session_manager.chat(context, &chat_input).await?;
+            send_chat_result_if_present(
+                chat_session_manager,
+                group_file_download_worker,
+                napcat_client,
+                context,
+                reply_message_id,
+                &result,
+                &source_text,
+                "fallback",
+            )
+            .await?;
         }
         "translate" => {
             let Some(translator) = translator else {
@@ -1112,6 +1129,94 @@ fn format_group_status(status: &crate::chat_session_manager::GroupPromptStatus) 
         status.answer_prompt.clone(),
     ]
     .join("\n")
+}
+
+async fn send_chat_result_if_present(
+    chat_session_manager: &ChatSessionManager,
+    group_file_download_worker: &GroupFileDownloadWorker,
+    napcat_client: &NapCatClient,
+    context: &crate::event_utils::EventContext,
+    reply_message_id: Option<&str>,
+    result: &crate::chat_session_manager::ChatResult,
+    source_text: &str,
+    on_low_information: &str,
+) -> Result<()> {
+    let target_id = if context.message_type == "group" {
+        context.group_id.as_str()
+    } else {
+        context.user_id.as_str()
+    };
+
+    if result.notice == "group-file-download-started" && context.message_type == "group" {
+        let request_text = result
+            .group_file_download_request
+            .as_ref()
+            .map(|item| item.request_text.as_str())
+            .filter(|item| !item.trim().is_empty())
+            .unwrap_or(source_text)
+            .trim()
+            .to_string();
+        let request = result
+            .group_file_download_request
+            .as_ref()
+            .map(|item| item.request.clone())
+            .filter(|item| !item.is_null())
+            .unwrap_or_else(|| json!({ "request_text": request_text }));
+        let handoff = group_file_download_worker
+            .start_group_download_flow_from_tool(
+                context,
+                reply_message_id.unwrap_or_default(),
+                &request_text,
+                &request,
+            )
+            .await?;
+        if handoff.get("started").and_then(Value::as_bool) == Some(true) {
+            return Ok(());
+        }
+        if let Some(reason) = handoff.get("reason").and_then(Value::as_str).map(str::trim).filter(|item| !item.is_empty()) {
+            napcat_client
+                .reply_text(&context.message_type, target_id, reply_message_id, reason)
+                .await?;
+        }
+        return Ok(());
+    }
+
+    let review = chat_session_manager
+        .review_low_information_reply(source_text, &result.text, on_low_information)
+        .await?;
+    if review.start_group_file_download && context.message_type == "group" {
+        let request_text = if review.request_text.trim().is_empty() {
+            source_text.trim().to_string()
+        } else {
+            review.request_text.trim().to_string()
+        };
+        let handoff = group_file_download_worker
+            .start_group_download_flow_from_tool(
+                context,
+                reply_message_id.unwrap_or_default(),
+                &request_text,
+                &json!({ "request_text": request_text }),
+            )
+            .await?;
+        if handoff.get("started").and_then(Value::as_bool) == Some(true) {
+            return Ok(());
+        }
+        if let Some(reason) = handoff.get("reason").and_then(Value::as_str).map(str::trim).filter(|item| !item.is_empty()) {
+            napcat_client
+                .reply_text(&context.message_type, target_id, reply_message_id, reason)
+                .await?;
+        }
+        return Ok(());
+    }
+
+    if review.text.trim().is_empty() {
+        return Ok(());
+    }
+
+    napcat_client
+        .reply_text(&context.message_type, target_id, reply_message_id, &review.text)
+        .await?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

@@ -18,6 +18,7 @@ pub struct ChatResult {
 #[derive(Debug, Clone)]
 pub struct GroupFileDownloadRequest {
     pub request_text: String,
+    pub request: Value,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -210,6 +211,7 @@ impl ChatSessionManager {
                         .unwrap_or_default()
                         .trim()
                         .to_string(),
+                    request: request.get("request").cloned().unwrap_or(Value::Null),
                 })
                 .filter(|request| !request.request_text.is_empty()),
         })
