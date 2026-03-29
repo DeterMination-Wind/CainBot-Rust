@@ -815,11 +815,11 @@ export class CodexReadonlyTools {
 
   getPromptInstructions() {
     const parts = [];
-    const codexRoot = String(this.config?.codexRoot ?? '').trim();
+    const codexRoot = String(this.config?.databaseRoot ?? this.config?.codexRoot ?? '').trim();
     if (codexRoot) {
       parts.push([
-        `你可以按需使用只读文件工具查看本地 /codex 目录（实际路径：${codexRoot}）中的文件，以帮助回答用户关于代码或项目的问题。`,
-        '这些工具只能用于搜索、列目录、读取文件；绝对不能修改、创建、删除、重命名文件，也不能声称自己已经修改了 /codex 目录中的任何内容。',
+        `你可以按需使用只读文件工具查看本地数据库目录（实际路径：${codexRoot}）中的文件，以帮助回答用户关于代码或项目的问题。`,
+        '这些工具只能用于搜索、列目录、读取文件；绝对不能修改、创建、删除、重命名文件，也不能声称自己已经修改了数据库目录中的任何内容。',
         '只要某个事实能通过工具精确确认，就优先调用工具，不要自己在脑中推断后直接回答。',
         '优先策略：如果用户提到项目名、目录名、仓库名或模块名，请优先调用 inspect_codex_project，先看该项目附近的 README、AGENTS、package.json 等上下文文件，再决定是否需要继续搜索源码。',
         '如果还需要源码定位，再用 search_codex_files；如果已经知道路径，再用 read_codex_file 精确读取。',
@@ -1089,14 +1089,14 @@ export class CodexReadonlyTools {
   }
 
   async _resolveInsideRoot(inputPath = '.') {
-    const rootPath = path.resolve(String(this.config.codexRoot));
+    const rootPath = path.resolve(String(this.config?.databaseRoot ?? this.config?.codexRoot ?? ''));
     const requestedPath = String(inputPath ?? '.').trim() || '.';
     const absolutePath = path.isAbsolute(requestedPath)
       ? path.resolve(requestedPath)
       : path.resolve(rootPath, requestedPath);
 
     if (absolutePath !== rootPath && !absolutePath.startsWith(`${rootPath}${path.sep}`)) {
-      throw new Error('路径超出 /codex 目录范围');
+      throw new Error('路径超出数据库目录范围');
     }
 
     return {
@@ -1107,7 +1107,8 @@ export class CodexReadonlyTools {
   }
 
   async _hasCodexReadonlyTools() {
-    return Boolean(this.config?.enableCodexReadonlyTools !== false && this.config?.codexRoot && await pathExists(this.config.codexRoot));
+    const rootPath = String(this.config?.databaseRoot ?? this.config?.codexRoot ?? '').trim();
+    return Boolean(this.config?.enableCodexReadonlyTools !== false && rootPath && await pathExists(rootPath));
   }
 
   async _hasBotMemoryTool() {
@@ -1157,7 +1158,7 @@ export class CodexReadonlyTools {
   async _resolveCommandWorkingDirectory(requestedCwd, allowOutsideCodexRoot) {
     const normalized = String(requestedCwd ?? '').trim();
     if (allowOutsideCodexRoot) {
-      const baseDir = String(this.config?.codexRoot ?? '').trim() || process.cwd();
+      const baseDir = String(this.config?.databaseRoot ?? this.config?.codexRoot ?? '').trim() || process.cwd();
       const absolutePath = normalized
         ? path.isAbsolute(normalized)
           ? path.resolve(normalized)

@@ -30,10 +30,13 @@
     "port": 3186,
     "token": ""
   },
+  "paths": {
+    "databaseRoot": "../codex"
+  },
   "issueRepair": {
     "enabled": true,
     "ownerName": "DeterMination",
-    "codexRoot": "../codex",
+    "databaseRoot": "../codex",
     "codexCommand": "codex",
     "model": "gpt-5.4-high",
     "classifyModel": "gpt-5.4-mini",
@@ -89,10 +92,7 @@
       "contextWindowMessages": 30,
       "promptFile": "./prompts/chat-system-prompt.txt",
       "promptImageRoot": "./prompts",
-      "codexRoot": "../codex",
-      "localBuildRoot": "../codex/builds",
-      "vanillaRepoRoot": "../codex/Mindustry-master",
-      "xRepoRoot": "../codex/MindustryX-main",
+      "databaseRoot": "../codex",
       "memoryFile": "./data/cain-longterm-memory.txt",
       "structuredMemoryFile": "./data/memory.json",
       "knowledgeDir": "./data/Knowledge",
@@ -232,13 +232,7 @@
         "maxPathResults": 4,
         "maxContentResults": 6,
         "maxFileSizeBytes": 1048576,
-        "maxPromptChars": 4200,
-        "roots": [
-          {
-            "alias": "codex",
-            "path": "../codex"
-          }
-        ]
+        "maxPromptChars": 4200
       }
     },
     "topicClosure": {

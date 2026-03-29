@@ -1484,7 +1484,7 @@ export class ChatSessionManager {
       if (!guide) {
         return '';
       }
-      const codexRoot = String(this.config?.answer?.codexRoot ?? '').trim();
+      const codexRoot = String(this.config?.answer?.databaseRoot ?? this.config?.answer?.codexRoot ?? '').trim();
       const folderNames = (await fs.readdir(codexRoot, { withFileTypes: true }))
         .filter((entry) => entry?.isDirectory?.())
         .map((entry) => String(entry.name ?? '').trim())
@@ -1492,12 +1492,12 @@ export class ChatSessionManager {
         .sort((left, right) => left.localeCompare(right, 'zh-CN'));
 
       const lines = [
-        '【codex 根目录文件夹名称与用途索引已由系统预读】',
-        `codex 根目录：${guide.rootPath}`,
+        '【数据库根目录文件夹名称与用途索引已由系统预读】',
+        `数据库根目录：${guide.rootPath}`,
         `索引文件：${guide.indexPath}`,
-        `当前 codex 根目录文件夹名称：${folderNames.join('、')}`,
+        `当前数据库根目录文件夹名称：${folderNames.join('、')}`,
         '回答模组、插件、脚本、源码、仓库、项目目录、构建、编译、报错定位、服务端脚本这类问题前，先根据上面的文件夹名称判断应该看哪个目录，再参考下面的索引决定优先读哪个项目。',
-        '如果问题已经明显对应某个目录，就优先读取那个目录；不要在没做目录判断前就盲搜整个 codex。',
+        '如果问题已经明显对应某个目录，就优先读取那个目录；不要在没做目录判断前就盲搜整个数据库目录。',
         '文件夹用途索引：'
       ];
 
@@ -1505,10 +1505,10 @@ export class ChatSessionManager {
         lines.push(`- ${entry.name}: ${entry.purpose}`);
       }
 
-      lines.push('这份索引已经预读成功；不要再说自己还没看过 codex 根目录。');
+      lines.push('这份索引已经预读成功；不要再说自己还没看过数据库根目录。');
       return lines.join('\n');
     } catch (error) {
-      this.logger.warn(`codex 根目录索引自动预读失败：${error.message}`);
+      this.logger.warn(`数据库根目录索引自动预读失败：${error.message}`);
       return '';
     }
   }
@@ -1518,7 +1518,7 @@ export class ChatSessionManager {
       return this.mindustryKnowledgeCache;
     }
 
-    const codexRoot = String(this.config?.answer?.codexRoot ?? '').trim();
+    const codexRoot = String(this.config?.answer?.databaseRoot ?? this.config?.answer?.codexRoot ?? '').trim();
     if (!codexRoot) {
       return null;
     }
@@ -1555,7 +1555,7 @@ export class ChatSessionManager {
       return this.codexFolderGuideCache;
     }
 
-    const codexRoot = String(this.config?.answer?.codexRoot ?? '').trim();
+    const codexRoot = String(this.config?.answer?.databaseRoot ?? this.config?.answer?.codexRoot ?? '').trim();
     if (!codexRoot) {
       return null;
     }

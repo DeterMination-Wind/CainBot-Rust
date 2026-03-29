@@ -141,7 +141,7 @@ async function readPromptFile(promptFile, fallbackText) {
   return promptText;
 }
 
-function normalizeRagRoots(rawAnswer, configDir) {
+function normalizeRagRoots(rawAnswer, configDir, sharedDatabaseRoot) {
   const configuredRoots = Array.isArray(rawAnswer?.rag?.roots) ? rawAnswer.rag.roots : [];
   const normalized = configuredRoots
     .map((item, index) => {
@@ -169,7 +169,10 @@ function normalizeRagRoots(rawAnswer, configDir) {
     return normalized;
   }
 
-  const defaultRoot = resolveMaybeRelative(configDir, rawAnswer?.codexRoot ?? '../codex');
+  const defaultRoot = resolveMaybeRelative(
+    configDir,
+    rawAnswer?.databaseRoot ?? rawAnswer?.codexRoot ?? sharedDatabaseRoot ?? '../codex'
+  );
   if (!defaultRoot) {
     return [];
   }
@@ -179,7 +182,7 @@ function normalizeRagRoots(rawAnswer, configDir) {
   }];
 }
 
-function normalizeRagConfig(rawAnswer, configDir) {
+function normalizeRagConfig(rawAnswer, configDir, sharedDatabaseRoot) {
   return {
     enabled: rawAnswer?.rag?.enabled ?? true,
     autoInject: rawAnswer?.rag?.autoInject ?? true,
@@ -189,7 +192,7 @@ function normalizeRagConfig(rawAnswer, configDir) {
     maxContentResults: rawAnswer?.rag?.maxContentResults ?? 6,
     maxFileSizeBytes: rawAnswer?.rag?.maxFileSizeBytes ?? 1048576,
     maxPromptChars: rawAnswer?.rag?.maxPromptChars ?? 4200,
-    roots: normalizeRagRoots(rawAnswer, configDir)
+    roots: normalizeRagRoots(rawAnswer, configDir, sharedDatabaseRoot)
   };
 }
 
@@ -231,11 +234,25 @@ function resolveQaAnswerPath(configDir, primaryValue, fallbackValue = '') {
   return resolveMaybeRelative(configDir, primaryValue ?? fallbackValue);
 }
 
+function resolveSharedDatabaseRoot(raw, configDir) {
+  return resolveMaybeRelative(
+    configDir,
+    raw?.paths?.databaseRoot
+    ?? raw?.databaseRoot
+    ?? raw?.qa?.answer?.databaseRoot
+    ?? raw?.qa?.answer?.codexRoot
+    ?? raw?.issueRepair?.databaseRoot
+    ?? raw?.issueRepair?.codexRoot
+    ?? '../codex'
+  );
+}
+
 export async function loadConfig(configPath) {
   const absoluteConfigPath = path.resolve(configPath);
   const configDir = path.dirname(absoluteConfigPath);
   const configText = await fs.readFile(absoluteConfigPath, 'utf8');
   const raw = JSON.parse(configText);
+  const sharedDatabaseRoot = resolveSharedDatabaseRoot(raw, configDir);
 
   const sharedAiBaseUrl = String(
     raw?.ai?.baseUrl
@@ -283,8 +300,8 @@ export async function loadConfig(configPath) {
         '6. 如果玩家提到游戏版本、最新版、更新到哪个版本、release、tag、pre、预发布、alpha、beta、rc，或者你准备声称某个游戏当前版本是什么，你必须先按上面的规则调用 read_github_repo_releases 获取最新 release tag，再组织回答；如需核对提交历史，再调用 read_github_repo_commits。',
         '',
         '模组 / 源码 / 项目问题的强制规则：',
-        '1. 只要问题涉及模组、插件、脚本、源码、仓库、项目目录、构建、编译、报错定位或服务端脚本，回答前必须先看 codex 根目录文件夹名称，并参考 codex-folder-index(MustRead_before_answering_mod_project_questions).json 判断该读哪个目录。',
-        '2. 在没做目录判断前，不要盲搜整个 codex。'
+        '1. 只要问题涉及模组、插件、脚本、源码、仓库、项目目录、构建、编译、报错定位或服务端脚本，回答前必须先看数据库根目录文件夹名称，并参考 codex-folder-index(MustRead_before_answering_mod_project_questions).json 判断该读哪个目录。',
+        '2. 在没做目录判断前，不要盲搜整个数据库目录。'
       ].join('\n')
   );
 
@@ -307,7 +324,7 @@ export async function loadConfig(configPath) {
         '如果目标类型是聊天 prompt，且主题仍与 Mindustry / mdt / 牡丹亭 / MindustryX 相关，最终 prompt 应尽量保留“人格要求”和“注意点”两个小节。',
         '同时保留这些表达约束：说话像真人；不要说“接住你”“我接一下”“给你接一下”这类无用话；不要说“让我先找找”“等下我找找”“我先找一下”“我先看看再说”这类拖时间口头禅；尽量在当前这轮满足提问者需求，不要故意拆成两次。',
         '还要保留一条硬约束：单次回复默认不超过 30 字；只有在确实需要回复源码、代码片段、配置片段或逐行解释源码时，才允许超过 30 字。',
-        '如果主题涉及模组、插件、脚本、源码、仓库、项目目录、构建、编译、报错定位或服务端脚本，还要保留一条规则：回答前先看 codex 根目录文件夹名称，并参考 codex-folder-index(MustRead_before_answering_mod_project_questions).json 判断该读哪个目录。',
+        '如果主题涉及模组、插件、脚本、源码、仓库、项目目录、构建、编译、报错定位或服务端脚本，还要保留一条规则：回答前先看数据库根目录文件夹名称，并参考 codex-folder-index(MustRead_before_answering_mod_project_questions).json 判断该读哪个目录。',
         '输出必须是 JSON，字段：approved(boolean), prompt(string), reason(string)。reason 尽量不超过30字。如果可接受，就返回精炼后的最终 prompt；如果不可接受，approved=false。'
       ].join('\n')
   );
@@ -361,10 +378,20 @@ export async function loadConfig(configPath) {
       port: Number(raw?.codexBridge?.port ?? 3186) || 3186,
       token: String(raw?.codexBridge?.token ?? '').trim()
     },
+    paths: {
+      databaseRoot: sharedDatabaseRoot
+    },
     issueRepair: {
       enabled: raw?.issueRepair?.enabled ?? true,
       ownerName: String(raw?.issueRepair?.ownerName ?? 'DeterMination').trim() || 'DeterMination',
-      codexRoot: resolveMaybeRelative(configDir, raw?.issueRepair?.codexRoot ?? raw?.qa?.answer?.codexRoot ?? '../codex'),
+      databaseRoot: resolveMaybeRelative(
+        configDir,
+        raw?.issueRepair?.databaseRoot ?? raw?.issueRepair?.codexRoot ?? sharedDatabaseRoot
+      ),
+      codexRoot: resolveMaybeRelative(
+        configDir,
+        raw?.issueRepair?.databaseRoot ?? raw?.issueRepair?.codexRoot ?? sharedDatabaseRoot
+      ),
       codexCommand: String(raw?.issueRepair?.codexCommand ?? 'codex').trim() || 'codex',
       model: String(raw?.issueRepair?.model ?? 'gpt-5.4-high').trim() || 'gpt-5.4-high',
       classifyModel: String(raw?.issueRepair?.classifyModel ?? 'gpt-5.4-mini').trim() || 'gpt-5.4-mini',
@@ -431,21 +458,30 @@ export async function loadConfig(configPath) {
         contextWindowMessages: raw?.qa?.answer?.contextWindowMessages ?? 30,
         systemPromptFile: answerPromptFile,
         systemPrompt: answerPrompt,
-        codexRoot: resolveQaAnswerPath(configDir, raw?.qa?.answer?.codexRoot ?? answerRaw?.codexRoot, '../codex'),
+        databaseRoot: resolveQaAnswerPath(
+          configDir,
+          raw?.qa?.answer?.databaseRoot ?? raw?.qa?.answer?.codexRoot ?? answerRaw?.databaseRoot ?? answerRaw?.codexRoot,
+          sharedDatabaseRoot
+        ),
+        codexRoot: resolveQaAnswerPath(
+          configDir,
+          raw?.qa?.answer?.databaseRoot ?? raw?.qa?.answer?.codexRoot ?? answerRaw?.databaseRoot ?? answerRaw?.codexRoot,
+          sharedDatabaseRoot
+        ),
         localBuildRoot: resolveQaAnswerPath(
           configDir,
           raw?.qa?.answer?.localBuildRoot ?? answerRaw?.localBuildRoot,
-          path.join(raw?.qa?.answer?.codexRoot ?? answerRaw?.codexRoot ?? '../codex', 'builds')
+          path.join(sharedDatabaseRoot ?? '../codex', 'builds')
         ),
         vanillaRepoRoot: resolveQaAnswerPath(
           configDir,
           raw?.qa?.answer?.vanillaRepoRoot ?? answerRaw?.vanillaRepoRoot,
-          path.join(raw?.qa?.answer?.codexRoot ?? answerRaw?.codexRoot ?? '../codex', 'Mindustry-master')
+          path.join(sharedDatabaseRoot ?? '../codex', 'Mindustry-master')
         ),
         xRepoRoot: resolveQaAnswerPath(
           configDir,
           raw?.qa?.answer?.xRepoRoot ?? answerRaw?.xRepoRoot,
-          path.join(raw?.qa?.answer?.codexRoot ?? answerRaw?.codexRoot ?? '../codex', 'MindustryX-main')
+          path.join(sharedDatabaseRoot ?? '../codex', 'MindustryX-main')
         ),
         promptImageRoot: resolveMaybeRelative(configDir, raw?.qa?.answer?.promptImageRoot ?? './prompts'),
         memoryFile: resolveMaybeRelative(configDir, raw?.qa?.answer?.memoryFile ?? './data/cain-longterm-memory.txt'),
@@ -461,7 +497,7 @@ export async function loadConfig(configPath) {
           token: String(raw?.qa?.answer?.github?.token ?? process.env.GITHUB_TOKEN ?? '').trim(),
           requestTimeoutMs: raw?.qa?.answer?.github?.requestTimeoutMs ?? 15000
         },
-        rag: normalizeRagConfig(raw?.qa?.answer ?? answerRaw, configDir)
+        rag: normalizeRagConfig(raw?.qa?.answer ?? answerRaw, configDir, sharedDatabaseRoot)
       },
       topicClosure: {
         model: raw?.qa?.topicClosure?.model ?? 'gpt-5.4-mini',
