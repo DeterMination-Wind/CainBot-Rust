@@ -1,6 +1,9 @@
 mod app;
 mod config;
+mod commands;
+mod event_utils;
 mod logger;
+mod message_attachment_reader;
 mod napcat_client;
 mod openai_chat_client;
 mod openai_translator;
