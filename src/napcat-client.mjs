@@ -31,9 +31,7 @@ function isBenignGroupSystemMessageTimeoutError(error) {
   }
   return message.includes('get_group_system_msg')
     && message.includes('Timeout')
-    && message.includes('getSingleScreenNotifies')
-    && message.includes('"result": 0')
-    && message.includes('"errMsg": "success"');
+    && message.includes('getSingleScreenNotifies');
 }
 
 function flattenMessageText(message) {
