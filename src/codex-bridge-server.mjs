@@ -118,6 +118,12 @@ function buildOutgoingMessage(payload = {}) {
       ?? payload?.mentions
       ?? payload?.atUserId
   );
+  const imagePaths = normalizeStringArray(
+    payload?.imagePaths
+      ?? payload?.images
+      ?? payload?.imagePath
+      ?? payload?.image
+  );
 
   const segments = [];
   if (replyToMessageId) {
@@ -147,8 +153,17 @@ function buildOutgoingMessage(payload = {}) {
     });
   }
 
+  imagePaths.forEach((imagePath) => {
+    segments.push({
+      type: 'image',
+      data: {
+        file: imagePath
+      }
+    });
+  });
+
   if (segments.length === 0) {
-    throw new Error('消息内容不能为空；请提供 text/message，或提供 atUserIds');
+    throw new Error('消息内容不能为空；请提供 text/message、imagePath/imagePaths，或提供 atUserIds');
   }
   if (segments.length === 1 && segments[0]?.type === 'text') {
     return segments[0].data.text;
@@ -247,24 +262,78 @@ function readRequestBody(req, maxBytes = 64 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let total = 0;
+    let settled = false;
 
-    req.on('data', (chunk) => {
+    const cleanup = () => {
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('error', onError);
+      req.off('aborted', onAborted);
+      req.off('close', onClose);
+    };
+
+    const rejectOnce = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
+    const resolveOnce = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+
+    const onData = (chunk) => {
       total += chunk.length;
       if (total > maxBytes) {
-        reject(new Error(`请求体过大，超过限制 ${maxBytes} bytes`));
+        rejectOnce(new Error(`请求体过大，超过限制 ${maxBytes} bytes`));
         req.destroy();
         return;
       }
       chunks.push(chunk);
-    });
-    req.on('end', () => {
-      resolve(Buffer.concat(chunks).toString('utf8'));
-    });
-    req.on('error', reject);
+    };
+
+    const onEnd = () => {
+      resolveOnce(Buffer.concat(chunks).toString('utf8'));
+    };
+
+    const onError = (error) => {
+      rejectOnce(error);
+    };
+
+    const onAborted = () => {
+      const error = new Error('This operation was aborted');
+      error.name = 'AbortError';
+      rejectOnce(error);
+    };
+
+    const onClose = () => {
+      if (!settled && req.complete !== true) {
+        const error = new Error('This operation was aborted');
+        error.name = 'AbortError';
+        rejectOnce(error);
+      }
+    };
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+    req.on('aborted', onAborted);
+    req.on('close', onClose);
   });
 }
 
 function sendJson(res, statusCode, payload) {
+  if (res.destroyed || res.writableEnded) {
+    return;
+  }
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store'
@@ -283,6 +352,19 @@ function getRemoteAddress(req) {
 
 function isLoopbackAddress(address) {
   return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(String(address ?? '').trim());
+}
+
+function isAbortLikeError(error) {
+  if (!error) {
+    return false;
+  }
+  const name = String(error?.name ?? '').trim();
+  const message = String(error?.message ?? error ?? '').trim();
+  return name === 'AbortError'
+    || name === 'TimeoutError'
+    || /this operation was aborted/i.test(message)
+    || /request aborted/i.test(message)
+    || /socket hang up/i.test(message);
 }
 
 export class CodexBridgeServer {
@@ -402,6 +484,15 @@ export class CodexBridgeServer {
         error: '未找到接口'
       });
     } catch (error) {
+      if (isAbortLikeError(error)) {
+        if (!res.destroyed && !res.writableEnded) {
+          sendJson(res, 499, {
+            ok: false,
+            error: '客户端已取消请求'
+          });
+        }
+        return;
+      }
       this.logger.warn(`Codex 文件桥请求处理失败：${error.message}`);
       return sendJson(res, 500, {
         ok: false,
