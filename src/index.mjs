@@ -1050,10 +1050,13 @@ async function handleCommand(params) {
     command,
     context,
     event,
+    logger,
     napcatClient,
+    qaClient,
     chatSessionManager,
     translator,
-    msavMapAnalyzer
+    msavMapAnalyzer,
+    groupFileDownloadManager
   } = params;
 
   switch (command.name) {
@@ -1857,11 +1860,14 @@ async function main() {
           command,
           context,
           event,
+          logger,
           napcatClient,
+          qaClient,
           chatSessionManager,
           translator,
           runtimeConfigStore,
-          msavMapAnalyzer
+          msavMapAnalyzer,
+          groupFileDownloadManager
         });
         return;
       }
