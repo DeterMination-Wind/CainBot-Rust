@@ -173,14 +173,16 @@ impl AppRuntime {
             None
         };
 
-        logger.warn("业务层仍在迁移：文件下载、msav、issueRepair、codex bridge 还未接入。").await;
+        logger
+            .warn("业务层仍在迁移：当前已接入 codex bridge、issueRepair 和文件下载兼容 worker；msav 与纯 Rust 业务重写尚未完成。")
+            .await;
 
         if !config.bot.owner_user_id.trim().is_empty() {
             let _ = napcat_client
                 .send_private_message(
                     &config.bot.owner_user_id,
                     format!(
-                        "Cain Rust 运行时已启动。\n当前仅接管基础层，业务层迁移进行中。\n配置：{}",
+                        "Cain Rust 运行时已启动。\n当前已接管主事件循环，并接入 codex bridge、issueRepair、文件下载兼容 worker；其余业务层迁移仍在进行中。\n配置：{}",
                         loaded.config_path.display()
                     ),
                 )
