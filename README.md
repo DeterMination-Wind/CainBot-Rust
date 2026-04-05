@@ -54,7 +54,7 @@ CainBot 的 Rust 运行时仓库。这个仓库用于独立发布 CainBot 的 Ru
 ### 获取源码
 
 ```bash
-git clone https://github.com/Wind-Determination/CainBot-Rust.git
+git clone https://github.com/DeterMination-Wind/CainBot-Rust.git
 cd CainBot-Rust
 ```
 
@@ -106,4 +106,3 @@ CainBot-Rust/
 ## 许可证
 
 [AGPL-3.0](LICENSE)
-
