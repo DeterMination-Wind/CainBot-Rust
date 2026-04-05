@@ -30,6 +30,23 @@ async function readPromptFile(promptFile, fallbackText) {
 }
 
 function normalizeRagRoots(rawAnswer, configDir) {
+  const appendUniqueRoots = (primary, extras = []) => {
+    const merged = Array.isArray(primary) ? primary.slice() : [];
+    const seen = new Set(merged.map((item) => String(item?.path ?? '').trim().toLowerCase()).filter(Boolean));
+    for (const item of Array.isArray(extras) ? extras : []) {
+      const normalizedPath = String(item?.path ?? '').trim().toLowerCase();
+      if (!normalizedPath || seen.has(normalizedPath)) {
+        continue;
+      }
+      seen.add(normalizedPath);
+      merged.push(item);
+    }
+    return merged;
+  };
+
+  const bundledDocsRoot = rawAnswer?.rag?.includeBundledLearnMindustryMod === false
+    ? null
+    : resolveMaybeRelative(configDir, './data/knowledge-sources/extracted/learn-mindustry-mod.github.io-master/docs');
   const configuredRoots = Array.isArray(rawAnswer?.rag?.roots) ? rawAnswer.rag.roots : [];
   const normalized = configuredRoots
     .map((item, index) => {
@@ -54,17 +71,32 @@ function normalizeRagRoots(rawAnswer, configDir) {
     .filter(Boolean);
 
   if (normalized.length > 0) {
-    return normalized;
+    return appendUniqueRoots(
+      normalized,
+      bundledDocsRoot
+        ? [{
+            alias: 'learn-mindustry-mod',
+            path: bundledDocsRoot
+          }]
+        : []
+    );
   }
 
   const defaultRoot = resolveMaybeRelative(configDir, rawAnswer?.codexRoot ?? '../codex');
-  if (!defaultRoot) {
-    return [];
+  const defaults = [];
+  if (defaultRoot) {
+    defaults.push({
+      alias: 'codex',
+      path: defaultRoot
+    });
   }
-  return [{
-    alias: 'codex',
-    path: defaultRoot
-  }];
+  if (bundledDocsRoot) {
+    defaults.push({
+      alias: 'learn-mindustry-mod',
+      path: bundledDocsRoot
+    });
+  }
+  return defaults;
 }
 
 function normalizeRagConfig(rawAnswer, configDir) {
@@ -73,10 +105,12 @@ function normalizeRagConfig(rawAnswer, configDir) {
     autoInject: rawAnswer?.rag?.autoInject ?? true,
     timeoutMs: rawAnswer?.rag?.timeoutMs ?? 2500,
     maxResults: rawAnswer?.rag?.maxResults ?? 6,
+    maxIndexedResults: rawAnswer?.rag?.maxIndexedResults ?? 8,
     maxPathResults: rawAnswer?.rag?.maxPathResults ?? 4,
     maxContentResults: rawAnswer?.rag?.maxContentResults ?? 6,
     maxFileSizeBytes: rawAnswer?.rag?.maxFileSizeBytes ?? 1048576,
     maxPromptChars: rawAnswer?.rag?.maxPromptChars ?? 4200,
+    indexFileName: String(rawAnswer?.rag?.indexFileName ?? '.cain-rag-index.json'),
     roots: normalizeRagRoots(rawAnswer, configDir)
   };
 }
@@ -196,7 +230,7 @@ export async function loadConfig(configPath) {
       eventBaseUrl: raw?.napcat?.eventBaseUrl ?? raw?.napcat?.baseUrl ?? 'http://127.0.0.1:3000',
       eventPath: raw?.napcat?.eventPath ?? '/_events',
       requestTimeoutMs: raw?.napcat?.requestTimeoutMs ?? 20000,
-      forwardThresholdChars: raw?.napcat?.forwardThresholdChars ?? 300,
+      forwardThresholdChars: raw?.napcat?.forwardThresholdChars ?? 100,
       maxConcurrentEvents: raw?.napcat?.maxConcurrentEvents ?? 24,
       uploadRetryAttempts: raw?.napcat?.uploadRetryAttempts ?? 6,
       uploadRetryDelayMs: raw?.napcat?.uploadRetryDelayMs ?? 2500,

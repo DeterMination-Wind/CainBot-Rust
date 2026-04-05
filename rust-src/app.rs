@@ -88,6 +88,8 @@ impl AppRuntime {
                 headers: config.napcat.headers.clone(),
                 max_concurrent_events: config.napcat.max_concurrent_events,
                 forward_threshold_chars: config.napcat.forward_threshold_chars,
+                forward_nickname: config.bot.display_name.clone(),
+                forward_user_id: config.bot.owner_user_id.clone(),
                 upload_retry_attempts: config.napcat.upload_retry_attempts,
                 upload_retry_delay_ms: config.napcat.upload_retry_delay_ms,
                 upload_stable_wait_ms: config.napcat.upload_stable_wait_ms,
@@ -246,9 +248,16 @@ impl AppRuntime {
                 )
                 .await
                 {
-                    invite_poll_logger
-                        .warn(format!("轮询待处理群邀请失败：{error:#}"))
-                        .await;
+                    let message = error.to_string();
+                    if message.contains("NapCat API get_group_system_msg 冷却中") {
+                        invite_poll_logger
+                            .info(format!("群邀请轮询冷却中：{message}"))
+                            .await;
+                    } else {
+                        invite_poll_logger
+                            .warn(format!("轮询待处理群邀请失败：{error:#}"))
+                            .await;
+                    }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(GROUP_INVITE_POLL_INTERVAL_MS)).await;
             }
@@ -1203,6 +1212,20 @@ async fn send_chat_result_if_present(
                 .reply_text(&context.message_type, target_id, reply_message_id, reason)
                 .await?;
         }
+        return Ok(());
+    }
+
+    if result.notice == "review-suppressed" {
+        return Ok(());
+    }
+
+    if result.notice == "low-information-reviewed" {
+        if result.text.trim().is_empty() {
+            return Ok(());
+        }
+        napcat_client
+            .reply_text(&context.message_type, target_id, reply_message_id, &result.text)
+            .await?;
         return Ok(());
     }
 

@@ -28,6 +28,7 @@ const TEXT_FILE_EXTENSIONS = new Set([
   '.hpp', '.cs', '.sh', '.ps1', '.bat', '.cmd', '.sql', '.csv', '.env', '.gitignore', '.gitattributes',
   '.vue', '.svelte', '.lua'
 ]);
+const DEFAULT_RAG_INDEX_FILE_NAME = '.cain-rag-index.json';
 
 function clampInteger(value, fallback, min, max) {
   const numeric = Number(value);
@@ -120,6 +121,98 @@ function scoreSnippet(snippet, query, tokens) {
   return score;
 }
 
+function truncateSnippet(snippet, maxChars = 260) {
+  const normalized = normalizeText(snippet);
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxChars - 1)}…`;
+}
+
+function countTokenHits(text, token) {
+  const normalizedText = normalizeText(text).toLowerCase();
+  const normalizedToken = normalizeText(token).toLowerCase();
+  if (!normalizedText || !normalizedToken) {
+    return 0;
+  }
+  let hits = 0;
+  let cursor = 0;
+  while (cursor < normalizedText.length) {
+    const index = normalizedText.indexOf(normalizedToken, cursor);
+    if (index < 0) {
+      break;
+    }
+    hits += 1;
+    cursor = index + normalizedToken.length;
+    if (hits >= 4) {
+      break;
+    }
+  }
+  return hits;
+}
+
+function normalizeChunkPath(chunk) {
+  return String(chunk?.path ?? '').replace(/\\/g, '/').replace(/^\.\/+/, '').trim();
+}
+
+function scoreIndexedChunk(chunk, query, tokens) {
+  const normalizedQuery = normalizeText(query).toLowerCase();
+  const pathText = normalizeText([
+    chunk?.path,
+    chunk?.title,
+    chunk?.section,
+    ...(Array.isArray(chunk?.headings) ? chunk.headings : [])
+  ].filter(Boolean).join(' ')).toLowerCase();
+  const bodyText = normalizeText([
+    chunk?.summary,
+    chunk?.text
+  ].filter(Boolean).join(' ')).toLowerCase();
+
+  let score = scorePathMatch(normalizeChunkPath(chunk), query, tokens);
+  let matchedTokens = 0;
+  if (normalizedQuery && pathText.includes(normalizedQuery)) {
+    score += 180;
+  }
+  if (normalizedQuery && bodyText.includes(normalizedQuery)) {
+    score += 150;
+  }
+  for (const token of tokens) {
+    const pathHits = countTokenHits(pathText, token);
+    const bodyHits = countTokenHits(bodyText, token);
+    if (pathHits > 0) {
+      matchedTokens += 1;
+      score += Math.max(32, Math.min(76, token.length * 5));
+      score += Math.min(pathHits, 2) * 10;
+    }
+    if (pathHits === 0 && bodyHits > 0) {
+      matchedTokens += 1;
+    }
+    if (bodyHits > 0) {
+      score += Math.max(10, Math.min(26, token.length * 3));
+      score += Math.min(bodyHits, 2) * 6;
+    }
+  }
+  if (tokens.length >= 2 && matchedTokens < 2 && !(normalizedQuery && (pathText.includes(normalizedQuery) || bodyText.includes(normalizedQuery)))) {
+    return score / 3;
+  }
+  score += matchedTokens * 42;
+  if (tokens.length > 1 && tokens.every((token) => pathText.includes(token) || bodyText.includes(token))) {
+    score += 80;
+  }
+  score -= Math.max(0, bodyText.length - 1200) / 80;
+  return score;
+}
+
+function formatIndexedSnippet(chunk) {
+  const prefix = [chunk?.title, chunk?.section]
+    .filter(Boolean)
+    .join(' / ');
+  const body = truncateSnippet(chunk?.summary || chunk?.text || '', 260);
+  return prefix && body
+    ? `${prefix}：${body}`
+    : prefix || body || '(无摘要)';
+}
+
 async function safeReadHead(filePath, maxLines = 40, maxChars = 900) {
   const content = await fs.readFile(filePath, 'utf8');
   const lines = content
@@ -141,10 +234,13 @@ export class LocalRagRetriever {
     this.autoInject = config?.rag?.autoInject !== false;
     this.timeoutMs = clampInteger(config?.rag?.timeoutMs, 2500, 500, 15000);
     this.maxResults = clampInteger(config?.rag?.maxResults, 6, 1, 12);
+    this.maxIndexedResults = clampInteger(config?.rag?.maxIndexedResults, 8, 0, 20);
     this.maxPathResults = clampInteger(config?.rag?.maxPathResults, 4, 0, 8);
     this.maxContentResults = clampInteger(config?.rag?.maxContentResults, 6, 0, 12);
     this.maxFileSizeBytes = clampInteger(config?.rag?.maxFileSizeBytes, 1024 * 1024, 4096, 8 * 1024 * 1024);
     this.maxPromptChars = clampInteger(config?.rag?.maxPromptChars, 4200, 512, 12000);
+    this.indexFileName = normalizeText(config?.rag?.indexFileName || DEFAULT_RAG_INDEX_FILE_NAME) || DEFAULT_RAG_INDEX_FILE_NAME;
+    this.indexCache = new Map();
     this.roots = Array.isArray(config?.rag?.roots) ? config.rag.roots.map((item) => ({
       alias: normalizeText(item?.alias || path.basename(String(item?.path ?? '')) || 'knowledge'),
       path: path.resolve(String(item?.path ?? ''))
@@ -196,11 +292,12 @@ export class LocalRagRetriever {
     }
 
     try {
-      const [pathMatches, contentMatches] = await Promise.all([
+      const [indexedMatches, pathMatches, contentMatches] = await Promise.all([
+        this.#searchIndexedChunks(availableRoots, normalizedQuery, tokens),
         this.#searchPaths(availableRoots, normalizedQuery, tokens),
         this.#searchContent(availableRoots, normalizedQuery, tokens)
       ]);
-      const results = this.#mergeResults(pathMatches, contentMatches).slice(0, this.maxResults);
+      const results = this.#mergeResults(indexedMatches, pathMatches, contentMatches).slice(0, this.maxResults);
       return {
         query: normalizedQuery,
         results,
@@ -220,10 +317,17 @@ export class LocalRagRetriever {
     if (!query) {
       return false;
     }
+    const identifierMatches = query.match(/\b[A-Za-z_][A-Za-z0-9_.-]{2,}\b/g) ?? [];
     if (query.length >= 80) {
       return true;
     }
     if (/[\\/]/.test(query)) {
+      return true;
+    }
+    if (identifierMatches.length >= 2) {
+      return true;
+    }
+    if (/`[^`]+`/.test(query)) {
       return true;
     }
     if (/\b[a-z0-9_.-]+\.(json|jsonc|ya?ml|toml|ini|properties|java|kt|kts|js|mjs|cjs|ts|tsx|jsx|cs|py|cpp|c|h|md|txt)\b/i.test(query)) {
@@ -232,7 +336,40 @@ export class LocalRagRetriever {
     if (/[#{}();=<>]|=>|::/.test(query)) {
       return true;
     }
-    return /(源码|代码|项目|仓库|文件|目录|路径|配置|compose|docker|json|yaml|yml|toml|接口|函数|方法|类|脚本|报错|错误|异常|日志|堆栈|mod|mindustry|地图|prompt|模型|技能|skill)/i.test(query);
+    return /(源码|代码|项目|仓库|文件|目录|路径|配置|compose|docker|json|yaml|yml|toml|接口|函数|方法|类|脚本|报错|错误|异常|日志|堆栈|mod|mindustry|地图|prompt|模型|技能|skill|方块|建筑|工厂|炮塔|单位|液体|渲染|贴图|事件|触发器|教程|模组开发|进度|效率)/i.test(query);
+  }
+
+  async #searchIndexedChunks(roots, query, tokens) {
+    if (this.maxIndexedResults <= 0) {
+      return [];
+    }
+
+    const matches = [];
+    for (const root of roots) {
+      const index = await this.#loadRootIndex(root.path);
+      if (!index || !Array.isArray(index.chunks) || index.chunks.length === 0) {
+        continue;
+      }
+      for (const chunk of index.chunks) {
+        const score = scoreIndexedChunk(chunk, query, tokens);
+        if (score < 38) {
+          continue;
+        }
+        const chunkPath = normalizeChunkPath(chunk);
+        matches.push({
+          source: 'index',
+          alias: root.alias,
+          path: chunk?.anchor ? `${chunkPath}#${chunk.anchor}` : chunkPath,
+          line: Number(chunk?.startLine ?? 0) || null,
+          score,
+          snippet: formatIndexedSnippet(chunk)
+        });
+      }
+    }
+
+    return matches
+      .sort((left, right) => right.score - left.score || (left.line ?? 0) - (right.line ?? 0) || left.path.localeCompare(right.path, 'zh-CN'))
+      .slice(0, this.maxIndexedResults);
   }
 
   async #searchPaths(roots, query, tokens) {
@@ -268,6 +405,9 @@ export class LocalRagRetriever {
   async #walkPathCandidates(root, currentDir, query, tokens, results) {
     const dirents = await fs.readdir(currentDir, { withFileTypes: true }).catch(() => []);
     for (const entry of dirents) {
+      if (entry.name === this.indexFileName) {
+        continue;
+      }
       const fullPath = path.join(currentDir, entry.name);
       const relativePath = relativeDisplayPath(root.path, fullPath);
       if (entry.isDirectory()) {
@@ -324,6 +464,7 @@ export class LocalRagRetriever {
       '-g', '!**/build/**',
       '-g', '!**/out/**',
       '-g', '!**/.next/**',
+      '-g', `!**/${this.indexFileName}`,
       pattern,
       ...roots.map((item) => item.path)
     ];
@@ -369,8 +510,62 @@ export class LocalRagRetriever {
     }
 
     return results
-      .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path, 'zh-CN'))
+      .sort((left, right) => right.score - left.score || (left.line ?? 0) - (right.line ?? 0) || left.path.localeCompare(right.path, 'zh-CN'))
       .slice(0, this.maxContentResults);
+  }
+
+  async #loadRootIndex(rootPath) {
+    const indexPath = path.join(rootPath, this.indexFileName);
+    let stat;
+    try {
+      stat = await fs.stat(indexPath);
+    } catch {
+      return null;
+    }
+
+    const cacheKey = indexPath.toLowerCase();
+    const cached = this.indexCache.get(cacheKey);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      return cached.data;
+    }
+
+    try {
+      const parsed = JSON.parse(await fs.readFile(indexPath, 'utf8'));
+      const chunks = Array.isArray(parsed?.chunks)
+        ? parsed.chunks
+            .map((chunk) => ({
+              path: normalizeChunkPath(chunk),
+              title: normalizeText(chunk?.title),
+              section: normalizeText(chunk?.section),
+              headings: Array.isArray(chunk?.headings)
+                ? chunk.headings.map((item) => normalizeText(item)).filter(Boolean)
+                : [],
+              anchor: normalizeText(chunk?.anchor),
+              startLine: Number(chunk?.startLine ?? 0) || null,
+              text: String(chunk?.text ?? ''),
+              summary: String(chunk?.summary ?? '')
+            }))
+            .filter((chunk) => chunk.path && (chunk.text || chunk.summary))
+        : [];
+      const data = {
+        version: Number(parsed?.version ?? 0) || 0,
+        chunks
+      };
+      this.indexCache.set(cacheKey, {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        data
+      });
+      return data;
+    } catch (error) {
+      this.logger?.warn?.(`读取 RAG 索引失败：${indexPath} | ${error.message}`);
+      this.indexCache.set(cacheKey, {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        data: null
+      });
+      return null;
+    }
   }
 
   async #runRipgrep(args) {
@@ -422,18 +617,20 @@ export class LocalRagRetriever {
     });
   }
 
-  #mergeResults(pathMatches, contentMatches) {
+  #mergeResults(...resultGroups) {
     const merged = [];
     const seen = new Set();
-    for (const item of [...contentMatches, ...pathMatches]) {
-      const key = `${item.source}|${item.alias}|${item.path}|${item.line ?? 0}`;
+    for (const item of resultGroups.flat()) {
+      const key = item.source === 'index'
+        ? `${item.source}|${item.alias}|${item.path}`
+        : `${item.source}|${item.alias}|${item.path}|${item.line ?? 0}`;
       if (seen.has(key)) {
         continue;
       }
       seen.add(key);
       merged.push(item);
     }
-    return merged.sort((left, right) => right.score - left.score || left.path.localeCompare(right.path, 'zh-CN'));
+    return merged.sort((left, right) => right.score - left.score || (left.line ?? 0) - (right.line ?? 0) || left.path.localeCompare(right.path, 'zh-CN'));
   }
 
   #formatPrompt(query, results) {

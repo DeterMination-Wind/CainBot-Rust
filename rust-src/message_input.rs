@@ -35,6 +35,7 @@ pub struct ChatRuntimeContext {
     pub sender_name: String,
     pub timeline_text: String,
     pub current_message_id: String,
+    pub current_message_seq: String,
     pub current_time: i64,
 }
 
@@ -204,6 +205,10 @@ pub async fn build_chat_input(
             timeline_text,
             current_message_id: event
                 .get("message_id")
+                .map(value_to_compact_string)
+                .unwrap_or_default(),
+            current_message_seq: event
+                .get("message_seq")
                 .map(value_to_compact_string)
                 .unwrap_or_default(),
             current_time: event.get("time").and_then(Value::as_i64).unwrap_or_default(),

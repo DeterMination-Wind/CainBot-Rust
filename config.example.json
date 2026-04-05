@@ -4,7 +4,7 @@
     "eventBaseUrl": "http://127.0.0.1:3000",
     "eventPath": "/_events",
     "requestTimeoutMs": 20000,
-    "forwardThresholdChars": 300,
+    "forwardThresholdChars": 100,
     "maxConcurrentEvents": 24,
     "uploadRetryAttempts": 6,
     "uploadRetryDelayMs": 2500,
@@ -110,14 +110,21 @@
         "autoInject": true,
         "timeoutMs": 2500,
         "maxResults": 6,
+        "maxIndexedResults": 8,
         "maxPathResults": 4,
         "maxContentResults": 6,
         "maxFileSizeBytes": 1048576,
         "maxPromptChars": 4200,
+        "indexFileName": ".cain-rag-index.json",
+        "includeBundledLearnMindustryMod": true,
         "roots": [
           {
             "alias": "codex",
             "path": "../codex"
+          },
+          {
+            "alias": "learn-mindustry-mod",
+            "path": "./data/knowledge-sources/extracted/learn-mindustry-mod.github.io-master/docs"
           }
         ]
       }

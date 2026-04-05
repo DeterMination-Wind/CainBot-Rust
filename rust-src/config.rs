@@ -257,7 +257,7 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
             request_timeout_ms: get_i64(&raw, &["napcat", "requestTimeoutMs"]).unwrap_or(20_000).max(1) as u64,
             max_concurrent_events: get_i64(&raw, &["napcat", "maxConcurrentEvents"]).unwrap_or(24).max(1) as usize,
             headers: get_object_strings(&raw, &["napcat", "headers"]),
-            forward_threshold_chars: get_i64(&raw, &["napcat", "forwardThresholdChars"]).unwrap_or(300).max(50) as usize,
+            forward_threshold_chars: get_i64(&raw, &["napcat", "forwardThresholdChars"]).unwrap_or(100).max(1) as usize,
             upload_retry_attempts: get_i64(&raw, &["napcat", "uploadRetryAttempts"]).unwrap_or(6).max(1) as usize,
             upload_retry_delay_ms: get_i64(&raw, &["napcat", "uploadRetryDelayMs"]).unwrap_or(2_500).max(200) as u64,
             upload_stable_wait_ms: get_i64(&raw, &["napcat", "uploadStableWaitMs"]).unwrap_or(1_500).max(200) as u64,

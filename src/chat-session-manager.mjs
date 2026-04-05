@@ -200,12 +200,72 @@ function normalizeHallucinationCheckDecision(raw, fallbackAnswer = '') {
   };
 }
 
+function normalizeLowInformationReviewDecision(raw) {
+  const parsed = parseJsonObject(raw, {});
+  return {
+    approved: parsed?.allow !== false && parsed?.approved !== false,
+    feedback: String(parsed?.feedback ?? parsed?.fallback ?? '').trim(),
+    reason: String(parsed?.reason ?? '').trim(),
+    startGroupFileDownload: parsed?.start_group_file_download === true || parsed?.startGroupFileDownload === true,
+    requestText: String(parsed?.request_text ?? parsed?.requestText ?? '').trim()
+  };
+}
+
+function summarizeReviewImageContent(item) {
+  const imageUrl = typeof item?.image_url === 'string'
+    ? item.image_url
+    : item?.image_url?.url;
+  const normalizedUrl = String(imageUrl ?? '').trim();
+  if (!normalizedUrl) {
+    return '[附带图片]';
+  }
+  if (/^data:/i.test(normalizedUrl)) {
+    return '[附带图片:data-url]';
+  }
+  if (/^https?:\/\//i.test(normalizedUrl)) {
+    try {
+      const parsed = new URL(normalizedUrl);
+      return `[附带图片:${parsed.host}${parsed.pathname}]`;
+    } catch {
+      return '[附带图片:http-url]';
+    }
+  }
+  return '[附带图片]';
+}
+
+function stringifyReviewContentPart(item) {
+  if (typeof item === 'string') {
+    return item.trim();
+  }
+  if (!item || typeof item !== 'object') {
+    return '';
+  }
+  if (item.type === 'text' || item.type === 'input_text' || item.type === 'output_text') {
+    return String(item.text ?? '').trim();
+  }
+  if (item.type === 'image_url' || item.type === 'input_image') {
+    return summarizeReviewImageContent(item);
+  }
+  try {
+    return JSON.stringify(item, null, 2).trim();
+  } catch {
+    return String(item).trim();
+  }
+}
+
 function stringifyReviewMessageContent(content) {
   if (typeof content === 'string') {
     return content.trim();
   }
   if (content == null) {
     return '';
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => stringifyReviewContentPart(item))
+      .filter(Boolean)
+      .join('\n')
+      .trim();
   }
   try {
     return JSON.stringify(content, null, 2).trim();
@@ -286,6 +346,8 @@ function summarizeToolRequest(toolRequest) {
     case 'read_recent_chat_messages':
     case 'read_group_chat_messages':
       return `${tool} count=${toolRequest?.count ?? (tool === 'read_recent_chat_messages' ? 20 : 100)}`;
+    case 'call_fishbot':
+      return `${tool} command=${JSON.stringify(String(toolRequest?.command ?? toolRequest?.text ?? toolRequest?.query ?? '').trim())} historyCount=${toolRequest?.history_count ?? toolRequest?.count ?? 40}`;
     case 'start_group_file_download':
       return `${tool} mode=${JSON.stringify(String(toolRequest?.mode ?? '').trim())} repoChoice=${JSON.stringify(String(toolRequest?.repo_choice ?? '').trim())} version=${JSON.stringify(String(toolRequest?.version_query ?? toolRequest?.version ?? '').trim())} commit=${JSON.stringify(String(toolRequest?.commit_hash ?? toolRequest?.commit ?? toolRequest?.sha ?? '').trim())} platform=${JSON.stringify(String(toolRequest?.platform_hint ?? toolRequest?.platform ?? '').trim())}`;
     case 'read_github_repo_releases':
@@ -325,6 +387,8 @@ function summarizeToolResult(toolResult) {
     case 'read_recent_chat_messages':
     case 'read_group_chat_messages':
       return `${tool} returned=${toolResult?.returnedCount ?? 0} requested=${toolResult?.requestedCount ?? 0}`;
+    case 'call_fishbot':
+      return `${tool} command=${JSON.stringify(String(toolResult?.command ?? '').trim())} returned=${toolResult?.returnedCount ?? 0} fishbotMessages=${toolResult?.fishbot_message_count ?? 0}`;
     case 'start_group_file_download':
       return `${tool} started=${toolResult?.started === true} state=${toolResult?.state ?? '(none)'} releaseTag=${toolResult?.release_tag ?? '(none)'}`;
     case 'read_github_repo_releases':
@@ -679,7 +743,8 @@ const ANSWER_QUALITY_GUARD_PROMPT = [
   '4. 宁可明确表示还没定位，也不要输出低信息复述。',
   '5. 只要某个事实能通过工具精确确认，就必须先调工具，不要靠记忆、常识或自行推断硬答。',
   '6. 如果问题是在查英文名、内部 id、对象名、字段名、文件路径、版本 tag、release、提交记录或源码位置，默认先调工具，再组织回答。',
-  '7. Mindustry 问题里出现中文物品名、建筑名、单位名、液体名、状态名、星球名、天气名时，先查 bundle_zh_CN.properties 确认英文名或 id，再继续查 JSON 或源码。'
+  '7. Mindustry 问题里出现中文物品名、建筑名、单位名、液体名、状态名、星球名、天气名时，先查 bundle_zh_CN.properties 确认英文名或 id，再继续查 JSON 或源码。',
+  '8. 如果你需要在最终回复里 @ 某个 QQ 用户，直接输出 <<at:QQ号>>；系统会把它转成真实 at。不要输出 CQ 码。'
 ].join('\n');
 
 function formatJsonSnippet(value, maxChars = 2400) {
@@ -853,7 +918,12 @@ export class ChatSessionManager {
         ...(normalizedInput.runtimeContext ?? {}),
         lookupSeedText
       };
-      const completion = await this.#completeWithReadonlyTools(context, completionRuntimeContext, requestMessages);
+      const completion = await this.#completeWithReadonlyTools(
+        context,
+        completionRuntimeContext,
+        requestMessages,
+        normalizedInput.images
+      );
       const assistantEntry = {
         role: 'assistant',
         kind: completion.notice === 'group-file-download-started' ? 'tool-handoff' : 'answer',
@@ -1130,7 +1200,7 @@ export class ChatSessionManager {
       parts.push(this.localRagRetriever.getPromptInstructions());
     }
     if (this.codexTools && await this.codexTools.isEnabled()) {
-      parts.push(this.codexTools.getPromptInstructions());
+      parts.push(await this.codexTools.getPromptInstructions({ context }));
     }
     return parts.filter(Boolean).join('\n\n');
   }
@@ -1648,13 +1718,14 @@ export class ChatSessionManager {
     };
   }
 
-  async #completeWithReadonlyTools(context, runtimeContext, messages) {
+  async #completeWithReadonlyTools(context, runtimeContext, messages, requestImages = []) {
     const toolEnabled = Boolean(this.codexTools && await this.codexTools.isEnabled());
     const softToolRounds = Number(this.config.answer.maxToolRounds ?? 4) || 4;
     const hardToolRounds = Math.max(softToolRounds, 20);
     const contextBudget = Number(this.config.answer.maxContextChars ?? 80000) || 80000;
     const workingMessages = [...messages];
     const repeatedTruncatedReads = new Map();
+    let fishBotToolCalls = 0;
     const lookupSeedText = String(runtimeContext?.lookupSeedText ?? '').trim();
     const answerStreamSession = runtimeContext?.answerStreamSession && typeof runtimeContext.answerStreamSession === 'object'
       ? runtimeContext.answerStreamSession
@@ -1677,38 +1748,85 @@ export class ChatSessionManager {
       }
     };
 
-    let hallucinationRetried = false;
-
     const finalizeCompletion = async (text = '', notice = '') => {
       const normalizedText = String(text ?? '').trim();
       if (notice || !normalizedText) {
         return { text: normalizedText, notice };
       }
-      const checkResult = await this.#maybeRunHallucinationCheck(
-        context,
-        runtimeContext,
-        [...workingMessages, { role: 'assistant', content: normalizedText }],
-        normalizedText
-      );
-      if (checkResult && typeof checkResult === 'object' && checkResult.hallucinationFeedback && !hallucinationRetried) {
-        hallucinationRetried = true;
-        discardPendingStreamText();
-        this.logger.info(`幻觉检查打回主模型重答：feedback=${checkResult.hallucinationFeedback}`);
-        workingMessages.push({ role: 'assistant', content: normalizedText });
-        workingMessages.push({
-          role: 'user',
-          content: [
-            `系统校对纠偏：你上一条回答被事实校对器打回，原因：${checkResult.hallucinationFeedback}`,
-            '请基于已有的工具结果重新组织回答，去掉无法确认的具体事实。如果确实不确定，就明确说不确定。不要使用 Markdown。'
-          ].join('\n')
-        });
-        const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
-        return { text: String(retryText ?? '').trim() || normalizedText, notice };
+      const maxReviewRepairs = 4;
+      let currentText = normalizedText;
+      let reviewRepairCount = 0;
+
+      while (true) {
+        const lowInformationResult = await this.#maybeRunLowInformationReview(
+          context,
+          runtimeContext,
+          [...workingMessages, { role: 'assistant', content: currentText }],
+          currentText
+        );
+        if (lowInformationResult && typeof lowInformationResult === 'object') {
+          if (lowInformationResult.startGroupFileDownload) {
+            return { text: '', notice: 'group-file-download-started' };
+          }
+          if (lowInformationResult.lowInformationFeedback) {
+            if (reviewRepairCount >= maxReviewRepairs) {
+              this.logger.warn(`低信息检查多次未通过，抑制本次回复：feedback=${lowInformationResult.lowInformationFeedback}`);
+              return { text: '', notice: 'review-suppressed' };
+            }
+            reviewRepairCount += 1;
+            discardPendingStreamText();
+            this.logger.info(`低信息检查打回主模型重答：feedback=${lowInformationResult.lowInformationFeedback}`);
+            workingMessages.push({ role: 'assistant', content: currentText });
+            workingMessages.push({
+              role: 'user',
+              content: [
+                `系统质检纠偏：你上一条回答被低信息质检器打回，原因：${lowInformationResult.lowInformationFeedback}`,
+                '不要复述问题，不要说“还没定位到”“我先去查”“需要更多上下文”“请先读取文件”等空话。',
+                '下一条回答必须满足其一：',
+                '1. 直接给出已经从上下文或工具结果里确认过的具体字段、路径、对象名、数值、结论或可执行步骤；',
+                '2. 如果信息仍不足，就先请求一个只读工具。',
+                '不要使用 Markdown。'
+              ].join('\n')
+            });
+            const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+            currentText = String(retryText ?? '').trim() || currentText;
+            continue;
+          }
+        }
+
+        const checkResult = await this.#maybeRunHallucinationCheck(
+          context,
+          runtimeContext,
+          [...workingMessages, { role: 'assistant', content: currentText }],
+          currentText,
+          requestImages
+        );
+        if (checkResult && typeof checkResult === 'object' && checkResult.hallucinationFeedback) {
+          if (reviewRepairCount >= maxReviewRepairs) {
+            this.logger.warn(`幻觉检查多次未通过，抑制本次回复：feedback=${checkResult.hallucinationFeedback}`);
+            return { text: '', notice: 'review-suppressed' };
+          }
+          reviewRepairCount += 1;
+          discardPendingStreamText();
+          this.logger.info(`幻觉检查打回主模型重答：feedback=${checkResult.hallucinationFeedback}`);
+          workingMessages.push({ role: 'assistant', content: currentText });
+          workingMessages.push({
+            role: 'user',
+            content: [
+              `系统校对纠偏：你上一条回答被事实校对器打回，原因：${checkResult.hallucinationFeedback}`,
+              '请基于已有的工具结果重新组织回答，去掉无法确认的具体事实。如果确实不确定，就明确说不确定。不要使用 Markdown。'
+            ].join('\n')
+          });
+          const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+          currentText = String(retryText ?? '').trim() || currentText;
+          continue;
+        }
+
+        return {
+          text: (typeof checkResult === 'string' ? checkResult : currentText) || currentText,
+          notice: 'low-information-reviewed'
+        };
       }
-      return {
-        text: (typeof checkResult === 'string' ? checkResult : normalizedText) || normalizedText,
-        notice
-      };
     };
 
     const completeDirectAnswer = async (assistantText, reason = '') => {
@@ -1764,6 +1882,9 @@ export class ChatSessionManager {
       }
 
       const toolRequest = toolParsing.calls[0];
+      if (toolRequest.tool === 'call_fishbot' && fishBotToolCalls >= 9) {
+        return await completeDirectAnswer('', '系统提示：本轮鱼鱼工具最多只能调用 9 次；请停止继续发鱼鱼命令，基于现有鱼鱼结果直接回答用户。');
+      }
       const warnings = [];
       const readSignature = toolRequest.tool === 'read_codex_file'
         ? JSON.stringify({
@@ -1795,6 +1916,9 @@ export class ChatSessionManager {
         };
       } else {
         try {
+          if (toolRequest.tool === 'call_fishbot') {
+            fishBotToolCalls += 1;
+          }
           toolResult = await this.codexTools.execute(toolRequest, { context, ...runtimeContext });
         } catch (error) {
           toolResult = {
@@ -1842,7 +1966,78 @@ export class ChatSessionManager {
     return await completeDirectAnswer('', '系统提示：请基于现有信息直接回答用户。');
   }
 
-  async #maybeRunHallucinationCheck(context, runtimeContext, supportingMessages, draftText) {
+  async #maybeRunLowInformationReview(context, runtimeContext, supportingMessages, draftText) {
+    const candidateText = String(draftText ?? '').trim();
+    if (!candidateText) {
+      return draftText;
+    }
+
+    const transcript = buildReviewTranscript(supportingMessages);
+    if (!transcript) {
+      return draftText;
+    }
+
+    const reviewModel = String(this.config.lowInformationFilterModel ?? this.config.answer.model ?? '').trim() || this.config.answer.model;
+    let raw = '';
+    try {
+      raw = await this.chatClient.complete([
+        {
+          role: 'system',
+          content: [
+            '你是 Cain 的低信息回复质检器，只判断这条候选回答能不能直接发给用户。',
+            '如果回复只是复述问题、空泛总结、泛泛而谈、没有新增信息、没有具体定位、没有可执行内容，allow=false。',
+            '当用户在问“怎么改/怎么做/在哪里/哪个字段”时，像“改对应字段”“看对应对象”“去改相关配置”“还没定位到具体字段”“需要先查文档”这类话都算低信息空话。',
+            '如果这类问题本来就应该先读文件或调工具确认，而候选回答里既没有真实读取结果，也没有具体字段、路径、对象名、数值、版本或结论，也一律 allow=false。',
+            '如果用户本意是在要安装包、jar、zip、apk、客户端、release 资产、插件包、服务器插件，而候选回答只是口头说要去处理，但没有真正开始下载流程，则 allow=false，并设置 start_group_file_download=true。',
+            '只输出 JSON：{"allow":boolean,"feedback":"allow=false 时必填，告诉主模型下一条至少要补什么","reason":"简短原因","start_group_file_download":boolean,"request_text":"可选"}',
+            'feedback 不是给用户看的，而是给主模型的纠偏说明；要直接指出缺了哪些具体信息。'
+          ].join('\n')
+        },
+        {
+          role: 'user',
+          content: [
+            `会话类型：${context?.messageType === 'group' ? 'group' : 'private'}`,
+            runtimeContext?.lookupSeedText
+              ? `用户核心问题：${String(runtimeContext.lookupSeedText).trim()}`
+              : '',
+            '以下是候选回答生成时可见的上下文：',
+            transcript,
+            '',
+            '以下是当前候选回答：',
+            candidateText
+          ].filter(Boolean).join('\n\n')
+        }
+      ], {
+        model: reviewModel,
+        temperature: 0.1
+      });
+    } catch (error) {
+      this.logger.warn(`低信息检查失败，回退原回答：${error.message}`);
+      return candidateText;
+    }
+
+    const decision = normalizeLowInformationReviewDecision(raw);
+    if (decision.approved) {
+      this.logger.info(`低信息检查通过：${decision.reason || 'no-reason'}`);
+      return candidateText;
+    }
+
+    if (decision.startGroupFileDownload) {
+      this.logger.info(`低信息检查改为下载流程：${decision.reason || 'no-reason'}`);
+      return {
+        startGroupFileDownload: true,
+        requestText: decision.requestText || String(runtimeContext?.lookupSeedText ?? '').trim()
+      };
+    }
+
+    const feedback = String(decision.feedback || decision.reason || '').trim();
+    this.logger.info(`低信息检查未通过，打回主模型重答：${feedback || 'no-feedback'}`);
+    return {
+      lowInformationFeedback: feedback || '回答缺少已核实的具体信息，请补充真实定位、字段、路径、数值或改用工具。'
+    };
+  }
+
+  async #maybeRunHallucinationCheck(context, runtimeContext, supportingMessages, draftText, reviewImages = []) {
     const reviewConfig = this.config.hallucinationCheck ?? {};
     if (reviewConfig.enabled !== true) {
       return draftText;
@@ -1883,21 +2078,29 @@ export class ChatSessionManager {
       '最终输出必须是 JSON：{"approved":boolean,"feedback":"如果有幻觉，简短说明哪里不对，最多80字；没有则留空","reason":"简短原因"}。'
     ].filter(Boolean).join('\n');
 
+    const normalizedReviewImages = Array.isArray(reviewImages) ? reviewImages.filter(Boolean) : [];
+    const reviewUserContent = [
+      `会话类型：${context?.messageType === 'group' ? 'group' : 'private'}`,
+      runtimeContext?.lookupSeedText
+        ? `用户核心问题：${String(runtimeContext.lookupSeedText).trim()}`
+        : '',
+      normalizedReviewImages.length > 0
+        ? `以下还附带了与主回答相同的 ${normalizedReviewImages.length} 张图片，请直接查看图片内容后再判断候选回答是否有幻觉。`
+        : '',
+      '以下是候选回答生成时可见的上下文：',
+      transcript,
+      '',
+      '以下是当前候选回答：',
+      candidateText
+    ].filter(Boolean).join('\n\n');
+
     const checkMessages = [
       { role: 'system', content: systemContent },
       {
         role: 'user',
-        content: [
-          `会话类型：${context?.messageType === 'group' ? 'group' : 'private'}`,
-          runtimeContext?.lookupSeedText
-            ? `用户核心问题：${String(runtimeContext.lookupSeedText).trim()}`
-            : '',
-          '以下是候选回答生成时可见的上下文：',
-          transcript,
-          '',
-          '以下是当前候选回答：',
-          candidateText
-        ].filter(Boolean).join('\n\n')
+        content: normalizedReviewImages.length > 0
+          ? this.#buildMultimodalUserContent(reviewUserContent, normalizedReviewImages)
+          : reviewUserContent
       }
     ];
 

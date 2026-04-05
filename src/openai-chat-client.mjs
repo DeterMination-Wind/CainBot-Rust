@@ -278,11 +278,16 @@ function normalizeMessageRole(role) {
   return 'user';
 }
 
-function messageContentToResponsesInput(content) {
+function getResponsesTextContentType(role) {
+  return normalizeMessageRole(role) === 'assistant' ? 'output_text' : 'input_text';
+}
+
+function messageContentToResponsesInput(content, role = 'user') {
+  const textContentType = getResponsesTextContentType(role);
   if (typeof content === 'string') {
     const text = content.trim();
     return text
-      ? [{ type: 'input_text', text }]
+      ? [{ type: textContentType, text }]
       : [];
   }
 
@@ -290,14 +295,14 @@ function messageContentToResponsesInput(content) {
     .flatMap((item) => {
       if (typeof item === 'string') {
         const text = item.trim();
-        return text ? [{ type: 'input_text', text }] : [];
+        return text ? [{ type: textContentType, text }] : [];
       }
       if (!item || typeof item !== 'object') {
         return [];
       }
-      if (item.type === 'text' || item.type === 'input_text') {
+      if (item.type === 'text' || item.type === 'input_text' || item.type === 'output_text') {
         const text = String(item.text ?? '').trim();
-        return text ? [{ type: 'input_text', text }] : [];
+        return text ? [{ type: textContentType, text }] : [];
       }
       if (item.type === 'image_url' || item.type === 'input_image') {
         const imageUrl = typeof item.image_url === 'string'
@@ -319,7 +324,7 @@ function messageContentToResponsesInput(content) {
 function buildResponsesInput(messages) {
   return (Array.isArray(messages) ? messages : [])
     .map((message) => {
-      const content = messageContentToResponsesInput(message?.content);
+      const content = messageContentToResponsesInput(message?.content, message?.role);
       if (content.length === 0) {
         return null;
       }
@@ -343,7 +348,7 @@ function messageContentToPlainText(content) {
       if (!item || typeof item !== 'object') {
         return '';
       }
-      if (item.type === 'text' || item.type === 'input_text') {
+      if (item.type === 'text' || item.type === 'input_text' || item.type === 'output_text') {
         return String(item.text ?? '').trim();
       }
       return '';
@@ -362,7 +367,7 @@ function canFlattenMessages(messages) {
       if (typeof item === 'string') {
         return true;
       }
-      return item?.type === 'text' || item?.type === 'input_text';
+      return item?.type === 'text' || item?.type === 'input_text' || item?.type === 'output_text';
     });
   });
 }

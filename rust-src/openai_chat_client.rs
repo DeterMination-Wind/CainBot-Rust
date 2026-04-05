@@ -303,13 +303,14 @@ fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
     messages
         .iter()
         .filter_map(|message| {
+            let text_item_type = responses_text_item_type(&message.role);
             let content = match &message.content {
-                Value::String(text) => vec![json!({ "type": "input_text", "text": text })],
+                Value::String(text) => vec![json!({ "type": text_item_type, "text": text })],
                 Value::Array(items) => items
                     .iter()
                     .filter_map(|item| {
                         if let Some(text) = item.get("text").and_then(Value::as_str) {
-                            Some(json!({ "type": "input_text", "text": text }))
+                            Some(json!({ "type": text_item_type, "text": text }))
                         } else if let Some(url) = item.get("image_url").and_then(|value| {
                             value.as_str().map(ToString::to_string).or_else(|| {
                                 value.get("url").and_then(Value::as_str).map(ToString::to_string)
@@ -321,7 +322,7 @@ fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
                         }
                     })
                     .collect::<Vec<_>>(),
-                other => vec![json!({ "type": "input_text", "text": other.to_string() })],
+                other => vec![json!({ "type": text_item_type, "text": other.to_string() })],
             };
             (!content.is_empty()).then(|| {
                 json!({
@@ -331,6 +332,14 @@ fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn responses_text_item_type(role: &str) -> &'static str {
+    if normalize_message_role(role) == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    }
 }
 
 fn normalize_message_role(role: &str) -> &str {

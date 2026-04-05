@@ -798,6 +798,7 @@ fn chat_input_json(input: &ChatInput) -> Value {
             "senderName": input.runtime_context.sender_name,
             "timelineText": input.runtime_context.timeline_text,
             "currentMessageId": input.runtime_context.current_message_id,
+            "currentMessageSeq": input.runtime_context.current_message_seq,
             "currentTime": input.runtime_context.current_time,
         }
     })

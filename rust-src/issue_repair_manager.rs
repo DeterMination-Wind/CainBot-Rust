@@ -1086,6 +1086,12 @@ fn build_codex_prompt(session: &IssueRepairSession, bridge_info: Option<&CodexBr
             format!("send private message: {}", bridge.send_private_message_url),
             format!("read group messages: {}", bridge.read_group_messages_url),
             format!("read private messages: {}", bridge.read_private_messages_url),
+            format!("send group file: {}", bridge.send_group_file_url),
+            format!(
+                "send group file to folder: {}",
+                bridge.send_group_file_to_folder_url
+            ),
+            format!("read file: {}", bridge.read_file_url),
         ]);
     }
     lines.join("\n")

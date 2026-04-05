@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -13,7 +13,10 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::logger::Logger;
 use crate::event_utils::EventContext;
-use crate::utils::{build_reply_message, join_url, sleep_ms, split_text};
+use crate::utils::{join_url, sleep_ms, split_message_payloads, split_text};
+
+const HISTORY_READ_FAILURE_COOLDOWN_MS: u64 = 15_000;
+const GROUP_SYSTEM_READ_FAILURE_COOLDOWN_MS: u64 = 3 * 60_000;
 
 #[derive(Debug, Clone)]
 pub struct NapCatClientConfig {
@@ -24,6 +27,8 @@ pub struct NapCatClientConfig {
     pub headers: BTreeMap<String, String>,
     pub max_concurrent_events: usize,
     pub forward_threshold_chars: usize,
+    pub forward_nickname: String,
+    pub forward_user_id: String,
     pub upload_retry_attempts: usize,
     pub upload_retry_delay_ms: u64,
     pub upload_stable_wait_ms: u64,
@@ -34,8 +39,11 @@ pub struct NapCatClient {
     config: NapCatClientConfig,
     logger: Logger,
     client: Client,
+    event_client: Client,
     stopped: Arc<AtomicBool>,
     event_semaphore: Arc<Semaphore>,
+    history_read_cooldown_until_ms: Arc<AtomicU64>,
+    group_system_read_cooldown_until_ms: Arc<AtomicU64>,
 }
 
 impl NapCatClient {
@@ -44,12 +52,18 @@ impl NapCatClient {
             .timeout(Duration::from_millis(config.request_timeout_ms))
             .build()
             .context("创建 NapCat HTTP 客户端失败")?;
+        let event_client = Client::builder()
+            .build()
+            .context("创建 NapCat SSE 客户端失败")?;
         Ok(Self {
             event_semaphore: Arc::new(Semaphore::new(config.max_concurrent_events.max(1))),
             config,
             logger,
             client,
+            event_client,
             stopped: Arc::new(AtomicBool::new(false)),
+            history_read_cooldown_until_ms: Arc::new(AtomicU64::new(0)),
+            group_system_read_cooldown_until_ms: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -94,7 +108,58 @@ impl NapCatClient {
         Ok(payload.get("data").cloned().unwrap_or(payload))
     }
 
+    async fn call_with_retry_and_cooldown(
+        &self,
+        action: &str,
+        params: Value,
+        max_attempts: usize,
+        cooldown_until_ms: &AtomicU64,
+        cooldown_ms: u64,
+        cooldown_label: &str,
+    ) -> Result<Value> {
+        let attempts = max_attempts.max(1);
+        let remaining_ms = cooldown_remaining_ms(cooldown_until_ms);
+        if remaining_ms > 0 {
+            bail!("NapCat API {action} 冷却中：bucket={cooldown_label} remainingMs={remaining_ms}");
+        }
+        for attempt in 1..=attempts {
+            match self.call(action, params.clone()).await {
+                Ok(payload) => return Ok(payload),
+                Err(error) if attempt < attempts && is_retryable_read_error(&error) => {
+                    self.logger
+                        .warn(format!(
+                            "NapCat 只读接口瞬时失败，准备重试：action={action} attempt={attempt}/{attempts} error={error:#}"
+                        ))
+                        .await;
+                    sleep_ms(350 * attempt as u64).await;
+                }
+                Err(error) => {
+                    if is_retryable_read_error(&error) {
+                        extend_cooldown(cooldown_until_ms, current_time_ms().saturating_add(cooldown_ms));
+                        self.logger
+                            .warn(format!(
+                                "NapCat 只读接口进入冷却：bucket={cooldown_label} cooldownMs={cooldown_ms} action={action} error={error:#}"
+                            ))
+                            .await;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        unreachable!("call_with_retry_and_cooldown loop should always return");
+    }
+
     pub async fn send_group_message(&self, group_id: &str, message: Value) -> Result<Value> {
+        if let Some(text) = extract_forwardable_text(&message, self.forward_threshold_chars()) {
+            match self.send_group_forward_text(group_id, &text).await {
+                Ok(result) => return Ok(result),
+                Err(error) => {
+                    self.logger
+                        .warn(format!("群合并转发发送失败，回退为普通消息：{error:#}"))
+                        .await;
+                }
+            }
+        }
         self.call(
             "send_group_msg",
             json!({
@@ -106,11 +171,22 @@ impl NapCatClient {
     }
 
     pub async fn send_private_message(&self, user_id: &str, message: impl Into<Value>) -> Result<Value> {
+        let message = message.into();
+        if let Some(text) = extract_forwardable_text(&message, self.forward_threshold_chars()) {
+            match self.send_private_forward_text(user_id, &text).await {
+                Ok(result) => return Ok(result),
+                Err(error) => {
+                    self.logger
+                        .warn(format!("私聊合并转发发送失败，回退为普通消息：{error:#}"))
+                        .await;
+                }
+            }
+        }
         self.call(
             "send_private_msg",
             json!({
                 "user_id": user_id.trim(),
-                "message": message.into()
+                "message": message
             }),
         )
         .await
@@ -151,7 +227,7 @@ impl NapCatClient {
     }
 
     pub async fn get_group_message_history(&self, group_id: &str, count: usize) -> Result<Value> {
-        self.call(
+        self.call_with_retry_and_cooldown(
             "get_group_msg_history",
             json!({
                 "group_id": group_id.trim(),
@@ -161,12 +237,16 @@ impl NapCatClient {
                 "parse_mult_msg": false,
                 "quick_reply": false
             }),
+            2,
+            self.history_read_cooldown_until_ms.as_ref(),
+            HISTORY_READ_FAILURE_COOLDOWN_MS,
+            "history-read",
         )
         .await
     }
 
     pub async fn get_friend_message_history(&self, user_id: &str, count: usize) -> Result<Value> {
-        self.call(
+        self.call_with_retry_and_cooldown(
             "get_friend_msg_history",
             json!({
                 "user_id": user_id.trim(),
@@ -176,16 +256,24 @@ impl NapCatClient {
                 "parse_mult_msg": false,
                 "quick_reply": false
             }),
+            2,
+            self.history_read_cooldown_until_ms.as_ref(),
+            HISTORY_READ_FAILURE_COOLDOWN_MS,
+            "history-read",
         )
         .await
     }
 
     pub async fn get_group_system_messages(&self, count: usize) -> Result<Value> {
-        self.call(
+        self.call_with_retry_and_cooldown(
             "get_group_system_msg",
             json!({
                 "count": count.max(1)
             }),
+            2,
+            self.group_system_read_cooldown_until_ms.as_ref(),
+            GROUP_SYSTEM_READ_FAILURE_COOLDOWN_MS,
+            "group-system-read",
         )
         .await
     }
@@ -358,10 +446,11 @@ impl NapCatClient {
     }
 
     pub async fn send_context_message(&self, context: &EventContext, message: impl Into<Value>) -> Result<Value> {
+        let message = message.into();
         if context.message_type == "group" {
-            self.send_group_message(&context.group_id, message.into()).await
+            self.send_group_message(&context.group_id, message).await
         } else {
-            self.send_private_message(&context.user_id, message.into()).await
+            self.send_private_message(&context.user_id, message).await
         }
     }
 
@@ -383,20 +472,70 @@ impl NapCatClient {
         text: &str,
     ) -> Result<Vec<Value>> {
         let mut results = Vec::new();
-        for (index, part) in split_text(text, 1_400).iter().enumerate() {
-            let message = if index == 0 {
-                build_reply_message(reply_to_message_id, part)
+        let enable_mentions = message_type == "group";
+        if text.chars().count() > self.forward_threshold_chars() {
+            let forwarded = if message_type == "group" {
+                self.send_group_forward_text(target_id, text).await
             } else {
-                Value::String(part.clone())
+                self.send_private_forward_text(target_id, text).await
+            };
+            match forwarded {
+                Ok(result) => return Ok(vec![result]),
+                Err(error) => {
+                    self.logger
+                        .warn(format!("长消息合并转发失败，回退为普通分段消息：{error:#}"))
+                        .await;
+                }
+            }
+        }
+        for (index, part) in split_message_payloads(text, 1_400, enable_mentions).into_iter().enumerate() {
+            let use_reply = index == 0
+                && reply_to_message_id.map(str::trim).filter(|item| !item.is_empty()).is_some();
+            let plain_message = normalize_plain_text_payload(part.clone(), enable_mentions);
+            let message = if use_reply {
+                attach_reply_segment(part, reply_to_message_id)
+            } else {
+                plain_message.clone()
             };
             let result = if message_type == "group" {
-                self.send_group_message(target_id, message).await?
+                match self.send_group_message(target_id, message).await {
+                    Ok(result) => result,
+                    Err(error) if use_reply && (is_missing_reply_target_error(&error) || is_reply_send_rejected_error(&error)) => {
+                        self.logger
+                            .warn(format!("引用回复发送失败，回退为普通消息发送：{error:#}"))
+                            .await;
+                        self.send_group_message(target_id, plain_message).await?
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 self.send_private_message(target_id, message).await?
             };
             results.push(result);
         }
         Ok(results)
+    }
+
+    async fn send_group_forward_text(&self, group_id: &str, text: &str) -> Result<Value> {
+        self.call(
+            "send_group_forward_msg",
+            json!({
+                "group_id": group_id.trim(),
+                "messages": build_forward_nodes(text, &self.config.forward_user_id, &self.config.forward_nickname)
+            }),
+        )
+        .await
+    }
+
+    async fn send_private_forward_text(&self, user_id: &str, text: &str) -> Result<Value> {
+        self.call(
+            "send_private_forward_msg",
+            json!({
+                "user_id": user_id.trim(),
+                "messages": build_forward_nodes(text, &self.config.forward_user_id, &self.config.forward_nickname)
+            }),
+        )
+        .await
     }
 
     pub async fn start_event_loop<F, Fut>(&self, on_event: F) -> Result<()>
@@ -430,7 +569,7 @@ impl NapCatClient {
             &self.config.event_base_url
         };
         let url = join_url(event_base, &self.config.event_path)?;
-        let mut request = self.client.get(url).header("Accept", "text/event-stream");
+        let mut request = self.event_client.get(url).header("Accept", "text/event-stream");
         for (key, value) in &self.config.headers {
             request = request.header(key, value);
         }
@@ -487,6 +626,200 @@ impl NapCatClient {
         });
         Ok(())
     }
+
+    fn forward_threshold_chars(&self) -> usize {
+        self.config.forward_threshold_chars.clamp(1, 100)
+    }
+}
+
+fn attach_reply_segment(payload: Value, reply_to_message_id: Option<&str>) -> Value {
+    let Some(message_id) = reply_to_message_id.map(str::trim).filter(|item| !item.is_empty()) else {
+        return payload;
+    };
+    let mut segments = vec![json!({
+        "type": "reply",
+        "data": { "id": message_id }
+    })];
+    match payload {
+        Value::Array(items) => segments.extend(items),
+        other => segments.push(other),
+    }
+    Value::Array(segments)
+}
+
+fn is_missing_reply_target_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_lowercase();
+    !message.is_empty()
+        && (message.contains("消息不存在")
+            || message.contains("message not found")
+            || message.contains("msg not found"))
+}
+
+fn is_reply_send_rejected_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    if message.is_empty() {
+        return false;
+    }
+    let lower = message.to_lowercase();
+    lower.contains("send_group_msg")
+        && (message.contains("EventChecker Failed")
+            || message.contains("NTEvent")
+            || lower.contains(r#"result": 120"#)
+            || lower.contains("result=120")
+            || lower.contains("result: 120"))
+}
+
+fn is_retryable_read_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    if message.is_empty() {
+        return false;
+    }
+    let lower = message.to_lowercase();
+    lower.contains("connection reset by peer")
+        || lower.contains("connection aborted")
+        || lower.contains("broken pipe")
+        || lower.contains("connection refused")
+        || lower.contains("unexpected eof")
+        || lower.contains("error sending request")
+}
+
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+fn cooldown_remaining_ms(cooldown_until_ms: &AtomicU64) -> u64 {
+    cooldown_until_ms
+        .load(Ordering::SeqCst)
+        .saturating_sub(current_time_ms())
+}
+
+fn extend_cooldown(cooldown_until_ms: &AtomicU64, target_until_ms: u64) {
+    let mut current = cooldown_until_ms.load(Ordering::SeqCst);
+    while current < target_until_ms {
+        match cooldown_until_ms.compare_exchange(current, target_until_ms, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+fn normalize_plain_text_payload(payload: Value, enable_mentions: bool) -> Value {
+    if enable_mentions {
+        return payload;
+    }
+    match payload {
+        Value::Array(segments) => {
+            let text = segments
+                .into_iter()
+                .filter(|segment| segment.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|segment| {
+                    segment
+                        .get("data")
+                        .and_then(|data| data.get("text"))
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                })
+                .collect::<String>();
+            Value::String(text)
+        }
+        other => other,
+    }
+}
+
+fn can_use_forward_packaging(message: &Value) -> bool {
+    match message {
+        Value::String(_) => true,
+        Value::Array(items) => items.iter().all(|segment| {
+            if segment.is_string() {
+                return true;
+            }
+            matches!(
+                segment.get("type").and_then(Value::as_str),
+                Some("text") | Some("reply")
+            )
+        }),
+        Value::Object(object) => object.get("type").and_then(Value::as_str) == Some("text"),
+        _ => false,
+    }
+}
+
+fn flatten_message_text(message: &Value) -> String {
+    match message {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|segment| {
+                if let Some(text) = segment.as_str() {
+                    return Some(text.to_string());
+                }
+                if segment.get("type").and_then(Value::as_str) == Some("text") {
+                    return segment
+                        .get("data")
+                        .and_then(|data| data.get("text"))
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string);
+                }
+                None
+            })
+            .collect::<String>(),
+        Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("text") => object
+            .get("data")
+            .and_then(|data| data.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
+fn sanitize_outgoing_text(text: &str) -> String {
+    text.replace('\0', "")
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim()
+        .to_string()
+}
+
+fn extract_forwardable_text(message: &Value, threshold: usize) -> Option<String> {
+    if !can_use_forward_packaging(message) {
+        return None;
+    }
+    let text = sanitize_outgoing_text(&flatten_message_text(message));
+    if text.is_empty() || text.chars().count() <= threshold.max(1) {
+        return None;
+    }
+    Some(text)
+}
+
+fn build_forward_nodes(text: &str, user_id: &str, nickname: &str) -> Value {
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or_default();
+    Value::Array(
+        split_text(text, 300)
+            .into_iter()
+            .map(|chunk| {
+                json!({
+                    "type": "node",
+                    "data": {
+                        "user_id": if user_id.trim().is_empty() { "0" } else { user_id.trim() },
+                        "nickname": if nickname.trim().is_empty() { "Cain" } else { nickname.trim() },
+                        "content": [
+                            {
+                                "type": "text",
+                                "data": { "text": chunk }
+                            }
+                        ],
+                        "time": time.to_string()
+                    }
+                })
+            })
+            .collect(),
+    )
 }
 
 fn parse_sse_event(block: &[u8]) -> Result<Option<Value>> {

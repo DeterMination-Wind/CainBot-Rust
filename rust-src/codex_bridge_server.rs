@@ -169,6 +169,35 @@ fn handle_request(
     match (request.method(), path.as_str()) {
         (&Method::Post, "/codex/send-group-message") => {
             let group_id = get_required_string(&payload, "groupId")?;
+            if payload_has_file(&payload) {
+                let file_path = get_required_string_any(&payload, &["filePath", "file"])?;
+                let file_name = payload.get("fileName").and_then(Value::as_str);
+                let folder_name = payload
+                    .get("folderName")
+                    .or_else(|| payload.get("folder"))
+                    .or_else(|| payload.get("folderPath"))
+                    .and_then(Value::as_str);
+                let notify_text = payload
+                    .get("notifyText")
+                    .or_else(|| payload.get("text"))
+                    .or_else(|| payload.get("message"))
+                    .and_then(Value::as_str);
+                let result = runtime_handle.block_on(async {
+                    napcat_client
+                        .send_local_file_to_group(&group_id, &file_path, file_name, folder_name, notify_text)
+                        .await
+                })?;
+                return respond_json(
+                    request,
+                    StatusCode(200),
+                    json!({
+                        "ok": true,
+                        "target": format!("group:{group_id}"),
+                        "fallback": "send-group-file",
+                        "result": result
+                    }),
+                );
+            }
             let message = build_outgoing_message(&payload)?;
             let result = runtime_handle.block_on(async { napcat_client.send_group_message(&group_id, message).await })?;
             respond_json(
@@ -183,6 +212,25 @@ fn handle_request(
         }
         (&Method::Post, "/codex/send-private-message") => {
             let user_id = get_required_string(&payload, "userId")?;
+            if payload_has_file(&payload) {
+                let file_path = get_required_string_any(&payload, &["filePath", "file"])?;
+                let file_name = payload.get("fileName").and_then(Value::as_str);
+                let result = runtime_handle.block_on(async {
+                    napcat_client
+                        .send_local_file_to_context("private", &user_id, &file_path, file_name, None)
+                        .await
+                })?;
+                return respond_json(
+                    request,
+                    StatusCode(200),
+                    json!({
+                        "ok": true,
+                        "target": format!("private:{user_id}"),
+                        "fallback": "send-private-file",
+                        "result": result
+                    }),
+                );
+            }
             let message = build_outgoing_message(&payload)?;
             let result = runtime_handle.block_on(async { napcat_client.send_private_message(&user_id, message).await })?;
             respond_json(
@@ -337,6 +385,13 @@ fn build_outgoing_message(payload: &Value) -> Result<Value> {
             .or_else(|| payload.get("mentions"))
             .or_else(|| payload.get("atUserId")),
     );
+    let image_paths = extract_string_list(
+        payload
+            .get("imagePaths")
+            .or_else(|| payload.get("imagePath"))
+            .or_else(|| payload.get("image"))
+            .or_else(|| payload.get("images")),
+    );
 
     let mut segments = Vec::new();
     if !reply_to_message_id.is_empty() {
@@ -363,8 +418,17 @@ fn build_outgoing_message(payload: &Value) -> Result<Value> {
             "data": { "text": text }
         }));
     }
+    for image_path in image_paths {
+        segments.push(json!({
+            "type": "image",
+            "data": { "file": image_path }
+        }));
+    }
     if segments.is_empty() {
-        bail!("消息内容不能为空；请提供 text/message，或提供 atUserIds");
+        bail!("消息内容不能为空；请提供 text/message、atUserIds，或 imagePath/imagePaths");
+    }
+    if segments.len() == 1 && segments[0].get("type").and_then(Value::as_str) == Some("reply") {
+        return Ok(Value::Array(segments));
     }
     if segments.len() == 1 && segments[0].get("type").and_then(Value::as_str) == Some("text") {
         return Ok(Value::String(
@@ -377,6 +441,16 @@ fn build_outgoing_message(payload: &Value) -> Result<Value> {
         ));
     }
     Ok(Value::Array(segments))
+}
+
+fn payload_has_file(payload: &Value) -> bool {
+    payload
+        .get("filePath")
+        .or_else(|| payload.get("file"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
 }
 
 fn normalize_history_messages(payload: &Value, count: usize) -> Vec<Value> {

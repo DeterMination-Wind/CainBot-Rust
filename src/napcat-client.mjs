@@ -48,12 +48,52 @@ function flattenMessageText(message) {
   return '';
 }
 
+function canUseForwardPackaging(message) {
+  if (typeof message === 'string') {
+    return true;
+  }
+  if (Array.isArray(message)) {
+    return message.every((segment) => {
+      if (typeof segment === 'string') {
+        return true;
+      }
+      const type = String(segment?.type ?? '').trim();
+      return type === 'text' || type === 'reply';
+    });
+  }
+  if (message && typeof message === 'object') {
+    return String(message?.type ?? '').trim() === 'text';
+  }
+  return false;
+}
+
 function sanitizeOutgoingText(text) {
   return String(text ?? '')
     .replace(/\u0000/g, '')
     .replace(/\r\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+function getForwardThresholdChars(config) {
+  const numeric = Number(config?.forwardThresholdChars);
+  if (!Number.isFinite(numeric)) {
+    return 100;
+  }
+  return Math.max(1, Math.min(100, Math.trunc(numeric)));
+}
+
+function extractForwardableText(message, config) {
+  if (!canUseForwardPackaging(message)) {
+    return '';
+  }
+  const flattenedText = sanitizeOutgoingText(flattenMessageText(message));
+  if (!flattenedText) {
+    return '';
+  }
+  return flattenedText.length > getForwardThresholdChars(config)
+    ? flattenedText
+    : '';
 }
 
 export class NapCatClient {
@@ -177,6 +217,10 @@ export class NapCatClient {
   }
 
   async sendGroupMessage(groupId, message) {
+    const forwardedText = extractForwardableText(message, this.config);
+    if (forwardedText) {
+      return await this.sendGroupForwardText(groupId, forwardedText);
+    }
     try {
       return await this.call('send_group_msg', {
         group_id: String(groupId),
@@ -199,6 +243,10 @@ export class NapCatClient {
   }
 
   async sendPrivateMessage(userId, message) {
+    const forwardedText = extractForwardableText(message, this.config);
+    if (forwardedText) {
+      return await this.sendPrivateForwardText(userId, forwardedText);
+    }
     return await this.call('send_private_msg', {
       user_id: String(userId),
       message
@@ -350,7 +398,7 @@ export class NapCatClient {
   }
 
   async replyText(context, replyToMessageId, text) {
-    if (String(text ?? '').length > (this.config.forwardThresholdChars ?? 300)) {
+    if (String(text ?? '').length > getForwardThresholdChars(this.config)) {
       try {
         const forwarded = await this.sendForwardText(context, text);
         return forwarded ? [forwarded] : [];
@@ -392,23 +440,34 @@ export class NapCatClient {
     return results;
   }
 
-  async sendForwardText(context, text) {
+  async sendGroupForwardText(groupId, text) {
     const nodes = buildForwardNodes(text, {
-      userId: context.selfId || this.config.botUserId || '0',
+      userId: this.config.botUserId || '0',
       nickname: this.config.forwardNickname || 'Cain'
     });
-
-    if (context.messageType === 'group') {
-      return await this.call('send_group_forward_msg', {
-        group_id: String(context.groupId),
-        messages: nodes
-      });
-    }
-
-    return await this.call('send_private_forward_msg', {
-      user_id: String(context.userId),
+    return await this.call('send_group_forward_msg', {
+      group_id: String(groupId),
       messages: nodes
     });
+  }
+
+  async sendPrivateForwardText(userId, text) {
+    const nodes = buildForwardNodes(text, {
+      userId: this.config.botUserId || '0',
+      nickname: this.config.forwardNickname || 'Cain'
+    });
+    return await this.call('send_private_forward_msg', {
+      user_id: String(userId),
+      messages: nodes
+    });
+  }
+
+  async sendForwardText(context, text) {
+    if (context.messageType === 'group') {
+      return await this.sendGroupForwardText(context.groupId, text);
+    }
+
+    return await this.sendPrivateForwardText(context.userId, text);
   }
 
   async startEventLoop(onEvent) {
