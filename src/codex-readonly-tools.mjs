@@ -3,7 +3,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { countMessageSegments, extractImageSegments, pathExists, plainTextFromMessage } from './utils.mjs';
+import { countMessageSegments, extractImageSegments, pathExists, plainTextFromMessage, sleep } from './utils.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -34,6 +34,10 @@ const TEXT_FILE_EXTENSIONS = new Set([
 
 const TOOL_REQUEST_START = '<<<CAIN_CODEX_TOOL_START>>>';
 const TOOL_REQUEST_END = '<<<CAIN_CODEX_TOOL_END>>>';
+const FISH_BOT_DEFAULT_USER_IDS = ['2126285309', '1493218095'];
+const FISH_BOT_WAIT_MS = 6000;
+const FISH_BOT_RETRY_WAIT_MS = 4000;
+const FISH_BOT_CACHE_TTL_MS = 60 * 1000;
 const SUPPORTED_TOOLS = new Set([
   'inspect_codex_project',
   'list_codex_directory',
@@ -47,6 +51,7 @@ const SUPPORTED_TOOLS = new Set([
   'send_group_emote',
   'read_recent_chat_messages',
   'read_group_chat_messages',
+  'call_fishbot',
   'start_group_file_download',
   'read_github_repo_releases',
   'read_github_repo_commits'
@@ -63,6 +68,25 @@ function clampInteger(value, fallback, min, max) {
 function toFiniteNumber(value, fallback = 0) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function normalizeStringArray(value, fallback = []) {
+  const items = Array.isArray(value)
+    ? value
+    : value == null
+      ? []
+      : [value];
+  const normalized = items
+    .map((item) => String(item ?? '').trim())
+    .filter(Boolean);
+  if (normalized.length > 0) {
+    return Array.from(new Set(normalized));
+  }
+  return Array.from(new Set(
+    (Array.isArray(fallback) ? fallback : [fallback])
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean)
+  ));
 }
 
 function formatEpochTime(seconds) {
@@ -120,6 +144,17 @@ function buildMessageSummary(message) {
     parts.push(`[${tags.join('，')}]`);
   }
   return parts.join(' ').trim() || '(无可读文本，可能主要是图片、表情、文件或卡片)';
+}
+
+function isFishBotLikeSender(message) {
+  const sender = String(
+    message?.sender?.card
+    || message?.sender?.nickname
+    || message?.sender?.nick
+    || message?.sender?.user_name
+    || ''
+  ).trim();
+  return /鱼鱼/i.test(sender);
 }
 
 function stripCodeFence(text) {
@@ -641,6 +676,13 @@ export class CodexReadonlyTools {
   constructor(config, logger, options = {}) {
     this.config = config;
     this.logger = logger;
+    this.napcatClient = options.napcatClient ?? null;
+    this.fishbotUserIds = normalizeStringArray(
+      options.fishbotUserIds ?? options.fishbotUserId,
+      FISH_BOT_DEFAULT_USER_IDS
+    );
+    this.fishbotUserId = this.fishbotUserIds[0] ?? FISH_BOT_DEFAULT_USER_IDS[0];
+    this.fishbotAvailabilityCache = new Map();
     this.memoryFile = String(options.memoryFile ?? config?.memoryFile ?? '').trim();
     this.promptImageRoot = String(options.promptImageRoot ?? config?.promptImageRoot ?? '').trim();
     this.sendPromptImage = typeof options.sendPromptImage === 'function'
@@ -674,12 +716,13 @@ export class CodexReadonlyTools {
       || await this._hasGroupEmoteSendTool()
       || await this._hasRecentMessagesTool()
       || await this._hasGroupMessagesTool()
+      || await this._hasFishBotTool()
       || await this._hasGroupFileDownloadTool()
       || await this._hasGithubRepoTools()
     );
   }
 
-  getPromptInstructions() {
+  async getPromptInstructions(runtimeContext = {}) {
     const parts = [];
     const codexRoot = String(this.config?.codexRoot ?? '').trim();
     if (codexRoot) {
@@ -746,6 +789,19 @@ export class CodexReadonlyTools {
       ].join('\n'));
     }
 
+    if (await this._shouldExposeFishBotTool(runtimeContext)) {
+      const fishBotInfo = await this._resolveFishBotIdentities(runtimeContext?.context?.groupId);
+      parts.push([
+        `当前群内检测到鱼鱼 Bot（QQ ${fishBotInfo.userIds.join(' / ')}），你可以调用 call_fishbot 让 Cain 代你在群里发送 MDT 指令。`,
+        'call_fishbot 会把 command 原样发到当前群，固定等待 6 秒，再抓取这一轮新增的群消息返回给你。',
+        '返回结果里会标注 is_fishbot=true 的消息；你应优先关注鱼鱼的搜索命中、蓝图编号、查询结果、失败提示。',
+        '每次只能发送一条鱼鱼命令；如果还需要继续搜，再下一轮再发一条。',
+        '单轮最多只能调用 9 次 call_fishbot；一旦信息足够，必须停止继续调用并直接回答群友。',
+        '你可以先连续调用鱼鱼，再统一总结回复。',
+        '如果需要回复里 @ 某个群友，直接在最终文本里写 <<at:QQ号>>。'
+      ].join('\n'));
+    }
+
     if (this.startGroupFileDownload) {
       parts.push([
         '如果当前是群聊，且用户是在要游戏安装包、客户端下载包、apk、桌面版、电脑版、pc 版、jar、zip、exe，或在问“有没有人发 v156 原版 mdt / MindustryX 安装包”这类资源请求，不要普通聊天回复，也不要让他去群里问。',
@@ -774,7 +830,7 @@ export class CodexReadonlyTools {
       return '';
     }
 
-    parts.push([
+    const toolExamples = [
       '每次最多只允许请求一个工具。若需要调用工具，你必须只输出被特殊标记包裹的一个 JSON 对象，不能输出解释、Markdown、代码块或多个 JSON。',
       `输出格式必须严格如下：${TOOL_REQUEST_START}{"tool":"inspect_codex_project","project":"Mindustry-master"}${TOOL_REQUEST_END}`,
       `也可以是：${TOOL_REQUEST_START}{"tool":"list_codex_directory","path":".","max_entries":50}${TOOL_REQUEST_END}`,
@@ -794,7 +850,16 @@ export class CodexReadonlyTools {
       `或者：${TOOL_REQUEST_START}{"tool":"read_github_repo_releases","repo":"Anuken/Mindustry","max_releases":5,"max_body_chars":4000}${TOOL_REQUEST_END}`,
       `或者：${TOOL_REQUEST_START}{"tool":"read_github_repo_commits","repo":"Anuken/Mindustry","max_commits":100,"max_message_chars":3000}${TOOL_REQUEST_END}`,
       '收到工具结果后，如果信息已经足够，就直接正常回答用户；只有在确实还缺信息时，才能继续再请求一个工具。回答的时候不要使用Markdown'
-    ].join('\n'));
+    ];
+    if (await this._shouldExposeFishBotTool(runtimeContext)) {
+      toolExamples.splice(
+        toolExamples.length - 1,
+        0,
+        `或者：${TOOL_REQUEST_START}{"tool":"call_fishbot","command":"#搜索 厄兆 逻辑","history_count":40}${TOOL_REQUEST_END}`,
+        `或者：${TOOL_REQUEST_START}{"tool":"call_fishbot","command":"#查询 123456","history_count":30}${TOOL_REQUEST_END}`
+      );
+    }
+    parts.push(toolExamples.join('\n'));
 
     return parts.join('\n\n');
   }
@@ -853,6 +918,8 @@ export class CodexReadonlyTools {
         return await this._readRecentChatMessages(request, runtimeContext);
       case 'read_group_chat_messages':
         return await this._readGroupChatMessages(request, runtimeContext);
+      case 'call_fishbot':
+        return await this._callFishBot(request, runtimeContext);
       case 'start_group_file_download':
         return await this._startGroupFileDownload(request, runtimeContext);
       case 'read_github_repo_releases':
@@ -984,8 +1051,93 @@ export class CodexReadonlyTools {
     return Boolean(this.readGroupMessages);
   }
 
+  async _hasFishBotTool() {
+    return Boolean(this.napcatClient && this.fishbotUserIds.length > 0);
+  }
+
   async _hasGroupFileDownloadTool() {
     return Boolean(this.startGroupFileDownload);
+  }
+
+  async _shouldExposeFishBotTool(runtimeContext = {}) {
+    const context = runtimeContext?.context ?? null;
+    if (!context || context.messageType !== 'group' || !String(context.groupId ?? '').trim()) {
+      return false;
+    }
+    if (!(await this._hasFishBotTool())) {
+      return false;
+    }
+    const fishBotInfo = await this._resolveFishBotIdentities(context.groupId);
+    return fishBotInfo.available === true;
+  }
+
+  async _isFishBotAvailableInGroup(groupId) {
+    const fishBotInfo = await this._resolveFishBotIdentities(groupId);
+    return fishBotInfo.available === true;
+  }
+
+  async _resolveFishBotIdentities(groupId) {
+    const normalizedGroupId = String(groupId ?? '').trim();
+    if (!normalizedGroupId || !(await this._hasFishBotTool())) {
+      return {
+        available: false,
+        userIds: this.fishbotUserIds.slice()
+      };
+    }
+
+    const cached = this.fishbotAvailabilityCache.get(normalizedGroupId);
+    if (cached?.expiresAt > Date.now()) {
+      return {
+        available: cached.available === true,
+        userIds: Array.isArray(cached.userIds) ? cached.userIds.slice() : this.fishbotUserIds.slice()
+      };
+    }
+
+    const detectedUserIds = [];
+    for (const candidateUserId of this.fishbotUserIds) {
+      try {
+        const info = await this.napcatClient.getGroupMemberInfo(normalizedGroupId, candidateUserId, true);
+        const resolvedUserId = String(info?.user_id ?? info?.userId ?? '').trim();
+        if (resolvedUserId) {
+          detectedUserIds.push(resolvedUserId);
+        } else if (info && typeof info === 'object') {
+          detectedUserIds.push(candidateUserId);
+        }
+      } catch {
+      }
+    }
+
+    if (detectedUserIds.length === 0) {
+      try {
+        const payload = await this.napcatClient.getGroupMessageHistory(normalizedGroupId, {
+          count: 40
+        });
+        const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+        for (const message of messages) {
+          if (!isFishBotLikeSender(message)) {
+            continue;
+          }
+          const userId = String(message?.user_id ?? message?.sender?.user_id ?? '').trim();
+          if (userId) {
+            detectedUserIds.push(userId);
+          }
+        }
+      } catch {
+      }
+    }
+
+    const userIds = normalizeStringArray(detectedUserIds, this.fishbotUserIds);
+    const available = detectedUserIds.length > 0;
+
+    this.fishbotAvailabilityCache.set(normalizedGroupId, {
+      available,
+      userIds,
+      expiresAt: Date.now() + FISH_BOT_CACHE_TTL_MS
+    });
+    return {
+      available,
+      userIds
+    };
   }
 
   async _hasGithubRepoTools() {
@@ -1430,6 +1582,126 @@ export class CodexReadonlyTools {
         real_seq: String(message?.real_seq ?? ''),
         summary: buildMessageSummary(message)
       }))
+    };
+  }
+
+  async _callFishBot(request, runtimeContext = {}) {
+    if (!(await this._hasFishBotTool())) {
+      throw new Error('鱼鱼工具未启用');
+    }
+
+    const context = runtimeContext?.context ?? null;
+    if (!context || context.messageType !== 'group' || !String(context.groupId ?? '').trim()) {
+      throw new Error('call_fishbot 仅可在群聊上下文中使用');
+    }
+    const fishBotInfo = await this._resolveFishBotIdentities(context.groupId);
+    if (fishBotInfo.available !== true) {
+      throw new Error(`当前群未检测到鱼鱼 Bot（${this.fishbotUserIds.join(' / ')}）`);
+    }
+
+    const command = String(request?.command ?? request?.text ?? request?.query ?? '').trim();
+    if (!command) {
+      throw new Error('call_fishbot 缺少 command');
+    }
+
+    const historyCount = clampInteger(request?.history_count ?? request?.count, 40, 5, 100);
+    const currentMessageId = String(runtimeContext?.currentMessageId ?? '').trim();
+    const currentMessageSeq = toFiniteNumber(runtimeContext?.currentMessageSeq, 0);
+    const currentTime = toFiniteNumber(runtimeContext?.currentTime, 0);
+    const startedAtSec = Math.floor(Date.now() / 1000);
+    const sendResult = await this.napcatClient.sendGroupMessage(String(context.groupId), command);
+    const sentMessageId = String(sendResult?.message_id ?? sendResult?.messageId ?? '').trim();
+    const fishbotUserIdSet = new Set(fishBotInfo.userIds);
+    const collectMessages = async (fetchCount) => {
+      const payload = await this.napcatClient.getGroupMessageHistory(String(context.groupId), {
+        count: fetchCount,
+        parseMultMsg: true
+      });
+      const allMessages = Array.isArray(payload?.messages) ? payload.messages : [];
+      const sentMessage = allMessages.find((message) => String(message?.message_id ?? '') === sentMessageId);
+      const baselineTime = Math.max(
+        currentTime,
+        Math.max(0, startedAtSec - 1),
+        toFiniteNumber(sentMessage?.time, 0)
+      );
+      const baselineOrder = Math.max(currentMessageSeq, messageOrderValue(sentMessage));
+      return allMessages
+        .filter(Boolean)
+        .filter((message) => String(message?.message_id ?? '') !== currentMessageId)
+        .filter((message) => String(message?.message_id ?? '') !== sentMessageId)
+        .filter((message) => {
+          const orderValue = messageOrderValue(message);
+          if (baselineOrder > 0 && orderValue > baselineOrder) {
+            return true;
+          }
+          return toFiniteNumber(message?.time, 0) >= baselineTime;
+        })
+        .sort((left, right) => {
+          const seqDiff = messageOrderValue(left) - messageOrderValue(right);
+          if (seqDiff !== 0) {
+            return seqDiff;
+          }
+          const timeDiff = toFiniteNumber(left?.time, 0) - toFiniteNumber(right?.time, 0);
+          if (timeDiff !== 0) {
+            return timeDiff;
+          }
+          return toFiniteNumber(left?.message_id, 0) - toFiniteNumber(right?.message_id, 0);
+        })
+        .slice(-historyCount);
+    };
+
+    await sleep(FISH_BOT_WAIT_MS);
+
+    let normalized = await collectMessages(Math.max(historyCount + 40, 50));
+    if (
+      normalized.length === 0
+      || !normalized.some((message) => {
+        const userId = String(message?.user_id ?? message?.sender?.user_id ?? '').trim();
+        return fishbotUserIdSet.has(userId) || isFishBotLikeSender(message);
+      })
+    ) {
+      await sleep(FISH_BOT_RETRY_WAIT_MS);
+      normalized = await collectMessages(Math.max(historyCount + 60, 80));
+      if (
+        normalized.length === 0
+        || !normalized.some((message) => {
+          const userId = String(message?.user_id ?? message?.sender?.user_id ?? '').trim();
+          return fishbotUserIdSet.has(userId) || isFishBotLikeSender(message);
+        })
+      ) {
+        await sleep(FISH_BOT_RETRY_WAIT_MS);
+        normalized = await collectMessages(Math.max(historyCount + 80, 100));
+      }
+    }
+
+    const messages = normalized.map((message, index) => {
+      const userId = String(message?.user_id ?? message?.sender?.user_id ?? '').trim();
+      return {
+        index: index + 1,
+        time: formatEpochTime(message?.time),
+        user_id: userId,
+        sender: String(message?.sender?.card || message?.sender?.nickname || message?.sender?.nick || message?.sender?.user_name || message?.user_id || '').trim(),
+        message_id: String(message?.message_id ?? '').trim(),
+        message_seq: String(message?.message_seq ?? '').trim(),
+        real_seq: String(message?.real_seq ?? '').trim(),
+        is_fishbot: fishbotUserIdSet.has(userId) || isFishBotLikeSender(message),
+        text: plainTextFromMessage(message?.message, message?.raw_message),
+        summary: buildMessageSummary(message)
+      };
+    });
+
+    return {
+      tool: 'call_fishbot',
+      target: `group:${context.groupId}`,
+      fishbot_user_id: fishBotInfo.userIds[0] ?? null,
+      fishbot_user_ids: fishBotInfo.userIds,
+      command,
+      wait_ms: FISH_BOT_WAIT_MS,
+      sent_message_id: sentMessageId || null,
+      requestedCount: historyCount,
+      returnedCount: messages.length,
+      fishbot_message_count: messages.filter((message) => message.is_fishbot).length,
+      messages
     };
   }
 
