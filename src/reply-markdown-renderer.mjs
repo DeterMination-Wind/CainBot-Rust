@@ -3,7 +3,6 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
 
 import hljs from 'highlight.js';
 import markdownIt from 'markdown-it';
@@ -13,11 +12,14 @@ import { chromium } from 'playwright';
 const require = createRequire(import.meta.url);
 
 const TOOL_BLOCK_REGEX = /<<<CAIN_CODEX_TOOL_START>>>[\s\S]*?<<<CAIN_CODEX_TOOL_END>>>/g;
+const NESTED_MARKDOWN_FENCE_REGEX = /(^|\n)[ \t]*```(?:markdown|md)\s*\r?\n([\s\S]*?)\r?\n[ \t]*```(?=\n|$)/gi;
 const RENDER_DIR = path.join(os.tmpdir(), 'cain-reply-markdown-images');
 const MAX_RENDER_CHARS = 20_000;
 const MAX_RENDER_HEIGHT = 14_000;
 const KEEP_RENDER_FILES = 120;
 const MAX_RENDER_AGE_MS = 4 * 60 * 60 * 1000;
+const BROWSER_IDLE_CLOSE_MS = 90_000;
+const EXTERNAL_IMAGE_WAIT_MS = 2_500;
 
 const markdown = markdownIt({
   html: false,
@@ -40,17 +42,61 @@ const markdown = markdownIt({
 markdown.use(markdownItKatex);
 
 let styleCache = null;
+const fontDataUrlCache = new Map();
+let browserHolder = {
+  browser: null,
+  idleTimer: null
+};
+
+function getFontMimeType(fileName = '') {
+  const ext = path.extname(String(fileName)).toLowerCase();
+  if (ext === '.woff2') {
+    return 'font/woff2';
+  }
+  if (ext === '.woff') {
+    return 'font/woff';
+  }
+  if (ext === '.eot') {
+    return 'application/vnd.ms-fontobject';
+  }
+  return 'font/ttf';
+}
+
+async function readFontDataUrl(absolutePath, fileName) {
+  if (fontDataUrlCache.has(absolutePath)) {
+    return fontDataUrlCache.get(absolutePath);
+  }
+  const raw = await fs.readFile(absolutePath);
+  const mime = getFontMimeType(fileName);
+  const dataUrl = `data:${mime};base64,${raw.toString('base64')}`;
+  fontDataUrlCache.set(absolutePath, dataUrl);
+  return dataUrl;
+}
 
 async function getStyleBundle() {
   if (styleCache) {
     return styleCache;
   }
-  const katexCssPath = require.resolve('katex/dist/katex.min.css');
+  const markdownKatexDir = path.dirname(require.resolve('markdown-it-katex/package.json'));
+  const bundledKatexCssPath = path.join(markdownKatexDir, 'node_modules', 'katex', 'dist', 'katex.min.css');
+  const katexCssPath = await pathExists(bundledKatexCssPath)
+    ? bundledKatexCssPath
+    : require.resolve('katex/dist/katex.min.css');
   const katexFontsDir = path.join(path.dirname(katexCssPath), 'fonts');
   const rawKatexCss = await fs.readFile(katexCssPath, 'utf8');
+  const fontRefs = Array.from(rawKatexCss.matchAll(/url\((['"]?)fonts\/([^'")]+)\1\)/g))
+    .map((match) => String(match[2] ?? '').trim())
+    .filter(Boolean);
+  const embeddedMap = new Map();
+  for (const ref of [...new Set(fontRefs)]) {
+    const cleanName = ref.replace(/[?#].*$/, '');
+    const absolutePath = path.join(katexFontsDir, cleanName);
+    const dataUrl = await readFontDataUrl(absolutePath, cleanName);
+    embeddedMap.set(ref, dataUrl);
+  }
   const katexCss = rawKatexCss.replace(/url\((['"]?)fonts\/([^'")]+)\1\)/g, (_, _quote, fileName) => {
-    const fontUrl = pathToFileURL(path.join(katexFontsDir, fileName)).href;
-    return `url("${fontUrl}")`;
+    const embedded = embeddedMap.get(String(fileName));
+    return embedded ? `url("${embedded}")` : 'url("")';
   });
   const hljsCssPath = require.resolve('highlight.js/styles/vs2015.css');
   const hljsCss = await fs.readFile(hljsCssPath, 'utf8');
@@ -58,8 +104,24 @@ async function getStyleBundle() {
   return styleCache;
 }
 
+function unwrapNestedMarkdownFences(text) {
+  let current = String(text ?? '');
+  for (let index = 0; index < 4; index += 1) {
+    const next = current.replace(
+      NESTED_MARKDOWN_FENCE_REGEX,
+      (_match, prefix = '', body = '') => `${prefix}${String(body ?? '').trim()}`
+    );
+    if (next === current) {
+      return next;
+    }
+    current = next;
+  }
+  return current;
+}
+
 function sanitizeReplyText(sourceText) {
-  const cleaned = String(sourceText ?? '').replace(TOOL_BLOCK_REGEX, '').trim();
+  const withoutToolBlocks = String(sourceText ?? '').replace(TOOL_BLOCK_REGEX, '').trim();
+  const cleaned = unwrapNestedMarkdownFences(withoutToolBlocks).trim();
   if (!cleaned) {
     return '';
   }
@@ -106,7 +168,8 @@ function buildHtmlDocument(markdownText, styleBundle) {
       border-radius: 16px;
       box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
       padding: 30px 36px;
-      overflow-wrap: anywhere;
+      overflow-wrap: break-word;
+      word-break: normal;
     }
     #card > *:first-child {
       margin-top: 0 !important;
@@ -196,11 +259,28 @@ function buildHtmlDocument(markdownText, styleBundle) {
       text-align: left;
       vertical-align: top;
     }
+    img {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 12px auto;
+      border: 1px solid #3a3a3a;
+      border-radius: 10px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    }
     .katex-display {
       margin: 14px 0;
       overflow-x: auto;
-      overflow-y: hidden;
-      padding-bottom: 4px;
+      overflow-y: visible;
+      padding: 6px 0;
+    }
+    .katex-display > .katex {
+      display: inline-block;
+      min-width: max-content;
+      padding: 2px 0 6px;
+    }
+    .katex, .katex * {
+      box-sizing: content-box;
     }
     .meta {
       margin-top: 18px;
@@ -362,6 +442,61 @@ async function launchBrowser() {
   }
 }
 
+function scheduleBrowserIdleClose() {
+  if (browserHolder.idleTimer) {
+    clearTimeout(browserHolder.idleTimer);
+    browserHolder.idleTimer = null;
+  }
+  browserHolder.idleTimer = setTimeout(async () => {
+    const browser = browserHolder.browser;
+    browserHolder.browser = null;
+    browserHolder.idleTimer = null;
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+  }, BROWSER_IDLE_CLOSE_MS);
+  if (typeof browserHolder.idleTimer?.unref === 'function') {
+    browserHolder.idleTimer.unref();
+  }
+}
+
+async function getSharedBrowser() {
+  if (browserHolder.browser) {
+    return browserHolder.browser;
+  }
+  const browser = await launchBrowser();
+  browserHolder.browser = browser;
+  browser.on('disconnected', () => {
+    if (browserHolder.browser === browser) {
+      browserHolder.browser = null;
+    }
+  });
+  return browser;
+}
+
+async function waitForImageLoad(page, timeoutMs = EXTERNAL_IMAGE_WAIT_MS) {
+  await page.evaluate(async (timeout) => {
+    const images = Array.from(document.images || []);
+    if (!images.length) {
+      return;
+    }
+    const waitImage = (img) => {
+      if (img.complete) {
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => {
+        const done = () => resolve();
+        img.addEventListener('load', done, { once: true });
+        img.addEventListener('error', done, { once: true });
+      });
+    };
+    await Promise.race([
+      Promise.all(images.map(waitImage)),
+      new Promise((resolve) => setTimeout(resolve, Math.max(100, Number(timeout) || 100)))
+    ]);
+  }, timeoutMs);
+}
+
 export async function renderReplyMarkdownImage(replyText) {
   const normalized = sanitizeReplyText(replyText);
   if (!normalized) {
@@ -373,25 +508,52 @@ export async function renderReplyMarkdownImage(replyText) {
   const hash = crypto.createHash('sha1').update(normalized).digest('hex').slice(0, 10);
   const outputPath = path.join(RENDER_DIR, `reply-${Date.now()}-${hash}.png`);
 
-  const browser = await launchBrowser();
+  const browser = await getSharedBrowser();
+  let page = null;
   try {
-    const page = await browser.newPage({
-      viewport: { width: 1240, height: 1600 },
-      deviceScaleFactor: 2
+    scheduleBrowserIdleClose();
+    page = await browser.newPage({
+      viewport: { width: 1240, height: 1200 },
+      deviceScaleFactor: 1.5
+    });
+    await page.route('**/*', async (route) => {
+      const request = route.request();
+      const url = request.url();
+      const type = request.resourceType();
+      if (url.startsWith('file:') || url.startsWith('data:') || url === 'about:blank') {
+        await route.continue().catch(() => {});
+        return;
+      }
+      if ((url.startsWith('http://') || url.startsWith('https://')) && type === 'image') {
+        await route.continue().catch(() => {});
+        return;
+      }
+      await route.abort().catch(() => {});
     });
     await page.setContent(html, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(60);
+    await waitForImageLoad(page, EXTERNAL_IMAGE_WAIT_MS);
+    await page.evaluate(async () => {
+      if (document?.fonts?.ready) {
+        await document.fonts.ready;
+      }
+    });
+    await page.waitForTimeout(20);
     const cardHeight = await page.evaluate(() => {
       const node = document.getElementById('card');
       if (!node) {
         return 480;
       }
-      return Math.ceil(node.scrollHeight + 12);
+      return Math.ceil(node.scrollHeight + 20);
     });
     const viewportHeight = Math.max(420, Math.min(MAX_RENDER_HEIGHT, Number(cardHeight) || 480));
     await page.setViewportSize({
       width: 1240,
       height: viewportHeight
+    });
+    await page.evaluate(async () => {
+      if (document?.fonts?.ready) {
+        await document.fonts.ready;
+      }
     });
     const card = page.locator('#card');
     await card.screenshot({
@@ -399,7 +561,16 @@ export async function renderReplyMarkdownImage(replyText) {
       type: 'png'
     });
     return outputPath;
-  } finally {
+  } catch (error) {
+    if (browserHolder.browser === browser) {
+      browserHolder.browser = null;
+    }
     await browser.close().catch(() => {});
+    throw error;
+  } finally {
+    if (page) {
+      await page.close().catch(() => {});
+    }
+    scheduleBrowserIdleClose();
   }
 }
