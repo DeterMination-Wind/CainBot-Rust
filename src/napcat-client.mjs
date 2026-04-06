@@ -219,7 +219,11 @@ export class NapCatClient {
   async sendGroupMessage(groupId, message) {
     const forwardedText = extractForwardableText(message, this.config);
     if (forwardedText) {
-      return await this.sendGroupForwardText(groupId, forwardedText);
+      try {
+        return await this.sendGroupForwardText(groupId, forwardedText);
+      } catch (error) {
+        this.logger.warn(`群合并转发发送失败，回退为普通消息：${error.message}`);
+      }
     }
     try {
       return await this.call('send_group_msg', {
@@ -245,7 +249,11 @@ export class NapCatClient {
   async sendPrivateMessage(userId, message) {
     const forwardedText = extractForwardableText(message, this.config);
     if (forwardedText) {
-      return await this.sendPrivateForwardText(userId, forwardedText);
+      try {
+        return await this.sendPrivateForwardText(userId, forwardedText);
+      } catch (error) {
+        this.logger.warn(`私聊合并转发发送失败，回退为普通消息：${error.message}`);
+      }
     }
     return await this.call('send_private_msg', {
       user_id: String(userId),

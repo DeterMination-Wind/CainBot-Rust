@@ -312,6 +312,43 @@ impl ChatSessionManager {
         })
     }
 
+    pub async fn render_markdown_image(&self, text: &str) -> Result<Option<String>> {
+        let normalized = text.trim();
+        if normalized.is_empty() {
+            return Ok(None);
+        }
+        let payload = self
+            .request(
+                "render_markdown_image",
+                json!({
+                    "text": normalized,
+                }),
+            )
+            .await?;
+        let error_message = payload
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !error_message.is_empty() {
+            self.logger
+                .warn(format!("回复图片渲染失败：{error_message}"))
+                .await;
+            return Ok(None);
+        }
+        let image_path = payload
+            .get("imagePath")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if image_path.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(image_path))
+    }
+
     pub async fn should_suggest_reply(
         &self,
         context: &EventContext,

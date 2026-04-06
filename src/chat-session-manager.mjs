@@ -354,6 +354,8 @@ function summarizeToolRequest(toolRequest) {
       return `${tool} repo=${JSON.stringify(String(toolRequest?.repo ?? toolRequest?.repository ?? toolRequest?.url ?? '').trim())} maxReleases=${toolRequest?.max_releases ?? 10}`;
     case 'read_github_repo_commits':
       return `${tool} repo=${JSON.stringify(String(toolRequest?.repo ?? toolRequest?.repository ?? toolRequest?.url ?? '').trim())} ref=${JSON.stringify(String(toolRequest?.sha ?? toolRequest?.branch ?? toolRequest?.ref ?? '').trim())} maxCommits=${toolRequest?.max_commits ?? 50}`;
+    case 'run_python_script':
+      return `${tool} path=${JSON.stringify(String(toolRequest?.path ?? toolRequest?.cwd_path ?? '.').trim() || '.')} timeoutMs=${toolRequest?.timeout_ms ?? toolRequest?.timeoutMs ?? 8000} code=${JSON.stringify(String(toolRequest?.code ?? toolRequest?.script ?? '').trim().slice(0, 120))}`;
     default:
       return `${tool} ${JSON.stringify(toolRequest)}`;
   }
@@ -395,6 +397,8 @@ function summarizeToolResult(toolResult) {
       return `${tool} repo=${toolResult?.repo?.full_name ?? '(unknown)'} returned=${toolResult?.returnedCount ?? 0} latestTag=${toolResult?.latestTag ?? '(none)'}`;
     case 'read_github_repo_commits':
       return `${tool} repo=${toolResult?.repo?.full_name ?? '(unknown)'} returned=${toolResult?.returnedCount ?? 0} ref=${toolResult?.ref ?? '(default)'}`;
+    case 'run_python_script':
+      return `${tool} imports=${Array.isArray(toolResult?.imports) ? toolResult.imports.join(',') || '(none)' : '(none)'} stdoutChars=${String(toolResult?.stdout ?? '').length} result=${JSON.stringify(String(toolResult?.result ?? '').slice(0, 120))}`;
     default:
       return `${tool} ok`;
   }
@@ -1753,11 +1757,171 @@ export class ChatSessionManager {
       if (notice || !normalizedText) {
         return { text: normalizedText, notice };
       }
-      const maxReviewRepairs = 4;
       let currentText = normalizedText;
-      let reviewRepairCount = 0;
+      const maxToolRepairAttempts = 4;
+      let toolRepairCount = 0;
 
       while (true) {
+        const finalToolParsing = this.codexTools.parseToolCalls(currentText);
+        if (finalToolParsing.calls.length > 0) {
+          if (toolRepairCount >= maxToolRepairAttempts) {
+            this.logger.warn(`最终回复仍包含工具请求，抑制本次回复：reply=${JSON.stringify(String(currentText ?? '').slice(0, 160))}`);
+            discardPendingStreamText();
+            workingMessages.push({ role: 'assistant', content: currentText });
+            workingMessages.push({
+              role: 'user',
+              content: [
+                '系统抑制：你上一条最终回复仍然包含工具请求，这条内容不会发给用户。',
+                '请继续下一条回复：如果需要工具，只能输出一个合法工具请求；如果不需要工具，请直接给出普通文本答案，禁止再次输出无效或多余工具标记。'
+              ].join('\n')
+            });
+            const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+            currentText = String(retryText ?? '').trim() || currentText;
+            toolRepairCount = 0;
+            continue;
+          }
+          toolRepairCount += 1;
+          discardPendingStreamText();
+
+          if (!toolEnabled) {
+            this.logger.warn(`最终回复请求了工具，但当前会话工具不可用，要求主模型直接回答：reply=${JSON.stringify(String(currentText ?? '').slice(0, 160))}`);
+            workingMessages.push({ role: 'assistant', content: currentText });
+            workingMessages.push({
+              role: 'user',
+              content: [
+                '系统纠偏：当前会话不允许执行工具，你刚才输出了工具请求，所以这条内容不能直接发给用户。',
+                '请直接给出普通文本回答，禁止包含任何工具调用标记。'
+              ].join('\n')
+            });
+            const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+            currentText = String(retryText ?? '').trim() || currentText;
+            continue;
+          }
+
+          const toolRequest = finalToolParsing.calls[0];
+          if (toolRequest.tool === 'call_fishbot' && fishBotToolCalls >= 9) {
+            this.logger.warn('最终回复触发 fishbot 工具超限，改为要求主模型直接回答');
+            workingMessages.push({ role: 'assistant', content: currentText });
+            workingMessages.push({
+              role: 'user',
+              content: '系统提示：本轮鱼鱼工具最多只能调用 9 次；请停止继续发鱼鱼命令，基于现有鱼鱼结果直接回答用户。'
+            });
+            const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+            currentText = String(retryText ?? '').trim() || currentText;
+            continue;
+          }
+
+          const warnings = [];
+          const readSignature = toolRequest.tool === 'read_codex_file'
+            ? JSON.stringify({
+              path: String(toolRequest?.path ?? '').trim(),
+              start: Number(toolRequest?.start_line ?? 1) || 1,
+              end: toolRequest?.end_line ?? 'auto',
+              maxChars: Number(toolRequest?.max_chars ?? 12000) || 12000
+            })
+            : '';
+          if (finalToolParsing.format === 'legacy') {
+            warnings.push('你刚才没有使用约定的工具标记；后续必须使用特殊标记包裹单个工具请求。');
+          }
+          if (finalToolParsing.calls.length > 1) {
+            warnings.push('你一次返回了多个工具请求；系统只执行第一个，后续必须一次只请求一个工具。');
+          }
+          if (finalToolParsing.invalidCount > 0) {
+            warnings.push('你的上一条输出还包含无效工具请求，系统已忽略并仅执行第一个合法工具。');
+          }
+
+          this.logger.info(`最终回复触发只读工具：${summarizeToolRequest(toolRequest)}`);
+          let toolResult;
+          if (toolRequest.tool === 'read_codex_file' && readSignature && (repeatedTruncatedReads.get(readSignature) ?? 0) > 0) {
+            toolResult = {
+              tool: 'read_codex_file',
+              path: String(toolRequest?.path ?? '').trim(),
+              truncated: true,
+              blocked: true,
+              error: '同一段已截断内容禁止重复读取；下一步请改用 subagent_codex_lookup，并在 question 中写明你要找的字段、对象或关键词。'
+            };
+          } else {
+            try {
+              if (toolRequest.tool === 'call_fishbot') {
+                fishBotToolCalls += 1;
+              }
+              toolResult = await this.codexTools.execute(toolRequest, { context, ...runtimeContext });
+            } catch (error) {
+              toolResult = {
+                tool: String(toolRequest.tool ?? 'unknown'),
+                error: error.message
+              };
+            }
+          }
+
+          if (toolResult?.error) {
+            this.logger.warn(`最终回复只读工具失败 ${toolRequest.tool}: ${toolResult.error}`);
+          } else {
+            this.logger.info(`最终回复只读工具结果：${summarizeToolResult(toolResult)}`);
+          }
+
+          if (toolRequest.tool === 'read_codex_file' && readSignature) {
+            if (toolResult?.truncated === true && !toolResult?.blocked) {
+              repeatedTruncatedReads.set(readSignature, (repeatedTruncatedReads.get(readSignature) ?? 0) + 1);
+              warnings.push('当前文件片段已截断；如果还不够，下一步不要再重复读同一段，必须改用 subagent_codex_lookup 定位具体内容。');
+            } else if (toolResult?.truncated !== true) {
+              repeatedTruncatedReads.delete(readSignature);
+            }
+          }
+
+          if (toolRequest.tool === 'start_group_file_download' && toolResult?.started === true) {
+            return { text: '', notice: 'group-file-download-started' };
+          }
+
+          workingMessages.push({ role: 'assistant', content: currentText });
+          workingMessages.push({
+            role: 'user',
+            content: [
+              warnings.length > 0 ? `工具调用警告：${warnings.join(' ')}` : '',
+              '以下是你请求的只读文件工具结果（只读、不可修改）：',
+              this.codexTools.formatToolResult(toolResult),
+              '请基于这些结果继续生成最终回复；如果信息还不够，可以继续请求一个工具，否则直接输出普通文本答案。'
+            ].filter(Boolean).join('\n')
+          });
+          const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+          currentText = String(retryText ?? '').trim() || currentText;
+          continue;
+        }
+
+        if (finalToolParsing.invalidCount > 0) {
+          if (toolRepairCount >= maxToolRepairAttempts) {
+            this.logger.warn(`最终回复仍包含无效工具请求，抑制本次回复：reply=${JSON.stringify(String(currentText ?? '').slice(0, 160))}`);
+            discardPendingStreamText();
+            workingMessages.push({ role: 'assistant', content: currentText });
+            workingMessages.push({
+              role: 'user',
+              content: [
+                '系统抑制：你上一条最终回复仍然包含无效工具请求，这条内容不会发给用户。',
+                '请继续下一条回复：要么输出一个合法工具请求，要么直接输出普通文本答案。'
+              ].join('\n')
+            });
+            const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+            currentText = String(retryText ?? '').trim() || currentText;
+            toolRepairCount = 0;
+            continue;
+          }
+          toolRepairCount += 1;
+          discardPendingStreamText();
+          this.logger.warn(`最终回复含无效工具请求，打回主模型重写：reply=${JSON.stringify(String(currentText ?? '').slice(0, 160))}`);
+          workingMessages.push({ role: 'assistant', content: currentText });
+          workingMessages.push({
+            role: 'user',
+            content: [
+              '系统纠偏：你刚才输出了无效工具请求，这条内容不能直接发给用户。',
+              '只允许使用系统已经声明过的工具名。当前唯一允许执行脚本的工具是 run_python_script，不存在 run_bash_command。',
+              '如果还需要工具，请重新输出一个合法工具请求；如果不需要工具，就直接给出普通文本回答。'
+            ].join('\n')
+          });
+          const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+          currentText = String(retryText ?? '').trim() || currentText;
+          continue;
+        }
+
         const lowInformationResult = await this.#maybeRunLowInformationReview(
           context,
           runtimeContext,
@@ -1769,11 +1933,6 @@ export class ChatSessionManager {
             return { text: '', notice: 'group-file-download-started' };
           }
           if (lowInformationResult.lowInformationFeedback) {
-            if (reviewRepairCount >= maxReviewRepairs) {
-              this.logger.warn(`低信息检查多次未通过，抑制本次回复：feedback=${lowInformationResult.lowInformationFeedback}`);
-              return { text: '', notice: 'review-suppressed' };
-            }
-            reviewRepairCount += 1;
             discardPendingStreamText();
             this.logger.info(`低信息检查打回主模型重答：feedback=${lowInformationResult.lowInformationFeedback}`);
             workingMessages.push({ role: 'assistant', content: currentText });
@@ -1785,7 +1944,7 @@ export class ChatSessionManager {
                 '下一条回答必须满足其一：',
                 '1. 直接给出已经从上下文或工具结果里确认过的具体字段、路径、对象名、数值、结论或可执行步骤；',
                 '2. 如果信息仍不足，就先请求一个只读工具。',
-                '不要使用 Markdown。'
+                '可以使用 Markdown 或 LaTeX，但重点是给出已核实的具体信息。'
               ].join('\n')
             });
             const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
@@ -1802,11 +1961,6 @@ export class ChatSessionManager {
           requestImages
         );
         if (checkResult && typeof checkResult === 'object' && checkResult.hallucinationFeedback) {
-          if (reviewRepairCount >= maxReviewRepairs) {
-            this.logger.warn(`幻觉检查多次未通过，抑制本次回复：feedback=${checkResult.hallucinationFeedback}`);
-            return { text: '', notice: 'review-suppressed' };
-          }
-          reviewRepairCount += 1;
           discardPendingStreamText();
           this.logger.info(`幻觉检查打回主模型重答：feedback=${checkResult.hallucinationFeedback}`);
           workingMessages.push({ role: 'assistant', content: currentText });
@@ -1814,7 +1968,7 @@ export class ChatSessionManager {
             role: 'user',
             content: [
               `系统校对纠偏：你上一条回答被事实校对器打回，原因：${checkResult.hallucinationFeedback}`,
-              '请基于已有的工具结果重新组织回答，去掉无法确认的具体事实。如果确实不确定，就明确说不确定。不要使用 Markdown。'
+              '请基于已有的工具结果重新组织回答，去掉无法确认的具体事实。如果确实不确定，就明确说不确定。'
             ].join('\n')
           });
           const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
@@ -1837,7 +1991,7 @@ export class ChatSessionManager {
         role: 'user',
         content: [
           reason,
-          '不要再调用任何工具。请只基于你已经拿到的信息直接回答用户；如果仍有不确定，就明确说明不确定点。回答不要使用 Markdown。'
+          '不要再调用任何工具。请只基于你已经拿到的信息直接回答用户；如果仍有不确定，就明确说明不确定点。允许使用 Markdown 与 LaTeX。'
         ].filter(Boolean).join('\n')
       });
 
@@ -1854,6 +2008,20 @@ export class ChatSessionManager {
 
       const toolParsing = this.codexTools.parseToolCalls(assistantText);
       if (toolParsing.calls.length === 0) {
+        if (toolParsing.invalidCount > 0) {
+          discardPendingStreamText();
+          this.logger.warn(`检测到无效工具请求，已打回重试：reply=${JSON.stringify(String(assistantText ?? '').slice(0, 160))}`);
+          workingMessages.push({ role: 'assistant', content: assistantText });
+          workingMessages.push({
+            role: 'user',
+            content: [
+              '系统纠偏：你刚才输出了无效工具请求，所以这条内容不能直接发给用户。',
+              '只允许使用系统已经声明过的工具名。当前唯一允许执行脚本的工具是 run_python_script，不存在 run_bash_command。',
+              '如果需要工具，请重新输出一个合法工具请求；如果不需要工具，就直接正常回答用户。'
+            ].join('\n')
+          });
+          continue;
+        }
         if (toolEnabled && requiresConcreteLookup(lookupSeedText) && looksLikeDeferringLowInformationAnswer(assistantText)) {
           discardPendingStreamText();
           this.logger.info(`低信息占位回答回炉：query=${JSON.stringify(lookupSeedText.slice(0, 120))} reply=${JSON.stringify(String(assistantText ?? '').slice(0, 120))}`);
@@ -1989,6 +2157,7 @@ export class ChatSessionManager {
             '当用户在问“怎么改/怎么做/在哪里/哪个字段”时，像“改对应字段”“看对应对象”“去改相关配置”“还没定位到具体字段”“需要先查文档”这类话都算低信息空话。',
             '如果这类问题本来就应该先读文件或调工具确认，而候选回答里既没有真实读取结果，也没有具体字段、路径、对象名、数值、版本或结论，也一律 allow=false。',
             '如果用户本意是在要安装包、jar、zip、apk、客户端、release 资产、插件包、服务器插件，而候选回答只是口头说要去处理，但没有真正开始下载流程，则 allow=false，并设置 start_group_file_download=true。',
+            '如果你建议主模型调用工具，只能建议系统真实存在的工具名；当前唯一允许执行脚本的工具是 run_python_script，不存在 run_bash_command。',
             '只输出 JSON：{"allow":boolean,"feedback":"allow=false 时必填，告诉主模型下一条至少要补什么","reason":"简短原因","start_group_file_download":boolean,"request_text":"可选"}',
             'feedback 不是给用户看的，而是给主模型的纠偏说明；要直接指出缺了哪些具体信息。'
           ].join('\n')
@@ -2139,6 +2308,18 @@ export class ChatSessionManager {
               '以下是你请求的只读工具结果：',
               this.codexTools.formatToolResult(toolResult),
               '请根据工具结果做最终判断，输出 JSON。'
+            ].join('\n')
+          });
+          continue;
+        }
+        if (toolParsing.invalidCount > 0) {
+          checkMessages.push({ role: 'assistant', content: raw });
+          checkMessages.push({
+            role: 'user',
+            content: [
+              '你刚才请求了无效工具。只允许使用系统已经声明过的工具名。',
+              '当前唯一允许执行脚本的工具是 run_python_script，不存在 run_bash_command。',
+              '如果还需要核实，请重新请求一个合法工具；否则直接输出最终 JSON 判断。'
             ].join('\n')
           });
           continue;

@@ -14,6 +14,7 @@ mod openai_chat_client;
 mod openai_translator;
 mod qa_session_worker;
 mod runtime_config_store;
+mod status_dashboard;
 mod state_store;
 mod utils;
 mod webui_sync_store;

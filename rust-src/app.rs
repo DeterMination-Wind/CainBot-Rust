@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::chat_session_manager::ChatSessionManager;
@@ -25,6 +25,7 @@ use crate::openai_chat_client::{OpenAiChatClient, OpenAiChatClientConfig};
 use crate::openai_translator::{OpenAiTranslator, OpenAiTranslatorConfig};
 use crate::runtime_config_store::{RuntimeConfigDefaults, RuntimeConfigStore};
 use crate::state_store::StateStore;
+use crate::status_dashboard::create_status_dashboard_image;
 use crate::utils::path_exists;
 use crate::webui_sync_store::WebUiSyncStore;
 use crate::worker_process::WorkerSupervisor;
@@ -618,6 +619,7 @@ async fn handle_message_event(
                         let result = chat_session_manager.chat(&context, &input).await?;
                         send_chat_result_if_present(
                             chat_session_manager,
+                            logger,
                             group_file_download_worker,
                             napcat_client,
                             &context,
@@ -669,6 +671,7 @@ async fn handle_message_event(
                             let result = chat_session_manager.chat(&context, &input).await?;
                             send_chat_result_if_present(
                                 chat_session_manager,
+                                logger,
                                 group_file_download_worker,
                                 napcat_client,
                                 &context,
@@ -732,6 +735,9 @@ async fn execute_command(
                 )
                 .await?;
         }
+        "status" => {
+            send_status_dashboard_image(napcat_client, context, reply_message_id).await?;
+        }
         "chat" => {
             if context.message_type == "group" && !runtime_config_store.is_qa_group_enabled(&context.group_id, static_group_ids).await {
                 bail!("当前群未启用 Cain 问答。请先由 bot 主人执行 /e 启用，或把群号加入 qa.enabledGroupIds。");
@@ -776,6 +782,7 @@ async fn execute_command(
             let result = chat_session_manager.chat(context, &chat_input).await?;
             send_chat_result_if_present(
                 chat_session_manager,
+                logger,
                 group_file_download_worker,
                 napcat_client,
                 context,
@@ -1167,6 +1174,7 @@ fn format_group_status(status: &crate::chat_session_manager::GroupPromptStatus) 
 
 async fn send_chat_result_if_present(
     chat_session_manager: &ChatSessionManager,
+    logger: &Logger,
     group_file_download_worker: &GroupFileDownloadWorker,
     napcat_client: &NapCatClient,
     context: &crate::event_utils::EventContext,
@@ -1208,9 +1216,16 @@ async fn send_chat_result_if_present(
             return Ok(());
         }
         if let Some(reason) = handoff.get("reason").and_then(Value::as_str).map(str::trim).filter(|item| !item.is_empty()) {
-            napcat_client
-                .reply_text(&context.message_type, target_id, reply_message_id, reason)
-                .await?;
+            reply_text_with_markdown_image(
+                chat_session_manager,
+                napcat_client,
+                logger,
+                context,
+                target_id,
+                reply_message_id,
+                reason,
+            )
+            .await?;
         }
         return Ok(());
     }
@@ -1223,9 +1238,16 @@ async fn send_chat_result_if_present(
         if result.text.trim().is_empty() {
             return Ok(());
         }
-        napcat_client
-            .reply_text(&context.message_type, target_id, reply_message_id, &result.text)
-            .await?;
+        reply_text_with_markdown_image(
+            chat_session_manager,
+            napcat_client,
+            logger,
+            context,
+            target_id,
+            reply_message_id,
+            &result.text,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -1250,9 +1272,16 @@ async fn send_chat_result_if_present(
             return Ok(());
         }
         if let Some(reason) = handoff.get("reason").and_then(Value::as_str).map(str::trim).filter(|item| !item.is_empty()) {
-            napcat_client
-                .reply_text(&context.message_type, target_id, reply_message_id, reason)
-                .await?;
+            reply_text_with_markdown_image(
+                chat_session_manager,
+                napcat_client,
+                logger,
+                context,
+                target_id,
+                reply_message_id,
+                reason,
+            )
+            .await?;
         }
         return Ok(());
     }
@@ -1261,9 +1290,102 @@ async fn send_chat_result_if_present(
         return Ok(());
     }
 
+    reply_text_with_markdown_image(
+        chat_session_manager,
+        napcat_client,
+        logger,
+        context,
+        target_id,
+        reply_message_id,
+        &review.text,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn reply_text_with_markdown_image(
+    chat_session_manager: &ChatSessionManager,
+    napcat_client: &NapCatClient,
+    logger: &Logger,
+    context: &crate::event_utils::EventContext,
+    target_id: &str,
+    reply_message_id: Option<&str>,
+    text: &str,
+) -> Result<()> {
+    let normalized = text.trim();
+    if normalized.is_empty() {
+        return Ok(());
+    }
     napcat_client
-        .reply_text(&context.message_type, target_id, reply_message_id, &review.text)
+        .reply_text(&context.message_type, target_id, reply_message_id, normalized)
         .await?;
+    if let Err(error) = send_markdown_image_if_available(chat_session_manager, napcat_client, context, normalized).await {
+        logger
+            .warn(format!("发送 Markdown 渲染图失败（已忽略）：{error:#}"))
+            .await;
+    }
+    Ok(())
+}
+
+async fn send_markdown_image_if_available(
+    chat_session_manager: &ChatSessionManager,
+    napcat_client: &NapCatClient,
+    context: &crate::event_utils::EventContext,
+    text: &str,
+) -> Result<()> {
+    let Some(image_path) = chat_session_manager.render_markdown_image(text).await? else {
+        return Ok(());
+    };
+    let segments = json!([
+        {
+            "type": "image",
+            "data": { "file": image_path.clone() }
+        }
+    ]);
+    let send_result = napcat_client.send_context_message(context, segments).await;
+    let delete_result = tokio::fs::remove_file(&image_path).await;
+    if let Err(error) = send_result {
+        if delete_result.is_err() {
+            return Err(anyhow::anyhow!(
+                "发送渲染图与删除临时文件均失败：send={error:#} deletePath={}",
+                image_path
+            ));
+        }
+        return Err(anyhow::anyhow!("发送渲染图失败：{error:#}"));
+    }
+    if let Err(error) = delete_result {
+        return Err(anyhow::anyhow!(
+            "删除渲染临时图片失败：{} ({error})",
+            image_path
+        ));
+    }
+    Ok(())
+}
+
+async fn send_status_dashboard_image(
+    napcat_client: &NapCatClient,
+    context: &crate::event_utils::EventContext,
+    reply_message_id: Option<&str>,
+) -> Result<()> {
+    let image_path = create_status_dashboard_image().await?;
+    let mut segments = Vec::new();
+    if let Some(reply_id) = reply_message_id.map(str::trim).filter(|item| !item.is_empty()) {
+        segments.push(json!({
+            "type": "reply",
+            "data": { "id": reply_id }
+        }));
+    }
+    segments.push(json!({
+        "type": "image",
+        "data": {
+            "file": image_path.to_string_lossy().to_string()
+        }
+    }));
+
+    napcat_client
+        .send_context_message(context, Value::Array(segments))
+        .await
+        .with_context(|| format!("发送状态图片失败: {}", image_path.display()))?;
     Ok(())
 }
 

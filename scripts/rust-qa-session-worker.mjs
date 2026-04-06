@@ -10,6 +10,7 @@ import { ChatSessionManager } from '../src/chat-session-manager.mjs';
 import { CodexReadonlyTools } from '../src/codex-readonly-tools.mjs';
 import { LocalRagRetriever } from '../src/local-rag-retriever.mjs';
 import { NapCatClient } from '../src/napcat-client.mjs';
+import { renderReplyMarkdownImage } from '../src/reply-markdown-renderer.mjs';
 
 function writeStderr(...args) {
   const line = args.map((item) => {
@@ -537,6 +538,42 @@ async function main() {
             groupFileDownloadRequest: pendingGroupFileDownloadRequest
           }
         })}\n`);
+        continue;
+      }
+
+      if (request?.action === 'render_markdown_image') {
+        const replyText = String(payload?.text ?? '').trim();
+        if (!replyText) {
+          process.stdout.write(`${JSON.stringify({
+            id: request.id ?? null,
+            ok: true,
+            data: {
+              imagePath: '',
+              error: ''
+            }
+          })}\n`);
+          continue;
+        }
+        try {
+          const imagePath = await renderReplyMarkdownImage(replyText);
+          process.stdout.write(`${JSON.stringify({
+            id: request.id ?? null,
+            ok: true,
+            data: {
+              imagePath: String(imagePath ?? '').trim(),
+              error: ''
+            }
+          })}\n`);
+        } catch (error) {
+          process.stdout.write(`${JSON.stringify({
+            id: request.id ?? null,
+            ok: true,
+            data: {
+              imagePath: '',
+              error: String(error?.message ?? error ?? 'render failed')
+            }
+          })}\n`);
+        }
         continue;
       }
 

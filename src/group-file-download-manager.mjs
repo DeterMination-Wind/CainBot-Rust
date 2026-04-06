@@ -2520,11 +2520,14 @@ export class GroupFileDownloadManager {
   async #handleFlowError(sessionKey, context, event, error) {
     this.sessions.delete(sessionKey);
     this.logger.warn(`群文件下载流程失败：group=${context?.groupId || '-'} user=${context?.userId || '-'} error=${error?.message || error}`);
-    if (isTimeoutAbortError(error)) {
-      await this.#reply(context, event, '下载超时，已退出本次流程。');
-      return true;
+    const notifyText = isTimeoutAbortError(error)
+      ? '下载超时，已退出本次流程。'
+      : `文件下载失败：${String(error?.message ?? error).slice(0, 120)}`;
+    try {
+      await this.#reply(context, event, notifyText);
+    } catch (notifyError) {
+      this.logger.warn(`下载失败提示发送失败，已忽略：group=${context?.groupId || '-'} user=${context?.userId || '-'} error=${notifyError?.message || notifyError}`);
     }
-    await this.#reply(context, event, `文件下载失败：${String(error?.message ?? error).slice(0, 120)}`);
     return true;
   }
 

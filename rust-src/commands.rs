@@ -25,6 +25,17 @@ pub fn parse_command(text: &str) -> Option<ParsedCommand> {
             prefix: "#".to_string(),
         });
     }
+    if trimmed.eq_ignore_ascii_case("#status") {
+        return Some(ParsedCommand {
+            raw_name: "status".to_string(),
+            name: "status".to_string(),
+            raw_args: String::new(),
+            argument: String::new(),
+            flags: BTreeMap::new(),
+            positionals: Vec::new(),
+            prefix: "#".to_string(),
+        });
+    }
 
     if !trimmed.starts_with('/') {
         return None;
@@ -44,6 +55,7 @@ pub fn parse_command(text: &str) -> Option<ParsedCommand> {
     let lowered = raw_name.to_ascii_lowercase();
     let name = match lowered.as_str() {
         "help" => "help",
+        "status" => "status",
         "chat" => "chat",
         "tr" => "translate",
         "e" => "edit",
@@ -156,6 +168,17 @@ mod tests {
         let command = parse_command("#帮助").expect("command");
         assert_eq!(command.name, "help");
         assert_eq!(command.prefix, "#");
+    }
+
+    #[test]
+    fn parses_status_aliases() {
+        let hash = parse_command("#status").expect("hash status");
+        assert_eq!(hash.name, "status");
+        assert_eq!(hash.prefix, "#");
+
+        let slash = parse_command("/status").expect("slash status");
+        assert_eq!(slash.name, "status");
+        assert_eq!(slash.prefix, "/");
     }
 
     #[test]

@@ -179,6 +179,8 @@ pub fn build_help_text(bot_display_name: &str) -> String {
     [
         format!("{bot_display_name} 当前可用命令："),
         "/help 查看帮助".to_string(),
+        "/status 发送主机状态图片".to_string(),
+        "#status 同 /status".to_string(),
         "/chat <问题> 显式发起问答".to_string(),
         "/tr <文本> 翻译文本或结合引用消息翻译".to_string(),
         "/e 状态 查看当前群开关与 prompt 状态".to_string(),

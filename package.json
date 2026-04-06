@@ -4,6 +4,13 @@
   "private": true,
   "description": "NapCat-based QQ bot for GitHub release delivery, translation commands, and group file sync.",
   "type": "module",
+  "dependencies": {
+    "highlight.js": "^11.11.1",
+    "katex": "^0.16.25",
+    "markdown-it": "^14.1.0",
+    "markdown-it-katex": "^2.0.3",
+    "playwright": "^1.54.2"
+  },
   "scripts": {
     "start": "node src/index.mjs",
     "check": "node --check src/index.mjs"

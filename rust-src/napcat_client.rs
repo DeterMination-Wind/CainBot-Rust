@@ -17,6 +17,8 @@ use crate::utils::{join_url, sleep_ms, split_message_payloads, split_text};
 
 const HISTORY_READ_FAILURE_COOLDOWN_MS: u64 = 15_000;
 const GROUP_SYSTEM_READ_FAILURE_COOLDOWN_MS: u64 = 3 * 60_000;
+const TOOL_REQUEST_START: &str = "<<<CAIN_CODEX_TOOL_START>>>";
+const TOOL_REQUEST_END: &str = "<<<CAIN_CODEX_TOOL_END>>>";
 
 #[derive(Debug, Clone)]
 pub struct NapCatClientConfig {
@@ -473,11 +475,24 @@ impl NapCatClient {
     ) -> Result<Vec<Value>> {
         let mut results = Vec::new();
         let enable_mentions = message_type == "group";
-        if text.chars().count() > self.forward_threshold_chars() {
+        let (sanitized_text, removed_tool_blocks) = sanitize_user_visible_text(text);
+        if removed_tool_blocks > 0 {
+            self.logger
+                .warn(format!(
+                    "检测到回复文本包含工具请求块，已在发送前剥离：removedBlocks={removed_tool_blocks} targetType={message_type} targetId={}",
+                    target_id.trim()
+                ))
+                .await;
+        }
+        if sanitized_text.is_empty() {
+            return Ok(results);
+        }
+
+        if sanitized_text.chars().count() > self.forward_threshold_chars() {
             let forwarded = if message_type == "group" {
-                self.send_group_forward_text(target_id, text).await
+                self.send_group_forward_text(target_id, &sanitized_text).await
             } else {
-                self.send_private_forward_text(target_id, text).await
+                self.send_private_forward_text(target_id, &sanitized_text).await
             };
             match forwarded {
                 Ok(result) => return Ok(vec![result]),
@@ -488,7 +503,7 @@ impl NapCatClient {
                 }
             }
         }
-        for (index, part) in split_message_payloads(text, 1_400, enable_mentions).into_iter().enumerate() {
+        for (index, part) in split_message_payloads(&sanitized_text, 1_400, enable_mentions).into_iter().enumerate() {
             let use_reply = index == 0
                 && reply_to_message_id.map(str::trim).filter(|item| !item.is_empty()).is_some();
             let plain_message = normalize_plain_text_payload(part.clone(), enable_mentions);
@@ -783,11 +798,43 @@ fn sanitize_outgoing_text(text: &str) -> String {
         .to_string()
 }
 
+fn strip_tool_request_blocks(text: &str) -> (String, usize) {
+    if text.is_empty() {
+        return (String::new(), 0);
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    let mut removed = 0usize;
+
+    while let Some(start_rel) = text[cursor..].find(TOOL_REQUEST_START) {
+        let start = cursor + start_rel;
+        output.push_str(&text[cursor..start]);
+        let after_start = start + TOOL_REQUEST_START.len();
+        if let Some(end_rel) = text[after_start..].find(TOOL_REQUEST_END) {
+            cursor = after_start + end_rel + TOOL_REQUEST_END.len();
+        } else {
+            cursor = text.len();
+        }
+        removed += 1;
+    }
+
+    if cursor < text.len() {
+        output.push_str(&text[cursor..]);
+    }
+
+    (output, removed)
+}
+
+fn sanitize_user_visible_text(text: &str) -> (String, usize) {
+    let (without_tools, removed_tool_blocks) = strip_tool_request_blocks(text);
+    (sanitize_outgoing_text(&without_tools), removed_tool_blocks)
+}
+
 fn extract_forwardable_text(message: &Value, threshold: usize) -> Option<String> {
     if !can_use_forward_packaging(message) {
         return None;
     }
-    let text = sanitize_outgoing_text(&flatten_message_text(message));
+    let (text, _) = sanitize_user_visible_text(&flatten_message_text(message));
     if text.is_empty() || text.chars().count() <= threshold.max(1) {
         return None;
     }
