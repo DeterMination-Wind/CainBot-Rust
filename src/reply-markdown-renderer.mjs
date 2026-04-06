@@ -12,7 +12,6 @@ import { chromium } from 'playwright';
 const require = createRequire(import.meta.url);
 
 const TOOL_BLOCK_REGEX = /<<<CAIN_CODEX_TOOL_START>>>[\s\S]*?<<<CAIN_CODEX_TOOL_END>>>/g;
-const NESTED_MARKDOWN_FENCE_REGEX = /(^|\n)[ \t]*```(?:markdown|md)\s*\r?\n([\s\S]*?)\r?\n[ \t]*```(?=\n|$)/gi;
 const RENDER_DIR = path.join(os.tmpdir(), 'cain-reply-markdown-images');
 const MAX_RENDER_CHARS = 20_000;
 const MAX_RENDER_HEIGHT = 14_000;
@@ -105,18 +104,77 @@ async function getStyleBundle() {
 }
 
 function unwrapNestedMarkdownFences(text) {
-  let current = String(text ?? '');
-  for (let index = 0; index < 4; index += 1) {
-    const next = current.replace(
-      NESTED_MARKDOWN_FENCE_REGEX,
-      (_match, prefix = '', body = '') => `${prefix}${String(body ?? '').trim()}`
-    );
-    if (next === current) {
-      return next;
+  const source = String(text ?? '').replace(/\r\n/g, '\n');
+  const lines = source.split('\n');
+  const output = [];
+  let index = 0;
+
+  const parseFence = (line) => {
+    const matched = String(line ?? '').match(/^[ \t]{0,3}(`{3,})([^\r\n]*)$/);
+    if (!matched) {
+      return null;
     }
-    current = next;
+    const fence = String(matched[1] ?? '');
+    const tail = String(matched[2] ?? '');
+    return {
+      length: fence.length,
+      info: tail.trim(),
+      closing: tail.trim() === ''
+    };
+  };
+
+  while (index < lines.length) {
+    const openFence = parseFence(lines[index]);
+    if (!openFence || !/^(md|markdown)$/i.test(openFence.info)) {
+      output.push(lines[index]);
+      index += 1;
+      continue;
+    }
+
+    let cursor = index + 1;
+    let nestedFenceDepth = 0;
+    const bodyLines = [];
+    let closed = false;
+    while (cursor < lines.length) {
+      const fence = parseFence(lines[cursor]);
+      if (!fence || fence.length < openFence.length) {
+        bodyLines.push(lines[cursor]);
+        cursor += 1;
+        continue;
+      }
+      if (nestedFenceDepth === 0 && fence.closing) {
+        closed = true;
+        cursor += 1;
+        break;
+      }
+      if (fence.closing) {
+        nestedFenceDepth = Math.max(0, nestedFenceDepth - 1);
+      } else {
+        nestedFenceDepth += 1;
+      }
+      bodyLines.push(lines[cursor]);
+      cursor += 1;
+    }
+
+    if (!closed) {
+      output.push(lines[index], ...bodyLines);
+      index = cursor;
+      continue;
+    }
+
+    let start = 0;
+    let end = bodyLines.length;
+    while (start < end && String(bodyLines[start] ?? '').trim() === '') {
+      start += 1;
+    }
+    while (end > start && String(bodyLines[end - 1] ?? '').trim() === '') {
+      end -= 1;
+    }
+    output.push(...bodyLines.slice(start, end));
+    index = cursor;
   }
-  return current;
+
+  return output.join('\n');
 }
 
 function sanitizeReplyText(sourceText) {
