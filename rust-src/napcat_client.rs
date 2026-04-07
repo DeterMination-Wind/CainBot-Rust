@@ -549,6 +549,23 @@ impl NapCatClient {
         .await
     }
 
+    pub async fn set_msg_emoji_like(
+        &self,
+        message_id: &str,
+        emoji_id: &str,
+        set: bool,
+    ) -> Result<Value> {
+        self.call(
+            "set_msg_emoji_like",
+            json!({
+                "message_id": message_id.trim(),
+                "emoji_id": emoji_id.trim(),
+                "set": set
+            }),
+        )
+        .await
+    }
+
     pub async fn reply_text(
         &self,
         message_type: &str,

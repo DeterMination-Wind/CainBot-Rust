@@ -58,6 +58,7 @@ pub fn parse_command(text: &str) -> Option<ParsedCommand> {
         "status" => "status",
         "chat" => "chat",
         "agent" => "agent",
+        "attack" => "attack",
         "tr" => "translate",
         "e" => "edit",
         _ => return None,
@@ -203,5 +204,12 @@ mod tests {
         let command = parse_command("/agent 帮我把这个任务做完").expect("command");
         assert_eq!(command.name, "agent");
         assert_eq!(command.argument, "帮我把这个任务做完");
+    }
+
+    #[test]
+    fn parses_attack_command() {
+        let command = parse_command("/attack 3").expect("command");
+        assert_eq!(command.name, "attack");
+        assert_eq!(command.positionals, vec!["3".to_string()]);
     }
 }

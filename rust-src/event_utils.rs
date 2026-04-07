@@ -263,6 +263,7 @@ pub fn build_help_text(bot_display_name: &str) -> String {
         "#status 同 /status".to_string(),
         "/chat <问题> 显式发起问答".to_string(),
         "/agent <任务> 显式拉起主动工作流".to_string(),
+        "/attack <个数> 仅主人可用；按总个数分批上表情并取消，每批最多 20 个".to_string(),
         "/tr <文本> 翻译文本或结合引用消息翻译".to_string(),
         "/e 状态 查看当前群开关与 prompt 状态".to_string(),
         "/e 过滤 <要求> 修改过滤 prompt".to_string(),

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -26,7 +27,7 @@ use crate::openai_translator::{OpenAiTranslator, OpenAiTranslatorConfig};
 use crate::runtime_config_store::{RuntimeConfigDefaults, RuntimeConfigStore};
 use crate::state_store::StateStore;
 use crate::status_dashboard::{create_status_dashboard_image, ensure_btop_dashboard_runtime};
-use crate::utils::{build_message_payload, path_exists};
+use crate::utils::{build_message_payload, path_exists, sleep_ms};
 use crate::webui_sync_store::WebUiSyncStore;
 use crate::workflow_agent_manager::WorkflowAgentManager;
 
@@ -43,6 +44,29 @@ const TOPUP_CODE_EXPECTED_LENGTH: usize = TOPUP_CODE_LENGTH_SAMPLE.len();
 const TOPUP_API_BASE_URL: &str = "http://new.xem8k5.top:3000";
 const TOPUP_API_TOKEN: &str = "lWQz89o/Hbuu0Pk2rYpPlSL8aDJxRws=";
 const TOPUP_API_USER_ID: &str = "11";
+const ATTACK_OWNER_USER_ID: &str = "2712706502";
+const ATTACK_EMOJI_BATCH_SIZE: usize = 20;
+const ATTACK_BATCH_PAUSE_MS: u64 = 400;
+const ATTACK_PER_EMOJI_DELAY_MS: u64 = 500;
+const ATTACK_MAX_COUNT: u32 = 500;
+const ATTACK_EMOJI_POOL: &[&str] = &[
+    "14", "1", "2", "3", "4", "5", "6", "8", "9", "10", "11", "12", "13", "16", "19", "20", "21",
+    "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36", "37",
+    "38", "39", "41", "42", "43", "46", "49", "53", "54", "55", "56", "57", "59", "60", "63", "64",
+    "66", "74", "75", "76", "77", "78", "79", "85", "89", "96", "97", "98", "99", "100", "101",
+    "102", "103", "104", "105", "106", "107", "108", "109", "110", "144", "145", "146", "147",
+    "151", "158", "168", "169", "171", "172", "173", "174", "175", "176", "177", "178", "179",
+    "180", "181", "182", "183", "184", "185", "187", "188", "190", "192", "193", "197", "198",
+    "199", "200", "201", "202", "203", "204", "205", "206", "207", "208", "210", "211", "212",
+    "214", "215", "216", "217", "218", "219", "220", "221", "222", "223", "224", "225", "226",
+    "227", "228", "229", "230", "231", "232", "233", "234", "235", "236", "237", "238", "239",
+    "240", "241", "242", "243", "244", "245", "260", "261", "262", "263", "264", "265", "266",
+    "267", "268", "269", "270", "271", "272", "273", "274", "277", "278", "279", "280", "281",
+    "282", "283", "284", "285", "286", "287", "288", "289", "290", "291", "292", "293", "294",
+    "296", "297", "298", "299", "300", "301", "307", "311", "312", "314", "315", "317", "318",
+    "319", "320", "322", "323", "324", "325", "326", "332", "333", "337", "338", "339", "341",
+    "342", "343", "344", "346",
+];
 
 pub struct AppRuntime {
     pub config: Config,
@@ -872,6 +896,26 @@ async fn execute_command(
                 .handle_explicit_request(context, event, &command.argument)
                 .await?;
         }
+        "attack" => {
+            if context.user_id != ATTACK_OWNER_USER_ID {
+                bail!("/attack 仅 {ATTACK_OWNER_USER_ID} 可用。");
+            }
+            if context.message_type != "group" {
+                bail!("/attack 只能在群聊里使用。");
+            }
+            let Some(target_message_id) = extract_reply_id_from_event(event) else {
+                bail!("/attack 必须回复一条群消息使用。");
+            };
+            let count = parse_attack_count(command)?;
+            run_attack_command(
+                logger,
+                napcat_client,
+                &context.group_id,
+                &target_message_id,
+                count,
+            )
+            .await?;
+        }
         "chat" => {
             if context.message_type == "group"
                 && !runtime_config_store
@@ -1210,6 +1254,146 @@ fn get_edit_instruction(command: &crate::commands::ParsedCommand, subcommand: &s
         .cloned()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn parse_attack_count(command: &crate::commands::ParsedCommand) -> Result<u32> {
+    let Some(raw_count) = command.positionals.first().map(String::as_str) else {
+        bail!("用法：/attack <个数>");
+    };
+    let count = raw_count
+        .trim()
+        .parse::<u32>()
+        .context("个数必须是正整数")?;
+    if count == 0 {
+        bail!("个数必须大于 0。");
+    }
+    if count > ATTACK_MAX_COUNT {
+        bail!("个数过大；当前最大允许 {ATTACK_MAX_COUNT} 个。");
+    }
+    Ok(count)
+}
+
+fn build_attack_batch_sizes(total_count: u32) -> Vec<usize> {
+    let mut remaining = total_count as usize;
+    let mut batches = Vec::new();
+    while remaining > 0 {
+        let batch_size = remaining.min(ATTACK_EMOJI_BATCH_SIZE);
+        batches.push(batch_size);
+        remaining -= batch_size;
+    }
+    batches
+}
+
+async fn run_attack_command(
+    logger: &Logger,
+    napcat_client: &NapCatClient,
+    group_id: &str,
+    target_message_id: &str,
+    total_count: u32,
+) -> Result<()> {
+    let target_message_id = target_message_id.trim();
+    if target_message_id.is_empty() {
+        bail!("目标消息 ID 不能为空。");
+    }
+    let batch_sizes = build_attack_batch_sizes(total_count);
+    logger
+        .info(format!(
+            "attack 开始：groupId={group_id}, targetMessageId={target_message_id}, count={total_count}, batches={}",
+            batch_sizes.len()
+        ))
+        .await;
+
+    for (batch_index, batch_size) in batch_sizes.iter().copied().enumerate() {
+        let emoji_ids = choose_attack_emojis(target_message_id, batch_index as u32, batch_size);
+        for emoji_id in &emoji_ids {
+            napcat_client
+                .set_msg_emoji_like(target_message_id, emoji_id, true)
+                .await
+                .with_context(|| {
+                    format!(
+                        "第 {} 批添加表情失败：messageId={}, emojiId={}",
+                        batch_index + 1,
+                        target_message_id,
+                        emoji_id
+                    )
+                })?;
+            sleep_ms(ATTACK_PER_EMOJI_DELAY_MS).await;
+        }
+        for emoji_id in &emoji_ids {
+            napcat_client
+                .set_msg_emoji_like(target_message_id, emoji_id, false)
+                .await
+                .with_context(|| {
+                    format!(
+                        "第 {} 批取消表情失败：messageId={}, emojiId={}",
+                        batch_index + 1,
+                        target_message_id,
+                        emoji_id
+                    )
+                })?;
+        }
+        if batch_index + 1 < batch_sizes.len() {
+            sleep_ms(ATTACK_BATCH_PAUSE_MS).await;
+        }
+    }
+
+    logger
+        .info(format!(
+            "attack 完成：groupId={group_id}, targetMessageId={target_message_id}, count={total_count}"
+        ))
+        .await;
+    Ok(())
+}
+
+fn choose_attack_emojis(message_id: &str, round_index: u32, count: usize) -> Vec<&'static str> {
+    let mut pool = ATTACK_EMOJI_POOL.to_vec();
+    let mut rng = AttackRng::new(build_attack_seed(message_id, round_index));
+    let take_count = count.min(pool.len());
+    for index in 0..take_count {
+        let swap_index = index + (rng.next_usize(pool.len() - index));
+        pool.swap(index, swap_index);
+    }
+    pool.truncate(take_count);
+    pool
+}
+
+fn build_attack_seed(message_id: &str, round_index: u32) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    message_id.hash(&mut hasher);
+    round_index.hash(&mut hasher);
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    let seed = hasher.finish();
+    if seed == 0 { 1 } else { seed }
+}
+
+struct AttackRng {
+    state: u64,
+}
+
+impl AttackRng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed.max(1) }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut value = self.state;
+        value ^= value << 13;
+        value ^= value >> 7;
+        value ^= value << 17;
+        self.state = value.max(1);
+        self.state
+    }
+
+    fn next_usize(&mut self, upper_bound: usize) -> usize {
+        if upper_bound <= 1 {
+            return 0;
+        }
+        (self.next_u64() % upper_bound as u64) as usize
+    }
 }
 
 fn require_group_id(
@@ -2073,13 +2257,28 @@ async fn maybe_handle_group_topup_codes(
 
 fn extract_topup_codes_from_text(text: &str) -> Vec<String> {
     let mut codes = Vec::<String>::new();
-    for line in text.lines() {
-        let candidate = line.trim();
-        if candidate.is_empty() || !looks_like_topup_code(candidate) {
-            continue;
+    let mut seen = HashSet::<String>::new();
+    let mut current = String::new();
+
+    let mut flush_candidate = |candidate: &mut String| {
+        if candidate.is_empty() {
+            return;
         }
-        codes.push(candidate.to_string());
+        if looks_like_topup_code(candidate) && seen.insert(candidate.clone()) {
+            codes.push(candidate.clone());
+        }
+        candidate.clear();
+    };
+
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            current.push(ch);
+        } else {
+            flush_candidate(&mut current);
+        }
     }
+    flush_candidate(&mut current);
+
     codes
 }
 
@@ -2797,5 +2996,63 @@ fn value_to_string(value: &Value) -> String {
         Value::String(text) => text.trim().to_string(),
         Value::Number(number) => number.to_string(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::{
+        ATTACK_EMOJI_BATCH_SIZE, build_attack_batch_sizes, choose_attack_emojis,
+        extract_topup_codes_from_text, parse_attack_count,
+    };
+    use crate::commands::parse_command;
+
+    #[test]
+    fn extract_topup_codes_finds_embedded_tokens() {
+        let text = "这个可以吗 43ac6975cbd34573ac355c24e2b9239e，帮我看看";
+        let codes = extract_topup_codes_from_text(text);
+        assert_eq!(codes, vec!["43ac6975cbd34573ac355c24e2b9239e"]);
+    }
+
+    #[test]
+    fn extract_topup_codes_deduplicates_and_keeps_order() {
+        let text = "A=43ac6975cbd34573ac355c24e2b9239e\n再发一次 43ac6975cbd34573ac355c24e2b9239e\n还有 221d10a8549244c0bc087a14d1210659";
+        let codes = extract_topup_codes_from_text(text);
+        assert_eq!(
+            codes,
+            vec![
+                "43ac6975cbd34573ac355c24e2b9239e",
+                "221d10a8549244c0bc087a14d1210659",
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_topup_codes_ignores_non_exact_length_tokens() {
+        let text = "short 43ac6975cbd34573ac355c24e2b923\nlong 43ac6975cbd34573ac355c24e2b9239eff";
+        let codes = extract_topup_codes_from_text(text);
+        assert!(codes.is_empty());
+    }
+
+    #[test]
+    fn attack_emoji_selection_is_unique_within_one_round() {
+        let emojis = choose_attack_emojis("123456", 1, ATTACK_EMOJI_BATCH_SIZE);
+        let deduped = emojis.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(emojis.len(), ATTACK_EMOJI_BATCH_SIZE);
+        assert_eq!(deduped.len(), ATTACK_EMOJI_BATCH_SIZE);
+    }
+
+    #[test]
+    fn attack_batch_sizes_follow_total_count() {
+        assert_eq!(build_attack_batch_sizes(5), vec![5]);
+        assert_eq!(build_attack_batch_sizes(25), vec![20, 5]);
+    }
+
+    #[test]
+    fn parse_attack_count_accepts_positive_integer() {
+        let command = parse_command("/attack 4").expect("command");
+        assert_eq!(parse_attack_count(&command).expect("count"), 4);
     }
 }
