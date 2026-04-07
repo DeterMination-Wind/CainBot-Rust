@@ -17,6 +17,8 @@ use crate::utils::{join_url, sleep_ms, split_message_payloads, split_text};
 
 const HISTORY_READ_FAILURE_COOLDOWN_MS: u64 = 15_000;
 const GROUP_SYSTEM_READ_FAILURE_COOLDOWN_MS: u64 = 3 * 60_000;
+const PRIVATE_FORWARD_SEND_FAILURE_COOLDOWN_MS: u64 = 20_000;
+const PRIVATE_FORWARD_SEND_RETRY_ATTEMPTS: usize = 3;
 const TOOL_REQUEST_START: &str = "<<<CAIN_CODEX_TOOL_START>>>";
 const TOOL_REQUEST_END: &str = "<<<CAIN_CODEX_TOOL_END>>>";
 
@@ -46,6 +48,7 @@ pub struct NapCatClient {
     event_semaphore: Arc<Semaphore>,
     history_read_cooldown_until_ms: Arc<AtomicU64>,
     group_system_read_cooldown_until_ms: Arc<AtomicU64>,
+    private_forward_send_cooldown_until_ms: Arc<AtomicU64>,
 }
 
 impl NapCatClient {
@@ -66,6 +69,7 @@ impl NapCatClient {
             stopped: Arc::new(AtomicBool::new(false)),
             history_read_cooldown_until_ms: Arc::new(AtomicU64::new(0)),
             group_system_read_cooldown_until_ms: Arc::new(AtomicU64::new(0)),
+            private_forward_send_cooldown_until_ms: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -149,6 +153,46 @@ impl NapCatClient {
             }
         }
         unreachable!("call_with_retry_and_cooldown loop should always return");
+    }
+
+    async fn call_private_forward_with_retry_and_cooldown(&self, params: Value) -> Result<Value> {
+        let action = "send_private_forward_msg";
+        let attempts = PRIVATE_FORWARD_SEND_RETRY_ATTEMPTS.max(1);
+        let cooldown_label = "private-forward-send";
+        let cooldown_until_ms = self.private_forward_send_cooldown_until_ms.as_ref();
+        let remaining_ms = cooldown_remaining_ms(cooldown_until_ms);
+        if remaining_ms > 0 {
+            bail!("NapCat API {action} 冷却中：bucket={cooldown_label} remainingMs={remaining_ms}");
+        }
+        for attempt in 1..=attempts {
+            match self.call(action, params.clone()).await {
+                Ok(payload) => return Ok(payload),
+                Err(error) if attempt < attempts && is_retryable_write_error(&error) => {
+                    self.logger
+                        .warn(format!(
+                            "NapCat 私聊转发发送瞬时失败，准备重试：attempt={attempt}/{attempts} error={error:#}"
+                        ))
+                        .await;
+                    sleep_ms(500 * attempt as u64).await;
+                }
+                Err(error) => {
+                    if is_retryable_write_error(&error) {
+                        extend_cooldown(
+                            cooldown_until_ms,
+                            current_time_ms().saturating_add(PRIVATE_FORWARD_SEND_FAILURE_COOLDOWN_MS),
+                        );
+                        self.logger
+                            .warn(format!(
+                                "NapCat 私聊转发发送进入冷却：bucket={cooldown_label} cooldownMs={} error={error:#}",
+                                PRIVATE_FORWARD_SEND_FAILURE_COOLDOWN_MS
+                            ))
+                            .await;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        unreachable!("call_private_forward_with_retry_and_cooldown loop should always return");
     }
 
     pub async fn send_group_message(&self, group_id: &str, message: Value) -> Result<Value> {
@@ -543,13 +587,10 @@ impl NapCatClient {
     }
 
     async fn send_private_forward_text(&self, user_id: &str, text: &str) -> Result<Value> {
-        self.call(
-            "send_private_forward_msg",
-            json!({
-                "user_id": user_id.trim(),
-                "messages": build_forward_nodes(text, &self.config.forward_user_id, &self.config.forward_nickname)
-            }),
-        )
+        self.call_private_forward_with_retry_and_cooldown(json!({
+            "user_id": user_id.trim(),
+            "messages": build_forward_nodes(text, &self.config.forward_user_id, &self.config.forward_nickname)
+        }))
         .await
     }
 
@@ -685,17 +726,31 @@ fn is_reply_send_rejected_error(error: &anyhow::Error) -> bool {
 }
 
 fn is_retryable_read_error(error: &anyhow::Error) -> bool {
-    let message = error.to_string();
-    if message.is_empty() {
+    is_retryable_napcat_transient_error(error)
+}
+
+fn is_retryable_write_error(error: &anyhow::Error) -> bool {
+    is_retryable_napcat_transient_error(error)
+}
+
+fn is_retryable_napcat_transient_error(error: &anyhow::Error) -> bool {
+    let lower = error.to_string().to_lowercase();
+    if lower.is_empty() {
         return false;
     }
-    let lower = message.to_lowercase();
     lower.contains("connection reset by peer")
         || lower.contains("connection aborted")
         || lower.contains("broken pipe")
         || lower.contains("connection refused")
         || lower.contains("unexpected eof")
         || lower.contains("error sending request")
+        || lower.contains("operation timed out")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("http 502")
+        || lower.contains("http 503")
+        || lower.contains("http 504")
 }
 
 fn current_time_ms() -> u64 {

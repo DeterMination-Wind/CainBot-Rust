@@ -14,7 +14,7 @@ use crate::codex_bridge_server::CodexBridgeServer;
 use crate::event_utils::{
     build_help_text, create_context_from_event, ensure_message_event, event_mentions_other_user,
     event_mentions_self, get_sender_name, is_question_intent_text, parse_command_from_event,
-    plain_text_from_event,
+    plain_text_from_event, plain_text_from_message,
 };
 use crate::group_file_download_worker::GroupFileDownloadWorker;
 use crate::issue_repair_manager::IssueRepairManager;
@@ -25,16 +25,24 @@ use crate::openai_chat_client::{OpenAiChatClient, OpenAiChatClientConfig};
 use crate::openai_translator::{OpenAiTranslator, OpenAiTranslatorConfig};
 use crate::runtime_config_store::{RuntimeConfigDefaults, RuntimeConfigStore};
 use crate::state_store::StateStore;
-use crate::status_dashboard::create_status_dashboard_image;
-use crate::utils::path_exists;
+use crate::status_dashboard::{create_status_dashboard_image, ensure_btop_dashboard_runtime};
+use crate::utils::{build_message_payload, path_exists};
 use crate::webui_sync_store::WebUiSyncStore;
 use crate::worker_process::WorkerSupervisor;
 
 const GROUP_CARD_SYNC_RETRY_MS: u64 = 10 * 60 * 1000;
 const GROUP_INVITE_POLL_INTERVAL_MS: u64 = 60 * 1000;
+const BTOP_RUNTIME_GUARD_INTERVAL_MS: u64 = 20 * 1000;
 const SHUTDOWN_VOTE_REQUIRED_COUNT: usize = 3;
 const SHUTDOWN_VOTE_TTL_MS: u64 = 10 * 60 * 1000;
 const SHUTDOWN_VOTE_PROMPT: &str = "确定要关闭此bot的功能吗，大于两个人回复本消息\"Y\"将确认此操作";
+const TOPUP_TRIGGER_GROUP_ID: &str = "634758974";
+const TOPUP_RESULT_RECEIVER_USER_ID: &str = "2712706502";
+const TOPUP_CODE_LENGTH_SAMPLE: &str = "221d10a8549244c0bc087a14d1210659";
+const TOPUP_CODE_EXPECTED_LENGTH: usize = TOPUP_CODE_LENGTH_SAMPLE.len();
+const TOPUP_API_BASE_URL: &str = "http://new.xem8k5.top:3000";
+const TOPUP_API_TOKEN: &str = "lWQz89o/Hbuu0Pk2rYpPlSL8aDJxRws=";
+const TOPUP_API_USER_ID: &str = "11";
 
 pub struct AppRuntime {
     pub config: Config,
@@ -234,6 +242,12 @@ impl AppRuntime {
         let idle_activity_tokens = Arc::new(tokio::sync::Mutex::new(HashMap::<String, u64>::new()));
         let background_stop = Arc::new(AtomicBool::new(false));
 
+        if let Err(error) = ensure_btop_dashboard_runtime().await {
+            self.logger
+                .warn(format!("初始化 btop 状态采样会话失败（后续将继续后台重试）：{error:#}"))
+                .await;
+        }
+
         let invite_poll_logger = self.logger.clone();
         let invite_poll_runtime_store = self.runtime_config_store.clone();
         let invite_poll_napcat_client = self.napcat_client.clone();
@@ -250,9 +264,11 @@ impl AppRuntime {
                 .await
                 {
                     let message = error.to_string();
-                    if message.contains("NapCat API get_group_system_msg 冷却中") {
+                    if message.contains("NapCat API get_group_system_msg 冷却中")
+                        || is_napcat_transient_transport_error_message(&message)
+                    {
                         invite_poll_logger
-                            .info(format!("群邀请轮询冷却中：{message}"))
+                            .info(format!("群邀请轮询暂时跳过：{message}"))
                             .await;
                     } else {
                         invite_poll_logger
@@ -261,6 +277,19 @@ impl AppRuntime {
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(GROUP_INVITE_POLL_INTERVAL_MS)).await;
+            }
+        });
+
+        let btop_guard_logger = self.logger.clone();
+        let btop_guard_stop = background_stop.clone();
+        tokio::spawn(async move {
+            while !btop_guard_stop.load(Ordering::SeqCst) {
+                if let Err(error) = ensure_btop_dashboard_runtime().await {
+                    btop_guard_logger
+                        .warn(format!("维护 btop 状态采样会话失败：{error:#}"))
+                        .await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(BTOP_RUNTIME_GUARD_INTERVAL_MS)).await;
             }
         });
         let event_logger = self.logger.clone();
@@ -581,6 +610,9 @@ async fn handle_message_event(
             {
                 return Ok(());
             }
+        }
+        if maybe_handle_group_topup_codes(logger, napcat_client, &context, event, &text).await? {
+            return Ok(());
         }
         if group_file_download_worker
             .handle_group_message(&context, event, &text)
@@ -1316,12 +1348,39 @@ async fn reply_text_with_markdown_image(
     if normalized.is_empty() {
         return Ok(());
     }
-    napcat_client
+    let send_results = napcat_client
         .reply_text(&context.message_type, target_id, reply_message_id, normalized)
         .await?;
-    if let Err(error) = send_markdown_image_if_available(chat_session_manager, napcat_client, context, normalized).await {
+    let markdown_image_already_sent = match send_markdown_image_if_available(
+        chat_session_manager,
+        napcat_client,
+        context,
+        normalized,
+    )
+    .await
+    {
+        Ok(sent) => sent,
+        Err(error) => {
+            logger
+                .warn(format!("常规渲染图发送失败（稍后可能触发兜底）：{error:#}"))
+                .await;
+            false
+        }
+    };
+    if let Err(error) =
+        verify_recent_delivery_or_send_markdown_fallback(
+            chat_session_manager,
+            napcat_client,
+            logger,
+            context,
+            normalized,
+            &send_results,
+            markdown_image_already_sent,
+        )
+        .await
+    {
         logger
-            .warn(format!("发送 Markdown 渲染图失败（已忽略）：{error:#}"))
+            .warn(format!("发送消息最终兜底检查失败（已忽略）：{error:#}"))
             .await;
     }
     Ok(())
@@ -1332,9 +1391,9 @@ async fn send_markdown_image_if_available(
     napcat_client: &NapCatClient,
     context: &crate::event_utils::EventContext,
     text: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let Some(image_path) = chat_session_manager.render_markdown_image(text).await? else {
-        return Ok(());
+        return Ok(false);
     };
     let segments = json!([
         {
@@ -1359,7 +1418,496 @@ async fn send_markdown_image_if_available(
             image_path
         ));
     }
+    Ok(true)
+}
+
+async fn trigger_markdown_fallback_if_needed(
+    chat_session_manager: &ChatSessionManager,
+    napcat_client: &NapCatClient,
+    logger: &Logger,
+    context: &crate::event_utils::EventContext,
+    expected_text: &str,
+    reason: &str,
+    markdown_image_already_sent: bool,
+) -> Result<()> {
+    if markdown_image_already_sent {
+        logger
+            .info(format!("{reason} 已发送常规渲染图，跳过重复兜底。"))
+            .await;
+        return Ok(());
+    }
+    logger.warn(reason).await;
+    let sent = send_markdown_image_if_available(chat_session_manager, napcat_client, context, expected_text).await?;
+    if !sent {
+        logger.warn("图片兜底触发，但渲染未生成可发送图片。").await;
+    }
     Ok(())
+}
+
+async fn verify_recent_delivery_or_send_markdown_fallback(
+    chat_session_manager: &ChatSessionManager,
+    napcat_client: &NapCatClient,
+    logger: &Logger,
+    context: &crate::event_utils::EventContext,
+    expected_text: &str,
+    send_results: &[Value],
+    markdown_image_already_sent: bool,
+) -> Result<()> {
+    let sent_message_ids = extract_message_ids_from_send_results(send_results);
+
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let recent_messages = match load_recent_messages(napcat_client, context, 5).await {
+        Ok(messages) => messages,
+        Err(error) => {
+            trigger_markdown_fallback_if_needed(
+                chat_session_manager,
+                napcat_client,
+                logger,
+                context,
+                expected_text,
+                &format!("读取最近消息失败，触发图片兜底：{error:#}"),
+                markdown_image_already_sent,
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    if recent_messages_contain_any_message_id(&recent_messages, &sent_message_ids) {
+        return Ok(());
+    }
+
+    let expected_visible_text = build_expected_visible_text_for_delivery_check(context, expected_text);
+    let expected_prefix = text_prefix(&expected_visible_text, 10);
+    if expected_prefix.is_empty() {
+        if !sent_message_ids.is_empty() {
+            trigger_markdown_fallback_if_needed(
+                chat_session_manager,
+                napcat_client,
+                logger,
+                context,
+                expected_text,
+                "最近 5 条消息未命中本次消息 ID，且无法进行前缀校验，触发图片兜底。",
+                markdown_image_already_sent,
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+
+    let self_id = context.self_id.trim();
+    let latest_self_message = pick_latest_self_message(&recent_messages, self_id);
+    let Some(message) = latest_self_message else {
+        trigger_markdown_fallback_if_needed(
+            chat_session_manager,
+            napcat_client,
+            logger,
+            context,
+            expected_text,
+            "最近 5 条消息里未检测到 bot 自己的可见文本消息，触发图片兜底。",
+            markdown_image_already_sent,
+        )
+        .await?;
+        return Ok(());
+    };
+
+    let actual_text = extract_visible_text_for_delivery_check(message);
+    let actual_prefix = text_prefix(&actual_text, 10);
+    if actual_prefix == expected_prefix {
+        return Ok(());
+    }
+
+    let reason = if sent_message_ids.is_empty() {
+        format!(
+            "最近一条 bot 消息前缀不匹配，触发图片兜底：expected=\"{}\" actual=\"{}\"",
+            expected_prefix, actual_prefix
+        )
+    } else {
+        format!(
+            "最近 5 条消息未命中本次消息 ID，且最新可见消息前缀不匹配，触发图片兜底：expected=\"{}\" actual=\"{}\"",
+            expected_prefix, actual_prefix
+        )
+    };
+    trigger_markdown_fallback_if_needed(
+        chat_session_manager,
+        napcat_client,
+        logger,
+        context,
+        expected_text,
+        &reason,
+        markdown_image_already_sent,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn load_recent_messages(
+    napcat_client: &NapCatClient,
+    context: &crate::event_utils::EventContext,
+    count: usize,
+) -> Result<Vec<Value>> {
+    let payload = if context.message_type == "group" {
+        napcat_client
+            .get_group_message_history(&context.group_id, count.max(1))
+            .await?
+    } else {
+        napcat_client
+            .get_friend_message_history(&context.user_id, count.max(1))
+            .await?
+    };
+    Ok(extract_history_messages(&payload))
+}
+
+fn extract_history_messages(payload: &Value) -> Vec<Value> {
+    if let Some(items) = payload.as_array() {
+        return items.to_vec();
+    }
+    for key in ["messages", "message", "records", "list"] {
+        if let Some(items) = payload.get(key).and_then(Value::as_array) {
+            return items.to_vec();
+        }
+    }
+    Vec::new()
+}
+
+fn recent_messages_contain_any_message_id(messages: &[Value], sent_message_ids: &[String]) -> bool {
+    if sent_message_ids.is_empty() {
+        return false;
+    }
+    let expected_ids: HashSet<String> = sent_message_ids
+        .iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect();
+    if expected_ids.is_empty() {
+        return false;
+    }
+    messages.iter().any(|message| {
+        let id = extract_history_message_id(message);
+        !id.is_empty() && expected_ids.contains(&id)
+    })
+}
+
+fn extract_history_message_id(message: &Value) -> String {
+    for key in ["message_id", "messageId", "msg_id", "msgId", "id"] {
+        if let Some(value) = message.get(key) {
+            let id = value_to_string(value);
+            if !id.is_empty() {
+                return id;
+            }
+        }
+    }
+    String::new()
+}
+
+fn pick_latest_self_message<'a>(messages: &'a [Value], self_id: &str) -> Option<&'a Value> {
+    if self_id.is_empty() {
+        return None;
+    }
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| {
+            extract_sender_id(message) == self_id && !extract_visible_text_for_delivery_check(message).is_empty()
+        })
+        .max_by_key(|(index, message)| {
+            (
+                extract_message_sort_key(message),
+                extract_message_secondary_key(message),
+                *index as i64,
+            )
+        })
+        .map(|(_, message)| message)
+}
+
+fn extract_sender_id(message: &Value) -> String {
+    if let Some(user_id) = message.get("user_id") {
+        let value = value_to_string(user_id);
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    if let Some(user_id) = message.get("sender").and_then(|sender| sender.get("user_id")) {
+        let value = value_to_string(user_id);
+        if !value.is_empty() {
+            return value;
+        }
+    }
+    String::new()
+}
+
+fn extract_message_sort_key(message: &Value) -> i64 {
+    for key in ["time", "timestamp", "message_time"] {
+        if let Some(value) = message.get(key).and_then(value_to_i64) {
+            return value;
+        }
+    }
+    0
+}
+
+fn extract_message_secondary_key(message: &Value) -> i64 {
+    for key in ["message_seq", "msg_seq"] {
+        if let Some(value) = message.get(key).and_then(value_to_i64) {
+            return value;
+        }
+    }
+    0
+}
+
+fn value_to_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|item| i64::try_from(item).ok()))
+        .or_else(|| value.as_str().and_then(|item| item.parse::<i64>().ok()))
+}
+
+fn extract_message_text(message: &Value) -> String {
+    let raw_message = message
+        .get("raw_message")
+        .and_then(Value::as_str)
+        .or_else(|| message.get("message").and_then(Value::as_str));
+    plain_text_from_message(
+        message.get("message").unwrap_or(&Value::Null),
+        raw_message,
+    )
+    .trim()
+    .to_string()
+}
+
+fn extract_visible_text_for_delivery_check(message: &Value) -> String {
+    let text = extract_message_text(message);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.starts_with("[CQ:") || trimmed.starts_with("[CQ,") {
+        return String::new();
+    }
+    trimmed.to_string()
+}
+
+fn text_prefix(text: &str, limit: usize) -> String {
+    text.trim().chars().take(limit.max(1)).collect::<String>()
+}
+
+fn is_napcat_transient_transport_error_message(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    lower.contains("connection reset by peer")
+        || lower.contains("connection aborted")
+        || lower.contains("broken pipe")
+        || lower.contains("connection refused")
+        || lower.contains("unexpected eof")
+        || lower.contains("error sending request")
+        || lower.contains("operation timed out")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("http 502")
+        || lower.contains("http 503")
+        || lower.contains("http 504")
+}
+
+fn build_expected_visible_text_for_delivery_check(
+    context: &crate::event_utils::EventContext,
+    expected_text: &str,
+) -> String {
+    let payload = build_message_payload(expected_text, None, context.message_type == "group");
+    let visible = plain_text_from_message(&payload, Some(expected_text));
+    let normalized = visible.trim();
+    if normalized.is_empty() {
+        expected_text.trim().to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TopupRedeemOutcome {
+    success: bool,
+    status_code: u16,
+    message: String,
+}
+
+async fn maybe_handle_group_topup_codes(
+    logger: &Logger,
+    napcat_client: &NapCatClient,
+    context: &crate::event_utils::EventContext,
+    event: &Value,
+    text: &str,
+) -> Result<bool> {
+    if context.message_type != "group" || context.group_id != TOPUP_TRIGGER_GROUP_ID {
+        return Ok(false);
+    }
+    let codes = extract_topup_codes_from_text(text);
+    if codes.is_empty() {
+        return Ok(false);
+    }
+
+    logger
+        .info(format!(
+            "触发自动兑换：groupId={} sender={} matchedCodes={}",
+            context.group_id,
+            context.user_id,
+            codes.len()
+        ))
+        .await;
+
+    let sender_name = get_sender_name(event);
+    let source_message_id = event
+        .get("message_id")
+        .map(value_to_string)
+        .filter(|item| !item.is_empty())
+        .unwrap_or_else(|| "-".to_string());
+    let mut report_lines = vec![
+        format!("自动兑换触发：群 {}", context.group_id),
+        format!("发送者：{} ({})", sender_name, context.user_id),
+        format!("消息ID：{}", source_message_id),
+        format!("匹配兑换码数量：{}", codes.len()),
+    ];
+
+    for (index, code) in codes.iter().enumerate() {
+        let masked = mask_topup_code(code);
+        match redeem_topup_code(code).await {
+            Ok(outcome) => {
+                let status_text = if outcome.success { "success" } else { "failed" };
+                report_lines.push(format!(
+                    "{}. {} -> {} (http {}) {}",
+                    index + 1,
+                    masked,
+                    status_text,
+                    outcome.status_code,
+                    compact_single_line(&outcome.message, 180)
+                ));
+            }
+            Err(error) => {
+                report_lines.push(format!(
+                    "{}. {} -> request-error {}",
+                    index + 1,
+                    masked,
+                    compact_single_line(&error.to_string(), 180)
+                ));
+            }
+        }
+    }
+
+    let report_text = report_lines.join("\n");
+    if let Err(error) = napcat_client
+        .reply_text("private", TOPUP_RESULT_RECEIVER_USER_ID, None, &report_text)
+        .await
+    {
+        logger
+            .warn(format!("兑换结果私聊发送失败：target={} error={error:#}", TOPUP_RESULT_RECEIVER_USER_ID))
+            .await;
+    }
+    Ok(true)
+}
+
+fn extract_topup_codes_from_text(text: &str) -> Vec<String> {
+    let mut codes = Vec::<String>::new();
+    for line in text.lines() {
+        let candidate = line.trim();
+        if candidate.is_empty() || !looks_like_topup_code(candidate) {
+            continue;
+        }
+        codes.push(candidate.to_string());
+    }
+    codes
+}
+
+fn looks_like_topup_code(value: &str) -> bool {
+    value.len() == TOPUP_CODE_EXPECTED_LENGTH && value.chars().all(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn mask_topup_code(code: &str) -> String {
+    let trimmed = code.trim();
+    if trimmed.len() <= 10 {
+        return trimmed.to_string();
+    }
+    let prefix = &trimmed[..6];
+    let suffix = &trimmed[trimmed.len().saturating_sub(4)..];
+    format!("{prefix}...{suffix}")
+}
+
+fn compact_single_line(text: &str, max_chars: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    compact.chars().take(max_chars.max(1)).collect::<String>()
+}
+
+async fn redeem_topup_code(code: &str) -> Result<TopupRedeemOutcome> {
+    let url = format!("{TOPUP_API_BASE_URL}/api/user/topup");
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .timeout(std::time::Duration::from_secs(20))
+        .header("Authorization", format!("Bearer {TOPUP_API_TOKEN}"))
+        .header("New-Api-User", TOPUP_API_USER_ID)
+        .header("Content-Type", "application/json")
+        .json(&json!({ "key": code }))
+        .send()
+        .await
+        .with_context(|| format!("请求兑换接口失败: {url}"))?;
+    let status_code = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    let parsed = serde_json::from_str::<Value>(&body).ok();
+    let success = parsed
+        .as_ref()
+        .and_then(|item| parse_json_success_field(item.get("success")))
+        .unwrap_or_else(|| (200..300).contains(&status_code));
+    let message = parsed
+        .as_ref()
+        .and_then(|item| {
+            item.get("message")
+                .or_else(|| item.get("msg"))
+                .or_else(|| item.get("error"))
+                .or_else(|| item.get("reason"))
+        })
+        .map(value_to_string)
+        .filter(|item| !item.is_empty())
+        .unwrap_or_else(|| {
+            let fallback = body.trim();
+            if fallback.is_empty() {
+                "empty-response".to_string()
+            } else {
+                fallback.to_string()
+            }
+        });
+    Ok(TopupRedeemOutcome {
+        success,
+        status_code,
+        message,
+    })
+}
+
+fn parse_json_success_field(value: Option<&Value>) -> Option<bool> {
+    match value {
+        Some(Value::Bool(flag)) => Some(*flag),
+        Some(Value::Number(number)) => {
+            if number.as_i64().is_some() {
+                Some(number.as_i64().unwrap_or_default() != 0)
+            } else if number.as_u64().is_some() {
+                Some(number.as_u64().unwrap_or_default() != 0)
+            } else {
+                None
+            }
+        }
+        Some(Value::String(text)) => {
+            let normalized = text.trim().to_ascii_lowercase();
+            if normalized.is_empty() {
+                None
+            } else if ["true", "ok", "success", "1", "yes", "y"].contains(&normalized.as_str()) {
+                Some(true)
+            } else if ["false", "fail", "failed", "0", "no", "n"].contains(&normalized.as_str()) {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 async fn send_status_dashboard_image(

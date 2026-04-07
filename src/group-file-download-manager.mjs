@@ -412,9 +412,21 @@ function looksLikeGameMention(text) {
   return /(mindustryx|mindustry|mdt|牡丹亭|x端|原版)/i.test(normalized);
 }
 
+function isShareCardPlaceholderText(text) {
+  const normalized = normalizeText(text);
+  if (!normalized) {
+    return false;
+  }
+  return /^\[(?:qq小程序|小程序|小程序卡片|链接分享|分享)\]/i.test(normalized)
+    || /^\[CQ:(?:json|xml),/i.test(normalized);
+}
+
 function looksLikeDownloadRequest(text) {
   const normalized = normalizeText(text);
   if (!normalized) {
+    return false;
+  }
+  if (isShareCardPlaceholderText(normalized)) {
     return false;
   }
   const localReleaseChoices = detectLocalReleaseChoices(normalized);

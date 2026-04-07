@@ -19,9 +19,31 @@ const KEEP_RENDER_FILES = 120;
 const MAX_RENDER_AGE_MS = 4 * 60 * 60 * 1000;
 const BROWSER_IDLE_CLOSE_MS = 90_000;
 const EXTERNAL_IMAGE_WAIT_MS = 2_500;
+const EXTERNAL_IMAGE_TIMEOUT_LABEL = '图片加载超时';
+const EXTERNAL_IMAGE_ERROR_LABEL = '图片加载失败';
+const DANGEROUS_HTML_TAGS = [
+  'script',
+  'style',
+  'iframe',
+  'frame',
+  'frameset',
+  'object',
+  'embed',
+  'meta',
+  'link',
+  'base',
+  'form',
+  'input',
+  'button',
+  'textarea',
+  'select',
+  'option',
+  'svg',
+  'math'
+];
 
 const markdown = markdownIt({
-  html: false,
+  html: true,
   linkify: true,
   typographer: true,
   breaks: true,
@@ -44,8 +66,11 @@ let styleCache = null;
 const fontDataUrlCache = new Map();
 let browserHolder = {
   browser: null,
-  idleTimer: null
+  page: null,
+  idleTimer: null,
+  activeRenderCount: 0
 };
+let renderQueue = Promise.resolve();
 
 function getFontMimeType(fileName = '') {
   const ext = path.extname(String(fileName)).toLowerCase();
@@ -177,9 +202,98 @@ function unwrapNestedMarkdownFences(text) {
   return output.join('\n');
 }
 
+function applyTransformOutsideFencedBlocks(text, transform) {
+  const source = String(text ?? '').replace(/\r\n/g, '\n');
+  const lines = source.split('\n');
+  const output = [];
+  let plainBuffer = [];
+  let inFence = false;
+  let fenceMarker = '';
+  let fenceLength = 0;
+
+  const parseFence = (line) => {
+    const matched = String(line ?? '').match(/^[ \t]{0,3}([`~]{3,})([^\r\n]*)$/);
+    if (!matched) {
+      return null;
+    }
+    return {
+      marker: matched[1][0],
+      length: matched[1].length,
+      tail: String(matched[2] ?? '').trim()
+    };
+  };
+
+  const flushPlain = () => {
+    if (!plainBuffer.length) {
+      return;
+    }
+    output.push(transform(plainBuffer.join('\n')));
+    plainBuffer = [];
+  };
+
+  for (const line of lines) {
+    const fence = parseFence(line);
+    if (!inFence) {
+      if (fence) {
+        flushPlain();
+        inFence = true;
+        fenceMarker = fence.marker;
+        fenceLength = fence.length;
+        output.push(line);
+      } else {
+        plainBuffer.push(line);
+      }
+      continue;
+    }
+
+    if (fence && fence.marker === fenceMarker && fence.length >= fenceLength && fence.tail === '') {
+      inFence = false;
+      output.push(line);
+    } else {
+      output.push(line);
+    }
+  }
+  flushPlain();
+  return output.join('\n');
+}
+
+function normalizeLatexDelimiters(text) {
+  return applyTransformOutsideFencedBlocks(text, (segment) => {
+    let output = String(segment ?? '');
+    output = output.replace(/\\tag\{([^{}]+)\}/g, (_match, label = '') => `\\qquad(${String(label).trim()})`);
+    output = output.replace(/\\\[\s*([\s\S]*?)\s*\\\]/g, (_match, body = '') => `$$\n${String(body).trim()}\n$$`);
+    output = output.replace(/\\\(([\s\S]*?)\\\)/g, (_match, body = '') => `$${String(body).trim()}$`);
+    output = output.replace(/(^|\n)\[\s*\n([\s\S]*?)\n\s*\](?=\n|$)/g, (_match, prefix = '', body = '') => `${prefix}$$\n${String(body).trim()}\n$$`);
+    output = output.replace(/\\begin\{([a-zA-Z*]+)\}[\s\S]*?\\end\{\1\}/g, (match = '', _envName = '', offset = 0, source = '') => {
+      const before = String(source).slice(Math.max(0, Number(offset) - 6), Number(offset));
+      const after = String(source).slice(Number(offset) + String(match).length, Number(offset) + String(match).length + 6);
+      if (before.includes('$$') || after.includes('$$')) {
+        return String(match);
+      }
+      return `$$\n${String(match).trim()}\n$$`;
+    });
+    return output;
+  });
+}
+
+function stripDangerousHtml(text) {
+  let output = String(text ?? '');
+  for (const tag of DANGEROUS_HTML_TAGS) {
+    const pairedTag = new RegExp(`<${tag}\\b[\\s\\S]*?<\\/${tag}\\s*>`, 'gi');
+    const singleTag = new RegExp(`<${tag}\\b[^>]*\\/?>`, 'gi');
+    output = output.replace(pairedTag, '');
+    output = output.replace(singleTag, '');
+  }
+  output = output.replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
+  output = output.replace(/\s(href|src)\s*=\s*("javascript:[^"]*"|'javascript:[^']*'|javascript:[^\s>]+)/gi, ' $1="#"');
+  return output;
+}
+
 function sanitizeReplyText(sourceText) {
   const withoutToolBlocks = String(sourceText ?? '').replace(TOOL_BLOCK_REGEX, '').trim();
-  const cleaned = unwrapNestedMarkdownFences(withoutToolBlocks).trim();
+  const unwrapped = unwrapNestedMarkdownFences(withoutToolBlocks);
+  const normalizedLatex = normalizeLatexDelimiters(unwrapped);
+  const cleaned = stripDangerousHtml(normalizedLatex).trim();
   if (!cleaned) {
     return '';
   }
@@ -326,6 +440,19 @@ function buildHtmlDocument(markdownText, styleBundle) {
       border-radius: 10px;
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
     }
+    .img-fallback {
+      margin: 12px auto;
+      padding: 12px 14px;
+      width: fit-content;
+      max-width: 100%;
+      color: #d7dbe5;
+      font-size: 14px;
+      line-height: 1.5;
+      border: 1px dashed #4a4f5e;
+      border-radius: 10px;
+      background: rgba(38, 42, 52, 0.66);
+      word-break: break-all;
+    }
     .katex-display {
       margin: 14px 0;
       overflow-x: auto;
@@ -349,6 +476,19 @@ function buildHtmlDocument(markdownText, styleBundle) {
       letter-spacing: 0.01em;
       text-transform: none;
       word-break: break-all;
+    }
+    details {
+      margin: 14px 0;
+      padding: 10px 12px;
+      border: 1px solid #3a3f4a;
+      border-radius: 10px;
+      background: rgba(33, 38, 48, 0.5);
+    }
+    summary {
+      cursor: default;
+      font-weight: 600;
+      color: #c8d8ff;
+      margin-bottom: 8px;
     }
   `;
 
@@ -500,15 +640,31 @@ async function launchBrowser() {
   }
 }
 
-function scheduleBrowserIdleClose() {
+function clearBrowserIdleCloseTimer() {
   if (browserHolder.idleTimer) {
     clearTimeout(browserHolder.idleTimer);
     browserHolder.idleTimer = null;
   }
+}
+
+function scheduleBrowserIdleClose() {
+  clearBrowserIdleCloseTimer();
+  if (browserHolder.activeRenderCount > 0) {
+    return;
+  }
   browserHolder.idleTimer = setTimeout(async () => {
+    if (browserHolder.activeRenderCount > 0) {
+      scheduleBrowserIdleClose();
+      return;
+    }
+    const page = browserHolder.page;
     const browser = browserHolder.browser;
+    browserHolder.page = null;
     browserHolder.browser = null;
     browserHolder.idleTimer = null;
+    if (page) {
+      await page.close().catch(() => {});
+    }
     if (browser) {
       await browser.close().catch(() => {});
     }
@@ -524,111 +680,238 @@ async function getSharedBrowser() {
   }
   const browser = await launchBrowser();
   browserHolder.browser = browser;
+  browserHolder.page = null;
   browser.on('disconnected', () => {
     if (browserHolder.browser === browser) {
       browserHolder.browser = null;
+      browserHolder.page = null;
     }
   });
   return browser;
 }
 
+async function getSharedPage() {
+  const browser = await getSharedBrowser();
+  if (browserHolder.page && !browserHolder.page.isClosed()) {
+    return browserHolder.page;
+  }
+  const page = await browser.newPage({
+    viewport: { width: 1240, height: 1200 },
+    deviceScaleFactor: 1.25
+  });
+  await page.route('**/*', async (route) => {
+    const request = route.request();
+    const url = request.url();
+    const type = request.resourceType();
+    if (url.startsWith('file:') || url.startsWith('data:') || url.startsWith('blob:') || url === 'about:blank') {
+      await route.continue().catch(() => {});
+      return;
+    }
+    if ((url.startsWith('http://') || url.startsWith('https://')) && type === 'image') {
+      await route.continue().catch(() => {});
+      return;
+    }
+    await route.abort().catch(() => {});
+  });
+  page.on('close', () => {
+    if (browserHolder.page === page) {
+      browserHolder.page = null;
+    }
+  });
+  browserHolder.page = page;
+  return page;
+}
+
+async function resetSharedBrowser() {
+  clearBrowserIdleCloseTimer();
+  const page = browserHolder.page;
+  const browser = browserHolder.browser;
+  browserHolder.page = null;
+  browserHolder.browser = null;
+  if (page) {
+    await page.close().catch(() => {});
+  }
+  if (browser) {
+    await browser.close().catch(() => {});
+  }
+}
+
+function enqueueRender(task) {
+  const current = renderQueue.then(task, task);
+  renderQueue = current.catch(() => {});
+  return current;
+}
+
+function isRecoverableBrowserClosedError(error) {
+  const message = String(error?.message ?? error ?? '').toLowerCase();
+  if (!message) {
+    return false;
+  }
+  return (
+    message.includes('target page, context or browser has been closed') ||
+    message.includes('target closed') ||
+    message.includes('page has been closed') ||
+    message.includes('context has been closed') ||
+    message.includes('browser has been closed') ||
+    message.includes('browser has disconnected') ||
+    message.includes('protocol error') && message.includes('closed')
+  );
+}
+
+async function renderHtmlIntoImage(outputPath, html) {
+  const page = await getSharedPage();
+  await page.setContent(html, { waitUntil: 'domcontentloaded' });
+  await page.evaluate(() => {
+    document.querySelectorAll('details').forEach((node) => {
+      if (!node.hasAttribute('open')) {
+        node.setAttribute('open', '');
+      }
+    });
+  });
+  await waitForImageLoad(page, EXTERNAL_IMAGE_WAIT_MS);
+  await page.evaluate(async () => {
+    if (document?.fonts?.ready) {
+      await document.fonts.ready;
+    }
+  });
+  await page.waitForTimeout(15);
+  const cardHeight = await page.evaluate(() => {
+    const node = document.getElementById('card');
+    if (!node) {
+      return 480;
+    }
+    return Math.ceil(node.scrollHeight + 20);
+  });
+  const viewportHeight = Math.max(420, Math.min(MAX_RENDER_HEIGHT, Number(cardHeight) || 480));
+  await page.setViewportSize({
+    width: 1240,
+    height: viewportHeight
+  });
+  await page.evaluate(async () => {
+    if (document?.fonts?.ready) {
+      await document.fonts.ready;
+    }
+  });
+  const card = page.locator('#card');
+  await card.screenshot({
+    path: outputPath,
+    type: 'png'
+  });
+}
+
 async function waitForImageLoad(page, timeoutMs = EXTERNAL_IMAGE_WAIT_MS) {
-  await page.evaluate(async (timeout) => {
+  await page.evaluate(async ({ timeout, timeoutLabel, errorLabel }) => {
+    const ensureFallback = (img, reason) => {
+      if (!img || img.dataset.cainRenderFallback === '1') {
+        return;
+      }
+      img.dataset.cainRenderFallback = '1';
+      const hostText = (() => {
+        try {
+          const host = new URL(img.currentSrc || img.src || '').host;
+          return host ? ` (${host})` : '';
+        } catch {
+          return '';
+        }
+      })();
+      const fallback = document.createElement('div');
+      fallback.className = 'img-fallback';
+      fallback.textContent = `${reason}${hostText}`;
+      img.replaceWith(fallback);
+    };
+
     const images = Array.from(document.images || []);
     if (!images.length) {
       return;
     }
     const waitImage = (img) => {
       if (img.complete) {
+        if ((img.naturalWidth || 0) <= 0 || (img.naturalHeight || 0) <= 0) {
+          ensureFallback(img, errorLabel);
+        }
         return Promise.resolve();
       }
+      let settled = false;
+      let resolveRef = null;
+      const markSettled = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (typeof resolveRef === 'function') {
+          resolveRef();
+        }
+      };
+      img.addEventListener('load', () => {
+        if ((img.naturalWidth || 0) <= 0 || (img.naturalHeight || 0) <= 0) {
+          ensureFallback(img, errorLabel);
+        }
+        markSettled();
+      }, { once: true });
+      img.addEventListener('error', () => {
+        ensureFallback(img, errorLabel);
+        markSettled();
+      }, { once: true });
       return new Promise((resolve) => {
-        const done = () => resolve();
-        img.addEventListener('load', done, { once: true });
-        img.addEventListener('error', done, { once: true });
+        resolveRef = resolve;
       });
     };
+    const waiters = images.map(waitImage);
     await Promise.race([
-      Promise.all(images.map(waitImage)),
-      new Promise((resolve) => setTimeout(resolve, Math.max(100, Number(timeout) || 100)))
+      Promise.all(waiters),
+      new Promise((resolve) => setTimeout(resolve, Math.max(120, Number(timeout) || 120)))
     ]);
-  }, timeoutMs);
+
+    for (const img of images) {
+      if (img.complete) {
+        if ((img.naturalWidth || 0) <= 0 || (img.naturalHeight || 0) <= 0) {
+          ensureFallback(img, errorLabel);
+        }
+        continue;
+      }
+      ensureFallback(img, timeoutLabel);
+    }
+  }, {
+    timeout: timeoutMs,
+    timeoutLabel: EXTERNAL_IMAGE_TIMEOUT_LABEL,
+    errorLabel: EXTERNAL_IMAGE_ERROR_LABEL
+  });
 }
 
 export async function renderReplyMarkdownImage(replyText) {
-  const normalized = sanitizeReplyText(replyText);
-  if (!normalized) {
-    return '';
-  }
-  await cleanupOldImages();
-  const styleBundle = await getStyleBundle();
-  const html = buildHtmlDocument(normalized, styleBundle);
-  const hash = crypto.createHash('sha1').update(normalized).digest('hex').slice(0, 10);
-  const outputPath = path.join(RENDER_DIR, `reply-${Date.now()}-${hash}.png`);
+  return await enqueueRender(async () => {
+    const normalized = sanitizeReplyText(replyText);
+    if (!normalized) {
+      return '';
+    }
+    await cleanupOldImages();
+    const styleBundle = await getStyleBundle();
+    const html = buildHtmlDocument(normalized, styleBundle);
+    const hash = crypto.createHash('sha1').update(normalized).digest('hex').slice(0, 10);
+    const outputPath = path.join(RENDER_DIR, `reply-${Date.now()}-${hash}.png`);
 
-  const browser = await getSharedBrowser();
-  let page = null;
-  try {
-    scheduleBrowserIdleClose();
-    page = await browser.newPage({
-      viewport: { width: 1240, height: 1200 },
-      deviceScaleFactor: 1.5
-    });
-    await page.route('**/*', async (route) => {
-      const request = route.request();
-      const url = request.url();
-      const type = request.resourceType();
-      if (url.startsWith('file:') || url.startsWith('data:') || url === 'about:blank') {
-        await route.continue().catch(() => {});
-        return;
+    browserHolder.activeRenderCount += 1;
+    clearBrowserIdleCloseTimer();
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          await renderHtmlIntoImage(outputPath, html);
+          return outputPath;
+        } catch (error) {
+          const recoverable = isRecoverableBrowserClosedError(error);
+          await resetSharedBrowser();
+          if (!recoverable || attempt >= 1) {
+            throw error;
+          }
+        }
       }
-      if ((url.startsWith('http://') || url.startsWith('https://')) && type === 'image') {
-        await route.continue().catch(() => {});
-        return;
-      }
-      await route.abort().catch(() => {});
-    });
-    await page.setContent(html, { waitUntil: 'domcontentloaded' });
-    await waitForImageLoad(page, EXTERNAL_IMAGE_WAIT_MS);
-    await page.evaluate(async () => {
-      if (document?.fonts?.ready) {
-        await document.fonts.ready;
-      }
-    });
-    await page.waitForTimeout(20);
-    const cardHeight = await page.evaluate(() => {
-      const node = document.getElementById('card');
-      if (!node) {
-        return 480;
-      }
-      return Math.ceil(node.scrollHeight + 20);
-    });
-    const viewportHeight = Math.max(420, Math.min(MAX_RENDER_HEIGHT, Number(cardHeight) || 480));
-    await page.setViewportSize({
-      width: 1240,
-      height: viewportHeight
-    });
-    await page.evaluate(async () => {
-      if (document?.fonts?.ready) {
-        await document.fonts.ready;
-      }
-    });
-    const card = page.locator('#card');
-    await card.screenshot({
-      path: outputPath,
-      type: 'png'
-    });
-    return outputPath;
-  } catch (error) {
-    if (browserHolder.browser === browser) {
-      browserHolder.browser = null;
+      return '';
+    } catch (error) {
+      await resetSharedBrowser();
+      throw error;
+    } finally {
+      browserHolder.activeRenderCount = Math.max(0, browserHolder.activeRenderCount - 1);
+      scheduleBrowserIdleClose();
     }
-    await browser.close().catch(() => {});
-    throw error;
-  } finally {
-    if (page) {
-      await page.close().catch(() => {});
-    }
-    scheduleBrowserIdleClose();
-  }
+  });
 }

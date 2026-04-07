@@ -179,7 +179,7 @@ pub fn build_help_text(bot_display_name: &str) -> String {
     [
         format!("{bot_display_name} 当前可用命令："),
         "/help 查看帮助".to_string(),
-        "/status 发送主机状态图片".to_string(),
+        "/status 发送 btop 实时状态截图（1280x1280）".to_string(),
         "#status 同 /status".to_string(),
         "/chat <问题> 显式发起问答".to_string(),
         "/tr <文本> 翻译文本或结合引用消息翻译".to_string(),
@@ -202,30 +202,28 @@ fn normalize_message_segments(message: &Value) -> Vec<&Value> {
 }
 
 fn strip_cq_codes(text: &str) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
     let mut result = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '[' {
-            let mut probe = String::new();
-            probe.push(ch);
-            let mut matched = false;
-            while let Some(next) = chars.peek().copied() {
-                probe.push(next);
-                chars.next();
-                if probe.starts_with("[CQ:") && next == ']' {
-                    matched = true;
-                    break;
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '[' {
+            let looks_like_cq = index + 3 < chars.len()
+                && chars[index + 1].eq_ignore_ascii_case(&'c')
+                && chars[index + 2].eq_ignore_ascii_case(&'q')
+                && chars[index + 3] == ':';
+            if looks_like_cq {
+                let mut cursor = index + 4;
+                while cursor < chars.len() && chars[cursor] != ']' {
+                    cursor += 1;
                 }
-                if probe.len() > 512 {
-                    break;
+                if cursor < chars.len() && chars[cursor] == ']' {
+                    index = cursor + 1;
+                    continue;
                 }
             }
-            if !matched {
-                result.push_str(&probe);
-            }
-            continue;
         }
-        result.push(ch);
+        result.push(chars[index]);
+        index += 1;
     }
     result.trim().to_string()
 }
