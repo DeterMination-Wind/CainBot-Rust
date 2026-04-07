@@ -20,7 +20,10 @@ pub struct OpenAiTranslator {
 
 impl OpenAiTranslator {
     pub fn new(config: OpenAiTranslatorConfig, chat_client: OpenAiChatClient) -> Self {
-        Self { config, chat_client }
+        Self {
+            config,
+            chat_client,
+        }
     }
 
     pub async fn translate(&self, input: TranslationInput) -> Result<String> {

@@ -21,6 +21,7 @@ pub struct CodexBridgeInfo {
     pub host: String,
     pub port: u16,
     pub base_url: String,
+    pub authorization_header: String,
     pub send_group_file_url: String,
     pub send_group_file_to_folder_url: String,
     pub send_group_message_url: String,
@@ -59,8 +60,12 @@ impl CodexBridgeServer {
             return Ok(Some(self.get_info()));
         }
 
-        let server = Server::http(format!("{}:{}", normalize_host(&self.config.host), self.config.port))
-            .map_err(|error| anyhow::anyhow!("启动 Codex bridge HTTP 服务失败: {error}"))?;
+        let server = Server::http(format!(
+            "{}:{}",
+            normalize_host(&self.config.host),
+            self.config.port
+        ))
+        .map_err(|error| anyhow::anyhow!("启动 Codex bridge HTTP 服务失败: {error}"))?;
         let stop_flag = self.stop_flag.clone();
         let logger = self.logger.clone();
         let napcat_client = self.napcat_client.clone();
@@ -73,11 +78,15 @@ impl CodexBridgeServer {
                 while !stop_flag.load(Ordering::SeqCst) {
                     match server.recv_timeout(Duration::from_millis(250)) {
                         Ok(Some(request)) => {
-                            if let Err(error) = handle_request(&runtime_handle, &config, &napcat_client, request) {
+                            if let Err(error) =
+                                handle_request(&runtime_handle, &config, &napcat_client, request)
+                            {
                                 let runtime = runtime_handle.clone();
                                 let logger = logger.clone();
                                 runtime.block_on(async move {
-                                    logger.warn(format!("Codex 文件桥请求处理失败：{error:#}")).await;
+                                    logger
+                                        .warn(format!("Codex 文件桥请求处理失败：{error:#}"))
+                                        .await;
                                 });
                             }
                         }
@@ -118,6 +127,11 @@ impl CodexBridgeServer {
             host: host.clone(),
             port: self.config.port,
             base_url: base_url.clone(),
+            authorization_header: if self.config.token.trim().is_empty() {
+                String::new()
+            } else {
+                format!("Bearer {}", self.config.token.trim())
+            },
             send_group_file_url: format!("{base_url}/codex/send-group-file"),
             send_group_file_to_folder_url: format!("{base_url}/codex/send-group-file-to-folder"),
             send_group_message_url: format!("{base_url}/codex/send-group-message"),
@@ -169,8 +183,44 @@ fn handle_request(
     match (request.method(), path.as_str()) {
         (&Method::Post, "/codex/send-group-message") => {
             let group_id = get_required_string(&payload, "groupId")?;
+            if payload_has_file(&payload) {
+                let file_path = get_required_string_any(&payload, &["filePath", "file"])?;
+                let file_name = payload.get("fileName").and_then(Value::as_str);
+                let folder_name = payload
+                    .get("folderName")
+                    .or_else(|| payload.get("folder"))
+                    .or_else(|| payload.get("folderPath"))
+                    .and_then(Value::as_str);
+                let notify_text = payload
+                    .get("notifyText")
+                    .or_else(|| payload.get("text"))
+                    .or_else(|| payload.get("message"))
+                    .and_then(Value::as_str);
+                let result = runtime_handle.block_on(async {
+                    napcat_client
+                        .send_local_file_to_group(
+                            &group_id,
+                            &file_path,
+                            file_name,
+                            folder_name,
+                            notify_text,
+                        )
+                        .await
+                })?;
+                return respond_json(
+                    request,
+                    StatusCode(200),
+                    json!({
+                        "ok": true,
+                        "target": format!("group:{group_id}"),
+                        "fallback": "send-group-file",
+                        "result": result
+                    }),
+                );
+            }
             let message = build_outgoing_message(&payload)?;
-            let result = runtime_handle.block_on(async { napcat_client.send_group_message(&group_id, message).await })?;
+            let result = runtime_handle
+                .block_on(async { napcat_client.send_group_message(&group_id, message).await })?;
             respond_json(
                 request,
                 StatusCode(200),
@@ -183,8 +233,30 @@ fn handle_request(
         }
         (&Method::Post, "/codex/send-private-message") => {
             let user_id = get_required_string(&payload, "userId")?;
+            if payload_has_file(&payload) {
+                let file_path = get_required_string_any(&payload, &["filePath", "file"])?;
+                let file_name = payload.get("fileName").and_then(Value::as_str);
+                let result = runtime_handle.block_on(async {
+                    napcat_client
+                        .send_local_file_to_context(
+                            "private", &user_id, &file_path, file_name, None,
+                        )
+                        .await
+                })?;
+                return respond_json(
+                    request,
+                    StatusCode(200),
+                    json!({
+                        "ok": true,
+                        "target": format!("private:{user_id}"),
+                        "fallback": "send-private-file",
+                        "result": result
+                    }),
+                );
+            }
             let message = build_outgoing_message(&payload)?;
-            let result = runtime_handle.block_on(async { napcat_client.send_private_message(&user_id, message).await })?;
+            let result = runtime_handle
+                .block_on(async { napcat_client.send_private_message(&user_id, message).await })?;
             respond_json(
                 request,
                 StatusCode(200),
@@ -195,7 +267,8 @@ fn handle_request(
                 }),
             )
         }
-        (&Method::Post, "/codex/send-group-file") | (&Method::Post, "/codex/send-group-file-to-folder") => {
+        (&Method::Post, "/codex/send-group-file")
+        | (&Method::Post, "/codex/send-group-file-to-folder") => {
             let group_id = get_required_string(&payload, "groupId")?;
             let file_path = get_required_string_any(&payload, &["filePath", "file"])?;
             let file_name = payload.get("fileName").and_then(Value::as_str);
@@ -210,7 +283,13 @@ fn handle_request(
             let notify_text = payload.get("notifyText").and_then(Value::as_str);
             let result = runtime_handle.block_on(async {
                 napcat_client
-                    .send_local_file_to_group(&group_id, &file_path, file_name, folder_name, notify_text)
+                    .send_local_file_to_group(
+                        &group_id,
+                        &file_path,
+                        file_name,
+                        folder_name,
+                        notify_text,
+                    )
                     .await
             })?;
             respond_json(
@@ -225,8 +304,16 @@ fn handle_request(
         }
         (&Method::Post, "/codex/read-group-messages") => {
             let group_id = get_required_string(&payload, "groupId")?;
-            let count = payload.get("count").and_then(Value::as_u64).unwrap_or(20).clamp(1, 200) as usize;
-            let history = runtime_handle.block_on(async { napcat_client.get_group_message_history(&group_id, count).await })?;
+            let count = payload
+                .get("count")
+                .and_then(Value::as_u64)
+                .unwrap_or(20)
+                .clamp(1, 200) as usize;
+            let history = runtime_handle.block_on(async {
+                napcat_client
+                    .get_group_message_history(&group_id, count)
+                    .await
+            })?;
             let messages = normalize_history_messages(&history, count);
             respond_json(
                 request,
@@ -242,8 +329,16 @@ fn handle_request(
         }
         (&Method::Post, "/codex/read-private-messages") => {
             let user_id = get_required_string(&payload, "userId")?;
-            let count = payload.get("count").and_then(Value::as_u64).unwrap_or(20).clamp(1, 200) as usize;
-            let history = runtime_handle.block_on(async { napcat_client.get_friend_message_history(&user_id, count).await })?;
+            let count = payload
+                .get("count")
+                .and_then(Value::as_u64)
+                .unwrap_or(20)
+                .clamp(1, 200) as usize;
+            let history = runtime_handle.block_on(async {
+                napcat_client
+                    .get_friend_message_history(&user_id, count)
+                    .await
+            })?;
             let messages = normalize_history_messages(&history, count);
             respond_json(
                 request,
@@ -259,15 +354,35 @@ fn handle_request(
         }
         (&Method::Post, "/codex/read-file") => {
             let file_path = get_required_string_any(&payload, &["path", "filePath"])?;
-            let start_line = payload.get("startLine").or_else(|| payload.get("start_line")).and_then(Value::as_u64).unwrap_or(1) as usize;
-            let end_line = payload.get("endLine").or_else(|| payload.get("end_line")).and_then(Value::as_u64);
-            let max_chars = payload.get("maxChars").or_else(|| payload.get("max_chars")).and_then(Value::as_u64).unwrap_or(12_000) as usize;
-            let result = read_text_file_window(&file_path, start_line, end_line.map(|item| item as usize), max_chars)?;
+            let start_line = payload
+                .get("startLine")
+                .or_else(|| payload.get("start_line"))
+                .and_then(Value::as_u64)
+                .unwrap_or(1) as usize;
+            let end_line = payload
+                .get("endLine")
+                .or_else(|| payload.get("end_line"))
+                .and_then(Value::as_u64);
+            let max_chars = payload
+                .get("maxChars")
+                .or_else(|| payload.get("max_chars"))
+                .and_then(Value::as_u64)
+                .unwrap_or(12_000) as usize;
+            let result = read_text_file_window(
+                &file_path,
+                start_line,
+                end_line.map(|item| item as usize),
+                max_chars,
+            )?;
             let mut response = result;
             response["ok"] = Value::Bool(true);
             respond_json(request, StatusCode(200), response)
         }
-        _ => respond_json(request, StatusCode(404), json!({ "ok": false, "error": "未找到接口" })),
+        _ => respond_json(
+            request,
+            StatusCode(404),
+            json!({ "ok": false, "error": "未找到接口" }),
+        ),
     }
 }
 
@@ -289,7 +404,13 @@ fn validate_local_request(config: &CodexBridgeConfig, request: &Request) -> Resu
     let auth_header = request
         .headers()
         .iter()
-        .find(|header| header.field.as_str().as_str().eq_ignore_ascii_case("authorization"))
+        .find(|header| {
+            header
+                .field
+                .as_str()
+                .as_str()
+                .eq_ignore_ascii_case("authorization")
+        })
         .map(|header| header.value.as_str().trim())
         .unwrap_or_default();
     let provided = auth_header
@@ -305,7 +426,10 @@ fn validate_local_request(config: &CodexBridgeConfig, request: &Request) -> Resu
 
 fn read_json_payload(request: &mut Request) -> Result<Value> {
     let mut body = String::new();
-    request.as_reader().read_to_string(&mut body).context("读取请求体失败")?;
+    request
+        .as_reader()
+        .read_to_string(&mut body)
+        .context("读取请求体失败")?;
     if body.trim().is_empty() {
         return Ok(json!({}));
     }
@@ -337,6 +461,13 @@ fn build_outgoing_message(payload: &Value) -> Result<Value> {
             .or_else(|| payload.get("mentions"))
             .or_else(|| payload.get("atUserId")),
     );
+    let image_paths = extract_string_list(
+        payload
+            .get("imagePaths")
+            .or_else(|| payload.get("imagePath"))
+            .or_else(|| payload.get("image"))
+            .or_else(|| payload.get("images")),
+    );
 
     let mut segments = Vec::new();
     if !reply_to_message_id.is_empty() {
@@ -363,8 +494,17 @@ fn build_outgoing_message(payload: &Value) -> Result<Value> {
             "data": { "text": text }
         }));
     }
+    for image_path in image_paths {
+        segments.push(json!({
+            "type": "image",
+            "data": { "file": image_path }
+        }));
+    }
     if segments.is_empty() {
-        bail!("消息内容不能为空；请提供 text/message，或提供 atUserIds");
+        bail!("消息内容不能为空；请提供 text/message、atUserIds，或 imagePath/imagePaths");
+    }
+    if segments.len() == 1 && segments[0].get("type").and_then(Value::as_str) == Some("reply") {
+        return Ok(Value::Array(segments));
     }
     if segments.len() == 1 && segments[0].get("type").and_then(Value::as_str) == Some("text") {
         return Ok(Value::String(
@@ -379,12 +519,26 @@ fn build_outgoing_message(payload: &Value) -> Result<Value> {
     Ok(Value::Array(segments))
 }
 
+fn payload_has_file(payload: &Value) -> bool {
+    payload
+        .get("filePath")
+        .or_else(|| payload.get("file"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+}
+
 fn normalize_history_messages(payload: &Value, count: usize) -> Vec<Value> {
     let items = if let Some(items) = payload.as_array() {
         items.clone()
     } else if let Some(items) = payload.get("messages").and_then(Value::as_array) {
         items.clone()
-    } else if let Some(items) = payload.get("data").and_then(|data| data.get("messages")).and_then(Value::as_array) {
+    } else if let Some(items) = payload
+        .get("data")
+        .and_then(|data| data.get("messages"))
+        .and_then(Value::as_array)
+    {
         items.clone()
     } else {
         Vec::new()
@@ -456,7 +610,12 @@ fn count_segments(message: &Value, segment_type: &str) -> usize {
         .unwrap_or_default()
 }
 
-fn read_text_file_window(file_path: &str, start_line: usize, end_line: Option<usize>, max_chars: usize) -> Result<Value> {
+fn read_text_file_window(
+    file_path: &str,
+    start_line: usize,
+    end_line: Option<usize>,
+    max_chars: usize,
+) -> Result<Value> {
     let absolute_path = if Path::new(file_path).is_absolute() {
         Path::new(file_path).to_path_buf()
     } else {
@@ -467,7 +626,9 @@ fn read_text_file_window(file_path: &str, start_line: usize, end_line: Option<us
     let lines = content.lines().collect::<Vec<_>>();
     let total_lines = lines.len().max(1);
     let start = start_line.clamp(1, total_lines);
-    let end = end_line.unwrap_or_else(|| (start + 199).min(total_lines)).clamp(start, total_lines);
+    let end = end_line
+        .unwrap_or_else(|| (start + 199).min(total_lines))
+        .clamp(start, total_lines);
     let mut text = lines[start - 1..end]
         .iter()
         .enumerate()
@@ -493,8 +654,11 @@ fn respond_json(request: Request, status: StatusCode, payload: Value) -> Result<
     let response = Response::from_string(body)
         .with_status_code(status)
         .with_header(
-            Header::from_bytes("Content-Type".as_bytes(), "application/json; charset=utf-8".as_bytes())
-                .expect("valid content-type header"),
+            Header::from_bytes(
+                "Content-Type".as_bytes(),
+                "application/json; charset=utf-8".as_bytes(),
+            )
+            .expect("valid content-type header"),
         );
     request.respond(response).context("发送 HTTP 响应失败")
 }
@@ -511,7 +675,12 @@ fn get_required_string(payload: &Value, key: &str) -> Result<String> {
 
 fn get_required_string_any(payload: &Value, keys: &[&str]) -> Result<String> {
     for key in keys {
-        if let Some(value) = payload.get(*key).and_then(Value::as_str).map(str::trim).filter(|item| !item.is_empty()) {
+        if let Some(value) = payload
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        {
             return Ok(value.to_string());
         }
     }
@@ -543,7 +712,12 @@ fn format_epoch_time(seconds: Option<i64>) -> Option<String> {
     seconds
         .filter(|seconds| *seconds > 0)
         .and_then(|seconds| chrono::Utc.timestamp_opt(seconds, 0).single())
-        .map(|value| value.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|value| {
+            value
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
 }
 
 fn value_to_string(value: &Value) -> String {
@@ -571,6 +745,11 @@ fn build_info(config: &CodexBridgeConfig) -> CodexBridgeInfo {
         host: host.clone(),
         port: config.port,
         base_url: base_url.clone(),
+        authorization_header: if config.token.trim().is_empty() {
+            String::new()
+        } else {
+            format!("Bearer {}", config.token.trim())
+        },
         send_group_file_url: format!("{base_url}/codex/send-group-file"),
         send_group_file_to_folder_url: format!("{base_url}/codex/send-group-file-to-folder"),
         send_group_message_url: format!("{base_url}/codex/send-group-message"),

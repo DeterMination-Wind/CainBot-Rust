@@ -24,16 +24,6 @@ function isReplySendRejectedError(error) {
       || /result\s*[:=]\s*120/i.test(message));
 }
 
-function isBenignGroupSystemMessageTimeoutError(error) {
-  const message = String(error?.message ?? '');
-  if (!message) {
-    return false;
-  }
-  return message.includes('get_group_system_msg')
-    && message.includes('Timeout')
-    && message.includes('getSingleScreenNotifies');
-}
-
 function flattenMessageText(message) {
   if (typeof message === 'string') {
     return message;
@@ -58,6 +48,25 @@ function flattenMessageText(message) {
   return '';
 }
 
+function canUseForwardPackaging(message) {
+  if (typeof message === 'string') {
+    return true;
+  }
+  if (Array.isArray(message)) {
+    return message.every((segment) => {
+      if (typeof segment === 'string') {
+        return true;
+      }
+      const type = String(segment?.type ?? '').trim();
+      return type === 'text' || type === 'reply';
+    });
+  }
+  if (message && typeof message === 'object') {
+    return String(message?.type ?? '').trim() === 'text';
+  }
+  return false;
+}
+
 function sanitizeOutgoingText(text) {
   return String(text ?? '')
     .replace(/\u0000/g, '')
@@ -66,37 +75,42 @@ function sanitizeOutgoingText(text) {
     .trim();
 }
 
+function getForwardThresholdChars(config) {
+  const numeric = Number(config?.forwardThresholdChars);
+  if (!Number.isFinite(numeric)) {
+    return 100;
+  }
+  return Math.max(1, Math.min(100, Math.trunc(numeric)));
+}
+
+function extractForwardableText(message, config) {
+  if (!canUseForwardPackaging(message)) {
+    return '';
+  }
+  const flattenedText = sanitizeOutgoingText(flattenMessageText(message));
+  if (!flattenedText) {
+    return '';
+  }
+  return flattenedText.length > getForwardThresholdChars(config)
+    ? flattenedText
+    : '';
+}
+
 export class NapCatClient {
   constructor(config, logger) {
     this.config = config;
     this.logger = logger;
     this.stopped = false;
     this.pendingEventTasks = new Set();
-    this.activeControllers = new Set();
-    this.activeEventReader = null;
     this.onReplySent = typeof config?.onReplySent === 'function' ? config.onReplySent : null;
   }
 
-  async stop() {
+  stop() {
     this.stopped = true;
-    for (const controller of this.activeControllers) {
-      try {
-        controller.abort();
-      } catch {}
-    }
-    if (this.activeEventReader?.cancel) {
-      try {
-        await this.activeEventReader.cancel();
-      } catch {}
-    }
-    if (this.pendingEventTasks.size > 0) {
-      await Promise.allSettled([...this.pendingEventTasks]);
-    }
   }
 
   async call(action, params = {}) {
     const controller = new AbortController();
-    this.activeControllers.add(controller);
     const timeout = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
     try {
       const response = await fetch(joinUrl(this.config.baseUrl, action), {
@@ -123,7 +137,6 @@ export class NapCatClient {
       return payload?.data ?? payload;
     } finally {
       clearTimeout(timeout);
-      this.activeControllers.delete(controller);
     }
   }
 
@@ -182,17 +195,7 @@ export class NapCatClient {
   }
 
   async getGroupSystemMessages(count = 50) {
-    try {
-      return await this.call('get_group_system_msg', { count });
-    } catch (error) {
-      if (!isBenignGroupSystemMessageTimeoutError(error)) {
-        throw error;
-      }
-      return {
-        invited_requests: [],
-        InvitedRequest: []
-      };
-    }
+    return await this.call('get_group_system_msg', { count });
   }
 
   async setGroupCard(groupId, userId, card = '') {
@@ -214,6 +217,14 @@ export class NapCatClient {
   }
 
   async sendGroupMessage(groupId, message) {
+    const forwardedText = extractForwardableText(message, this.config);
+    if (forwardedText) {
+      try {
+        return await this.sendGroupForwardText(groupId, forwardedText);
+      } catch (error) {
+        this.logger.warn(`群合并转发发送失败，回退为普通消息：${error.message}`);
+      }
+    }
     try {
       return await this.call('send_group_msg', {
         group_id: String(groupId),
@@ -236,6 +247,14 @@ export class NapCatClient {
   }
 
   async sendPrivateMessage(userId, message) {
+    const forwardedText = extractForwardableText(message, this.config);
+    if (forwardedText) {
+      try {
+        return await this.sendPrivateForwardText(userId, forwardedText);
+      } catch (error) {
+        this.logger.warn(`私聊合并转发发送失败，回退为普通消息：${error.message}`);
+      }
+    }
     return await this.call('send_private_msg', {
       user_id: String(userId),
       message
@@ -387,7 +406,7 @@ export class NapCatClient {
   }
 
   async replyText(context, replyToMessageId, text) {
-    if (String(text ?? '').length > (this.config.forwardThresholdChars ?? 300)) {
+    if (String(text ?? '').length > getForwardThresholdChars(this.config)) {
       try {
         const forwarded = await this.sendForwardText(context, text);
         return forwarded ? [forwarded] : [];
@@ -429,23 +448,34 @@ export class NapCatClient {
     return results;
   }
 
-  async sendForwardText(context, text) {
+  async sendGroupForwardText(groupId, text) {
     const nodes = buildForwardNodes(text, {
-      userId: context.selfId || this.config.botUserId || '0',
+      userId: this.config.botUserId || '0',
       nickname: this.config.forwardNickname || 'Cain'
     });
-
-    if (context.messageType === 'group') {
-      return await this.call('send_group_forward_msg', {
-        group_id: String(context.groupId),
-        messages: nodes
-      });
-    }
-
-    return await this.call('send_private_forward_msg', {
-      user_id: String(context.userId),
+    return await this.call('send_group_forward_msg', {
+      group_id: String(groupId),
       messages: nodes
     });
+  }
+
+  async sendPrivateForwardText(userId, text) {
+    const nodes = buildForwardNodes(text, {
+      userId: this.config.botUserId || '0',
+      nickname: this.config.forwardNickname || 'Cain'
+    });
+    return await this.call('send_private_forward_msg', {
+      user_id: String(userId),
+      messages: nodes
+    });
+  }
+
+  async sendForwardText(context, text) {
+    if (context.messageType === 'group') {
+      return await this.sendGroupForwardText(context.groupId, text);
+    }
+
+    return await this.sendPrivateForwardText(context.userId, text);
   }
 
   async startEventLoop(onEvent) {
@@ -466,57 +496,39 @@ export class NapCatClient {
   }
 
   async #runEventStream(onEvent) {
-    const controller = new AbortController();
-    this.activeControllers.add(controller);
     const response = await fetch(joinUrl(this.config.eventBaseUrl || this.config.baseUrl, this.config.eventPath), {
       method: 'GET',
       headers: {
         Accept: 'text/event-stream',
         ...this.config.headers
-      },
-      signal: controller.signal
+      }
     });
 
     if (!response.ok || !response.body) {
-      this.activeControllers.delete(controller);
       throw new Error(`NapCat SSE 返回 HTTP ${response.status}`);
     }
 
     this.logger.info('NapCat SSE 已连接。');
     const reader = response.body.getReader();
-    this.activeEventReader = reader;
     const decoder = new TextDecoder();
     let buffer = '';
 
-    try {
-      while (!this.stopped) {
-        const { done, value } = await reader.read();
-        if (done) {
-          throw new Error('NapCat SSE 连接已结束');
-        }
-        buffer += decoder.decode(value, { stream: true }).replace(/\r/g, '');
-
-        let delimiterIndex = buffer.indexOf('\n\n');
-        while (delimiterIndex >= 0) {
-          const chunk = buffer.slice(0, delimiterIndex);
-          buffer = buffer.slice(delimiterIndex + 2);
-          delimiterIndex = buffer.indexOf('\n\n');
-          const event = this.#parseSseEvent(chunk);
-          if (event) {
-            await this.#dispatchEvent(onEvent, event);
-          }
-        }
+    while (!this.stopped) {
+      const { done, value } = await reader.read();
+      if (done) {
+        throw new Error('NapCat SSE 连接已结束');
       }
-    } finally {
-      this.activeEventReader = null;
-      this.activeControllers.delete(controller);
-      try {
-        reader.releaseLock();
-      } catch {}
-      if (response.body?.cancel) {
-        try {
-          await response.body.cancel();
-        } catch {}
+      buffer += decoder.decode(value, { stream: true }).replace(/\r/g, '');
+
+      let delimiterIndex = buffer.indexOf('\n\n');
+      while (delimiterIndex >= 0) {
+        const chunk = buffer.slice(0, delimiterIndex);
+        buffer = buffer.slice(delimiterIndex + 2);
+        delimiterIndex = buffer.indexOf('\n\n');
+        const event = this.#parseSseEvent(chunk);
+        if (event) {
+          await this.#dispatchEvent(onEvent, event);
+        }
       }
     }
   }

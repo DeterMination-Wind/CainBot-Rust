@@ -480,7 +480,7 @@ export class ModIssueRepairManager {
     if (!force && Date.now() - this.lastModIndexAt < 5 * 60 * 1000) {
       return this.modIndex;
     }
-    const codexRoot = normalizeText(this.config.databaseRoot ?? this.config.codexRoot);
+    const codexRoot = normalizeText(this.config.codexRoot);
     if (!codexRoot) {
       this.modIndex = [];
       return this.modIndex;

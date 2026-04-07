@@ -32,6 +32,12 @@ pub struct IssueRepairState {
     pub sessions: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkflowAgentState {
+    #[serde(default)]
+    pub sessions: BTreeMap<String, Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateData {
     pub version: u32,
@@ -43,16 +49,19 @@ pub struct StateData {
     pub webui: BTreeMap<String, Value>,
     #[serde(default, rename = "issueRepair")]
     pub issue_repair: IssueRepairState,
+    #[serde(default, rename = "workflowAgent")]
+    pub workflow_agent: WorkflowAgentState,
 }
 
 impl Default for StateData {
     fn default() -> Self {
         Self {
-            version: 6,
+            version: 7,
             chat_sessions: BTreeMap::new(),
             msav_reply_contexts: BTreeMap::new(),
             webui: BTreeMap::new(),
             issue_repair: IssueRepairState::default(),
+            workflow_agent: WorkflowAgentState::default(),
         }
     }
 }
@@ -84,7 +93,7 @@ impl StateStore {
                 let mut parsed: StateData = serde_json::from_str(&text)
                     .with_context(|| format!("解析状态文件失败: {}", self.file_path.display()))?;
                 if parsed.version == 0 {
-                    parsed.version = 6;
+                    parsed.version = 7;
                 }
                 *self.state.lock().await = parsed;
                 self.apply_journal().await?;
@@ -96,10 +105,13 @@ impl StateStore {
                     ensure_dir(parent).await?;
                 }
                 self.apply_journal().await?;
-                self.logger.info("未发现状态文件，将在首次保存时创建。").await;
+                self.logger
+                    .info("未发现状态文件，将在首次保存时创建。")
+                    .await;
                 Ok(())
             }
-            Err(error) => Err(error).with_context(|| format!("读取状态文件失败: {}", self.file_path.display())),
+            Err(error) => Err(error)
+                .with_context(|| format!("读取状态文件失败: {}", self.file_path.display())),
         }
     }
 
@@ -115,18 +127,21 @@ impl StateStore {
                 .with_context(|| format!("解析状态文件失败: {}", self.file_path.display()))?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => StateData::default(),
             Err(error) => {
-                return Err(error).with_context(|| format!("读取状态文件失败: {}", self.file_path.display()));
+                return Err(error)
+                    .with_context(|| format!("读取状态文件失败: {}", self.file_path.display()));
             }
         };
         if parsed.version == 0 {
-            parsed.version = 6;
+            parsed.version = 7;
         }
 
         let journal_file = match OpenOptions::new().read(true).open(&self.journal_path).await {
             Ok(file) => Some(file),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
-                return Err(error).with_context(|| format!("读取状态 journal 失败: {}", self.journal_path.display()));
+                return Err(error).with_context(|| {
+                    format!("读取状态 journal 失败: {}", self.journal_path.display())
+                });
             }
         };
         if let Some(journal_file) = journal_file {
@@ -136,8 +151,9 @@ impl StateStore {
                 if line.trim().is_empty() {
                     continue;
                 }
-                let op: StateJournalOp = serde_json::from_str(&line)
-                    .with_context(|| format!("解析状态 journal 失败: {}", self.journal_path.display()))?;
+                let op: StateJournalOp = serde_json::from_str(&line).with_context(|| {
+                    format!("解析状态 journal 失败: {}", self.journal_path.display())
+                })?;
                 apply_state_journal_op(&mut parsed, op);
             }
         }
@@ -324,6 +340,53 @@ impl StateStore {
             .remove(session_id.trim());
     }
 
+    pub async fn list_workflow_agent_sessions(&self) -> Vec<Value> {
+        self.state
+            .lock()
+            .await
+            .workflow_agent
+            .sessions
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub async fn get_workflow_agent_session(&self, session_id: &str) -> Option<Value> {
+        self.state
+            .lock()
+            .await
+            .workflow_agent
+            .sessions
+            .get(session_id.trim())
+            .cloned()
+    }
+
+    pub async fn set_workflow_agent_session(&self, session: Value) -> Result<()> {
+        let session_id = session
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("workflow agent session id 不能为空"))?
+            .to_string();
+        self.state
+            .lock()
+            .await
+            .workflow_agent
+            .sessions
+            .insert(session_id, session);
+        Ok(())
+    }
+
+    pub async fn delete_workflow_agent_session(&self, session_id: &str) {
+        self.state
+            .lock()
+            .await
+            .workflow_agent
+            .sessions
+            .remove(session_id.trim());
+    }
+
     // 只有显式 compact 时才重写整份 snapshot，避免高频业务更新反复 JSON stringify。
     pub async fn save(&self) -> Result<()> {
         let snapshot = self.state.lock().await.clone();
@@ -338,7 +401,9 @@ impl StateStore {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(error).with_context(|| format!("删除状态 journal 失败: {}", self.journal_path.display()));
+                return Err(error).with_context(|| {
+                    format!("删除状态 journal 失败: {}", self.journal_path.display())
+                });
             }
         }
         Ok(())
@@ -349,7 +414,9 @@ impl StateStore {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => {
-                return Err(error).with_context(|| format!("读取状态 journal 失败: {}", self.journal_path.display()));
+                return Err(error).with_context(|| {
+                    format!("读取状态 journal 失败: {}", self.journal_path.display())
+                });
             }
         };
         let reader = BufReader::new(journal_file);
@@ -358,8 +425,9 @@ impl StateStore {
             if line.trim().is_empty() {
                 continue;
             }
-            let op: StateJournalOp = serde_json::from_str(&line)
-                .with_context(|| format!("解析状态 journal 失败: {}", self.journal_path.display()))?;
+            let op: StateJournalOp = serde_json::from_str(&line).with_context(|| {
+                format!("解析状态 journal 失败: {}", self.journal_path.display())
+            })?;
             let mut state = self.state.lock().await;
             apply_state_journal_op(&mut state, op);
         }

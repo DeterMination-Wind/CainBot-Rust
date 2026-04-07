@@ -1,156 +1,108 @@
-# CainBot
+# CainBot Rust
 
-[![Node.js Version](https://img.shields.io/badge/node-%3E%3D24-brightgreen)](https://nodejs.org/)
+[![Rust Edition](https://img.shields.io/badge/rust-edition%202024-orange)](Cargo.toml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
-基于 NapCat OneBot 的 QQ 群聊机器人，支持 AI 问答、翻译、GitHub Release 下载、模组问题修复等功能。
+CainBot 的 Rust 运行时仓库。这个仓库用于独立发布 CainBot 的 Rust 版入口，和旧的 Node.js 主仓库分开维护。
 
-## 功能特性
+## 当前状态
 
-- **智能群聊问答** - 消息过滤 + AI 自动回复，支持 `@Bot` 和 `/chat` 显式问答
-- **多语言翻译** - 支持文本、图片、附件翻译 (`/tr` 或 `#翻译`)
-- **GitHub Release 下载** - 识别自然语言请求，自动下载并缓存 Release 文件
-- **模组问题修复** - 自动识别并跟进 Mindustry 模组相关问题
-- **自动入群** - 自动接受群邀请
-- **Codex 文件桥** - 提供 HTTP API 供本地工具调用
+已接入并可编译运行的部分：
+
+- NapCat HTTP + SSE 客户端
+- OpenAI 兼容聊天客户端与翻译客户端
+- 配置、日志、状态文件、运行时配置、WebUI 同步文件
+- `/help`、`/chat`、`/tr`
+- `/e 状态`
+- `/e 启用`、`/e 禁用`
+- `/e 文件下载 启用|关闭`
+- `/e 过滤心跳 启用|关闭`
+- `@bot` / `@他人` 检测、疑问句检测、文本附件读取骨架
+
+尚未完成迁移的能力：
+
+- 完整 `chat-session-manager.mjs`
+- 完整 `group-file-download-manager.mjs`
+- `msav-map-analyzer.mjs`
+- `mod-issue-repair-manager.mjs`
+- `codex-bridge-server.mjs`
+- `local-rag-retriever.mjs`
+- `codex-readonly-tools.mjs`
+- 完整图片/联网混合输入路径
+- `src/index.mjs` 里的完整消息分流、低信息回复拦截、自动入群双保险、topic closure、shutdown vote
+- `/e` 的 prompt 审核链路和 prompt 生成/改写逻辑
+
+更细的迁移记录见 [RUST_PORT_PROGRESS.md](RUST_PORT_PROGRESS.md)。
+
+## 仓库定位
+
+- 这是 Rust 版 CainBot 的独立仓库
+- 配置文件继续兼容现有 `config.json`
+- 状态文件继续兼容 `data/state.json`
+- 运行时配置继续兼容 `data/runtime-config.json`
+- WebUI 同步继续兼容 `data/webui-sync.json`
+- NapCat 侧继续走 OneBot HTTP + SSE
 
 ## 快速开始
 
 ### 环境要求
 
-- Node.js >= 24
-- NapCat (OneBot HTTP + SSE)
-- AI API (OpenAI 兼容接口)
+- Rust stable，需支持 `edition = "2024"`
+- NapCat OneBot HTTP + SSE
+- OpenAI 兼容接口
 
-### 安装
+### 获取源码
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/CainBot.git
-cd CainBot
-npm install
+git clone https://github.com/DeterMination-Wind/CainBot-Rust.git
+cd CainBot-Rust
 ```
 
 ### 配置
-
-1. 复制配置模板：
 
 ```bash
 cp config.example.json config.json
 ```
 
-2. 编辑 `config.json`，填写必要信息：
+然后编辑 `config.json`，至少补齐：
 
-```json
-{
-  "napcat": {
-    "baseUrl": "http://127.0.0.1:3000",
-    "headers": {
-      "Authorization": "Bearer YOUR_ONEBOT_TOKEN"
-    }
-  },
-  "bot": {
-    "ownerUserId": "YOUR_QQ_NUMBER"
-  },
-  "ai": {
-    "baseUrl": "http://127.0.0.1:15721/v1",
-    "apiKey": "YOUR_API_KEY"
-  }
-}
-```
+- `napcat.baseUrl`
+- `napcat.headers.Authorization`
+- `bot.ownerUserId`
+- `ai.apiKey`
 
-推荐模型：
-
-- 默认 OpenAI 兼容接口可直接使用 `z-ai/glm5`
-- 如果你使用本地代理或网关，确保它支持所配置模型名的透传或映射
-- 建议优先统一 `qa` 相关审核和辅助模型，避免不同模型输出风格差异过大
-
-### 运行
+### 开发运行
 
 ```bash
-npm start
+cargo run --bin cainbot-rs
 ```
 
-或使用脚本：
+### 检查
 
 ```bash
-# Windows
-run-cain-bot.bat
-
-# Linux
-./run-cain-bot.sh
+cargo check
+cargo test
 ```
 
-## 命令列表
+## 目录结构
 
-### 普通用户
-
-| 命令 | 说明 |
-|------|------|
-| `/help` | 显示帮助 |
-| `/chat <文本>` | 与 Bot 对话 |
-| `/tr <文本>` | 翻译文本 |
-| `#翻译 <文本>` | 翻译文本（备选） |
-
-### 群管理
-
-| 命令 | 说明 |
-|------|------|
-| `/e 状态` | 查看群配置状态 |
-| `/e 过滤 <要求>` | 修改过滤规则 |
-| `/e 聊天 <要求>` | 修改聊天规则 |
-| `/e 过滤心跳 启用 [N]` | 启用消息节流 |
-| `/e 文件下载 启用 [目录]` | 启用文件下载 |
-
-### Bot 主人
-
-| 命令 | 说明 |
-|------|------|
-| `/e 启用` | 启用群功能 |
-| `/e 禁用` | 禁用群功能 |
-
-## 项目结构
-
-```
-CainBot/
-├── src/                    # 主程序代码
-│   ├── index.mjs           # 入口文件
-│   ├── napcat-client.mjs   # NapCat 客户端
-│   ├── openai-chat-client.mjs
-│   └── ...
+```text
+CainBot-Rust/
+├── rust-src/               # Rust 入口与业务模块
 ├── prompts/                # Prompt 模板
 ├── scripts/                # 辅助脚本
-├── data/                   # 运行时数据 (gitignore)
+├── data/                   # 运行时数据（默认不提交）
 ├── config.example.json     # 配置模板
-└── package.json
+├── Cargo.toml
+└── RUST_PORT_PROGRESS.md
 ```
 
-## 配置说明
+## 运行说明
 
-主要配置项：
-
-| 字段 | 说明 |
-|------|------|
-| `napcat.baseUrl` | NapCat OneBot 地址 |
-| `bot.ownerUserId` | Bot 主人 QQ 号 |
-| `ai.baseUrl` | AI API 地址 |
-| `qa.enabledGroupIds` | 启用群聊的群号列表 |
-
-完整配置见 `config.example.json`。
-
-## 开发
-
-```bash
-# 语法检查
-npm run check
-
-# 查看日志
-cat data/logs/latest.log
-```
+- 二进制入口：`cainbot-rs`
+- 入口文件：`rust-src/main.rs`
+- 当前仓库仍保留部分旧版 `src/*.mjs` 文件，作为迁移参考，不是正式运行入口
 
 ## 许可证
 
-[AGPL-3.0](LICENSE) - 修改并部署本项目需公开源码。
-
-## 致谢
-
-- [NapCat](https://github.com/NapCatQQ/NapCat) - OneBot 实现
+[AGPL-3.0](LICENSE)

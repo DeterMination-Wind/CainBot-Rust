@@ -2,8 +2,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NODE_BIN="${NODE_BIN:-node}"
+CAINBOT_EXE="${CAINBOT_EXE:-$SCRIPT_DIR/target/release/cainbot-rs}"
 
 cd "$SCRIPT_DIR"
 export CAINBOT_CONFIG="${CAINBOT_CONFIG:-$SCRIPT_DIR/config.json}"
-exec "$NODE_BIN" src/index.mjs
+if [[ ! -f "$CAINBOT_EXE" ]]; then
+  echo "[INFO] Rust binary not found, building release binary..."
+  cargo build --release --bin cainbot-rs
+fi
+exec "$CAINBOT_EXE"

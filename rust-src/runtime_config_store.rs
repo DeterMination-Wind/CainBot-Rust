@@ -22,7 +22,10 @@ pub struct QaGroup {
     pub proactive_reply_enabled: bool,
     #[serde(default, rename = "filterHeartbeatEnabled")]
     pub filter_heartbeat_enabled: bool,
-    #[serde(default = "default_filter_heartbeat_interval", rename = "filterHeartbeatInterval")]
+    #[serde(
+        default = "default_filter_heartbeat_interval",
+        rename = "filterHeartbeatInterval"
+    )]
     pub filter_heartbeat_interval: u64,
     #[serde(default, rename = "fileDownloadEnabled")]
     pub file_download_enabled: bool,
@@ -153,7 +156,8 @@ impl RuntimeConfigStore {
                 Ok(())
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.save().await,
-            Err(error) => Err(error).with_context(|| format!("读取运行时配置失败: {}", self.file_path.display())),
+            Err(error) => Err(error)
+                .with_context(|| format!("读取运行时配置失败: {}", self.file_path.display())),
         }
     }
 
@@ -185,10 +189,16 @@ impl RuntimeConfigStore {
         {
             return item.enabled;
         }
-        static_group_ids.iter().any(|item| item.trim() == normalized)
+        static_group_ids
+            .iter()
+            .any(|item| item.trim() == normalized)
     }
 
-    pub async fn is_qa_group_proactive_reply_enabled(&self, group_id: &str, static_group_ids: &[String]) -> bool {
+    pub async fn is_qa_group_proactive_reply_enabled(
+        &self,
+        group_id: &str,
+        static_group_ids: &[String],
+    ) -> bool {
         let normalized = group_id.trim();
         if normalized.is_empty() {
             return false;
@@ -217,7 +227,11 @@ impl RuntimeConfigStore {
             .unwrap_or(false)
     }
 
-    pub async fn is_qa_group_filter_heartbeat_enabled(&self, group_id: &str, static_group_ids: &[String]) -> bool {
+    pub async fn is_qa_group_filter_heartbeat_enabled(
+        &self,
+        group_id: &str,
+        static_group_ids: &[String],
+    ) -> bool {
         let normalized = group_id.trim();
         if normalized.is_empty() {
             return false;
@@ -270,7 +284,11 @@ impl RuntimeConfigStore {
         if state.payload.mode == "all" {
             return true;
         }
-        state.payload.group_ids.iter().any(|item| item == normalized)
+        state
+            .payload
+            .group_ids
+            .iter()
+            .any(|item| item == normalized)
     }
 
     // 这块保持原版语义：运行时配置优先于静态配置，外部互斥群文件再做最终裁决。
@@ -340,7 +358,10 @@ impl RuntimeConfigStore {
         }
 
         let mut data = self.data.lock().await;
-        let index = data.qa_groups.iter().position(|item| item.group_id == normalized);
+        let index = data
+            .qa_groups
+            .iter()
+            .position(|item| item.group_id == normalized);
         let action = if let Some(index) = index {
             let target = &mut data.qa_groups[index];
             target.group_id = normalized.to_string();
@@ -396,7 +417,10 @@ impl RuntimeConfigStore {
         }
         let current_enabled = self.is_qa_group_enabled(normalized, static_group_ids).await;
         let mut data = self.data.lock().await;
-        let index = data.qa_groups.iter().position(|item| item.group_id == normalized);
+        let index = data
+            .qa_groups
+            .iter()
+            .position(|item| item.group_id == normalized);
         let action = if let Some(index) = index {
             let target = &mut data.qa_groups[index];
             target.group_id = normalized.to_string();
@@ -448,7 +472,10 @@ impl RuntimeConfigStore {
         let current_enabled = self.is_qa_group_enabled(normalized, static_group_ids).await;
 
         let mut data = self.data.lock().await;
-        let index = data.qa_groups.iter().position(|item| item.group_id == normalized);
+        let index = data
+            .qa_groups
+            .iter()
+            .position(|item| item.group_id == normalized);
         let action = if let Some(index) = index {
             let target = &mut data.qa_groups[index];
             target.group_id = normalized.to_string();
@@ -510,7 +537,10 @@ impl RuntimeConfigStore {
         let normalized_interval = interval.clamp(1, 1_000);
 
         let mut data = self.data.lock().await;
-        let index = data.qa_groups.iter().position(|item| item.group_id == normalized);
+        let index = data
+            .qa_groups
+            .iter()
+            .position(|item| item.group_id == normalized);
         let action = if let Some(index) = index {
             let target = &mut data.qa_groups[index];
             target.group_id = normalized.to_string();
@@ -640,40 +670,53 @@ impl RuntimeConfigStore {
                     if now.saturating_sub(mtime_ms) > stale_ms {
                         continue;
                     }
-                    if previous.file_path.as_ref() == Some(file_path) && previous.mtime_ms == mtime_ms {
+                    if previous.file_path.as_ref() == Some(file_path)
+                        && previous.mtime_ms == mtime_ms
+                    {
                         let mut state = self.external_exclusive_groups.lock().await;
                         state.checked_at_ms = now;
                         state.refresh_ms = refresh_ms;
                         return;
                     }
                     match fs::read_to_string(file_path).await {
-                        Ok(text) => match serde_json::from_str::<ExternalExclusiveGroupsPayload>(&text) {
-                            Ok(mut payload) => {
-                                payload.mode = normalize_external_mode(&payload.mode);
-                                payload.group_ids = dedupe_groups(payload.group_ids);
-                                *self.external_exclusive_groups.lock().await = ExternalExclusiveGroupsState {
-                                    file_path: Some(file_path.clone()),
-                                    checked_at_ms: now,
-                                    refresh_ms,
-                                    mtime_ms,
-                                    payload,
-                                };
-                                return;
-                            }
-                            Err(error) => {
-                                self.logger.warn(format!("解析外部互斥群文件失败：{error}")).await;
-                                if should_keep_previous_external_exclusive_state(&previous, file_path, now, stale_ms) {
-                                    let mut state = self.external_exclusive_groups.lock().await;
-                                    state.checked_at_ms = now;
-                                    state.refresh_ms = refresh_ms;
+                        Ok(text) => {
+                            match serde_json::from_str::<ExternalExclusiveGroupsPayload>(&text) {
+                                Ok(mut payload) => {
+                                    payload.mode = normalize_external_mode(&payload.mode);
+                                    payload.group_ids = dedupe_groups(payload.group_ids);
+                                    *self.external_exclusive_groups.lock().await =
+                                        ExternalExclusiveGroupsState {
+                                            file_path: Some(file_path.clone()),
+                                            checked_at_ms: now,
+                                            refresh_ms,
+                                            mtime_ms,
+                                            payload,
+                                        };
                                     return;
                                 }
-                                continue;
+                                Err(error) => {
+                                    self.logger
+                                        .warn(format!("解析外部互斥群文件失败：{error}"))
+                                        .await;
+                                    if should_keep_previous_external_exclusive_state(
+                                        &previous, file_path, now, stale_ms,
+                                    ) {
+                                        let mut state = self.external_exclusive_groups.lock().await;
+                                        state.checked_at_ms = now;
+                                        state.refresh_ms = refresh_ms;
+                                        return;
+                                    }
+                                    continue;
+                                }
                             }
-                        },
+                        }
                         Err(error) => {
-                            self.logger.warn(format!("读取外部互斥群文件失败：{error}")).await;
-                            if should_keep_previous_external_exclusive_state(&previous, file_path, now, stale_ms) {
+                            self.logger
+                                .warn(format!("读取外部互斥群文件失败：{error}"))
+                                .await;
+                            if should_keep_previous_external_exclusive_state(
+                                &previous, file_path, now, stale_ms,
+                            ) {
                                 let mut state = self.external_exclusive_groups.lock().await;
                                 state.checked_at_ms = now;
                                 state.refresh_ms = refresh_ms;
@@ -685,8 +728,12 @@ impl RuntimeConfigStore {
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => {
-                    self.logger.warn(format!("读取外部互斥群文件失败：{error}")).await;
-                    if should_keep_previous_external_exclusive_state(&previous, file_path, now, stale_ms) {
+                    self.logger
+                        .warn(format!("读取外部互斥群文件失败：{error}"))
+                        .await;
+                    if should_keep_previous_external_exclusive_state(
+                        &previous, file_path, now, stale_ms,
+                    ) {
                         let mut state = self.external_exclusive_groups.lock().await;
                         state.checked_at_ms = now;
                         state.refresh_ms = refresh_ms;
@@ -712,10 +759,14 @@ impl RuntimeConfigStore {
             result.push(configured);
         }
         for candidate in [
-            self.config_dir.join("../../OlivOSAIChatAssassin/data/cainbot-exclusive-groups.json"),
-            self.config_dir.join("../../NapCatAIChatAssassin/data/cainbot-exclusive-groups.json"),
-            self.config_dir.join("../OlivOSAIChatAssassin/data/cainbot-exclusive-groups.json"),
-            self.config_dir.join("../NapCatAIChatAssassin/data/cainbot-exclusive-groups.json"),
+            self.config_dir
+                .join("../../OlivOSAIChatAssassin/data/cainbot-exclusive-groups.json"),
+            self.config_dir
+                .join("../../NapCatAIChatAssassin/data/cainbot-exclusive-groups.json"),
+            self.config_dir
+                .join("../OlivOSAIChatAssassin/data/cainbot-exclusive-groups.json"),
+            self.config_dir
+                .join("../NapCatAIChatAssassin/data/cainbot-exclusive-groups.json"),
             PathBuf::from("/OlivOSAIChatAssassin/data/cainbot-exclusive-groups.json"),
             PathBuf::from("/NapCatAIChatAssassin/data/cainbot-exclusive-groups.json"),
         ] {
@@ -727,7 +778,9 @@ impl RuntimeConfigStore {
     }
 
     fn external_exclusive_refresh_ms(&self) -> u64 {
-        self.defaults.qa_external_exclusive_groups_refresh_ms.max(250)
+        self.defaults
+            .qa_external_exclusive_groups_refresh_ms
+            .max(250)
     }
 
     fn external_exclusive_stale_ms(&self) -> u64 {

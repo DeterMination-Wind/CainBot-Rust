@@ -2,14 +2,11 @@
   "name": "napcat-cain-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "NapCat-based QQ bot for GitHub release delivery, translation commands, and group file sync.",
+  "description": "NapCat-based QQ bot with Rust runtime for chat, translation, and release delivery.",
   "type": "module",
   "scripts": {
-    "start": "node src/index.mjs",
-    "check": "node --check src/index.mjs",
+    "start": "cargo run --release --bin cainbot-rs",
+    "check": "cargo check",
     "build:release:windows": "powershell -ExecutionPolicy Bypass -File scripts/build-windows-portable.ps1"
-  },
-  "engines": {
-    "node": ">=24"
   }
 }

@@ -200,12 +200,72 @@ function normalizeHallucinationCheckDecision(raw, fallbackAnswer = '') {
   };
 }
 
+function normalizeLowInformationReviewDecision(raw) {
+  const parsed = parseJsonObject(raw, {});
+  return {
+    approved: parsed?.allow !== false && parsed?.approved !== false,
+    feedback: String(parsed?.feedback ?? parsed?.fallback ?? '').trim(),
+    reason: String(parsed?.reason ?? '').trim(),
+    startGroupFileDownload: parsed?.start_group_file_download === true || parsed?.startGroupFileDownload === true,
+    requestText: String(parsed?.request_text ?? parsed?.requestText ?? '').trim()
+  };
+}
+
+function summarizeReviewImageContent(item) {
+  const imageUrl = typeof item?.image_url === 'string'
+    ? item.image_url
+    : item?.image_url?.url;
+  const normalizedUrl = String(imageUrl ?? '').trim();
+  if (!normalizedUrl) {
+    return '[附带图片]';
+  }
+  if (/^data:/i.test(normalizedUrl)) {
+    return '[附带图片:data-url]';
+  }
+  if (/^https?:\/\//i.test(normalizedUrl)) {
+    try {
+      const parsed = new URL(normalizedUrl);
+      return `[附带图片:${parsed.host}${parsed.pathname}]`;
+    } catch {
+      return '[附带图片:http-url]';
+    }
+  }
+  return '[附带图片]';
+}
+
+function stringifyReviewContentPart(item) {
+  if (typeof item === 'string') {
+    return item.trim();
+  }
+  if (!item || typeof item !== 'object') {
+    return '';
+  }
+  if (item.type === 'text' || item.type === 'input_text' || item.type === 'output_text') {
+    return String(item.text ?? '').trim();
+  }
+  if (item.type === 'image_url' || item.type === 'input_image') {
+    return summarizeReviewImageContent(item);
+  }
+  try {
+    return JSON.stringify(item, null, 2).trim();
+  } catch {
+    return String(item).trim();
+  }
+}
+
 function stringifyReviewMessageContent(content) {
   if (typeof content === 'string') {
     return content.trim();
   }
   if (content == null) {
     return '';
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => stringifyReviewContentPart(item))
+      .filter(Boolean)
+      .join('\n')
+      .trim();
   }
   try {
     return JSON.stringify(content, null, 2).trim();
@@ -286,16 +346,16 @@ function summarizeToolRequest(toolRequest) {
     case 'read_recent_chat_messages':
     case 'read_group_chat_messages':
       return `${tool} count=${toolRequest?.count ?? (tool === 'read_recent_chat_messages' ? 20 : 100)}`;
+    case 'call_fishbot':
+      return `${tool} command=${JSON.stringify(String(toolRequest?.command ?? toolRequest?.text ?? toolRequest?.query ?? '').trim())} historyCount=${toolRequest?.history_count ?? toolRequest?.count ?? 40}`;
     case 'start_group_file_download':
       return `${tool} mode=${JSON.stringify(String(toolRequest?.mode ?? '').trim())} repoChoice=${JSON.stringify(String(toolRequest?.repo_choice ?? '').trim())} version=${JSON.stringify(String(toolRequest?.version_query ?? toolRequest?.version ?? '').trim())} commit=${JSON.stringify(String(toolRequest?.commit_hash ?? toolRequest?.commit ?? toolRequest?.sha ?? '').trim())} platform=${JSON.stringify(String(toolRequest?.platform_hint ?? toolRequest?.platform ?? '').trim())}`;
-    case 'run_bash_command':
-      return `${tool} cwd=${JSON.stringify(String(toolRequest?.cwd ?? '').trim() || '.')} command=${JSON.stringify(String(toolRequest?.command ?? toolRequest?.bash ?? '').trim())}`;
-    case 'run_python_script':
-      return `${tool} cwd=${JSON.stringify(String(toolRequest?.cwd ?? '').trim() || '.')} args=${JSON.stringify(Array.isArray(toolRequest?.args) ? toolRequest.args : [])} code=${JSON.stringify(String(toolRequest?.code ?? toolRequest?.script ?? '').trim().slice(0, 200))}`;
     case 'read_github_repo_releases':
       return `${tool} repo=${JSON.stringify(String(toolRequest?.repo ?? toolRequest?.repository ?? toolRequest?.url ?? '').trim())} maxReleases=${toolRequest?.max_releases ?? 10}`;
     case 'read_github_repo_commits':
       return `${tool} repo=${JSON.stringify(String(toolRequest?.repo ?? toolRequest?.repository ?? toolRequest?.url ?? '').trim())} ref=${JSON.stringify(String(toolRequest?.sha ?? toolRequest?.branch ?? toolRequest?.ref ?? '').trim())} maxCommits=${toolRequest?.max_commits ?? 50}`;
+    case 'run_python_script':
+      return `${tool} path=${JSON.stringify(String(toolRequest?.path ?? toolRequest?.cwd_path ?? '.').trim() || '.')} timeoutMs=${toolRequest?.timeout_ms ?? toolRequest?.timeoutMs ?? 8000} code=${JSON.stringify(String(toolRequest?.code ?? toolRequest?.script ?? '').trim().slice(0, 120))}`;
     default:
       return `${tool} ${JSON.stringify(toolRequest)}`;
   }
@@ -329,16 +389,16 @@ function summarizeToolResult(toolResult) {
     case 'read_recent_chat_messages':
     case 'read_group_chat_messages':
       return `${tool} returned=${toolResult?.returnedCount ?? 0} requested=${toolResult?.requestedCount ?? 0}`;
+    case 'call_fishbot':
+      return `${tool} command=${JSON.stringify(String(toolResult?.command ?? '').trim())} returned=${toolResult?.returnedCount ?? 0} fishbotMessages=${toolResult?.fishbot_message_count ?? 0}`;
     case 'start_group_file_download':
       return `${tool} started=${toolResult?.started === true} state=${toolResult?.state ?? '(none)'} releaseTag=${toolResult?.release_tag ?? '(none)'}`;
-    case 'run_bash_command':
-      return `${tool} cwd=${toolResult?.cwd ?? '(unknown)'} exit=${toolResult?.exit_code ?? '(none)'} success=${toolResult?.succeeded === true}`;
-    case 'run_python_script':
-      return `${tool} cwd=${toolResult?.cwd ?? '(unknown)'} exit=${toolResult?.exit_code ?? '(none)'} success=${toolResult?.succeeded === true}`;
     case 'read_github_repo_releases':
       return `${tool} repo=${toolResult?.repo?.full_name ?? '(unknown)'} returned=${toolResult?.returnedCount ?? 0} latestTag=${toolResult?.latestTag ?? '(none)'}`;
     case 'read_github_repo_commits':
       return `${tool} repo=${toolResult?.repo?.full_name ?? '(unknown)'} returned=${toolResult?.returnedCount ?? 0} ref=${toolResult?.ref ?? '(default)'}`;
+    case 'run_python_script':
+      return `${tool} imports=${Array.isArray(toolResult?.imports) ? toolResult.imports.join(',') || '(none)' : '(none)'} stdoutChars=${String(toolResult?.stdout ?? '').length} result=${JSON.stringify(String(toolResult?.result ?? '').slice(0, 120))}`;
     default:
       return `${tool} ok`;
   }
@@ -687,7 +747,8 @@ const ANSWER_QUALITY_GUARD_PROMPT = [
   '4. 宁可明确表示还没定位，也不要输出低信息复述。',
   '5. 只要某个事实能通过工具精确确认，就必须先调工具，不要靠记忆、常识或自行推断硬答。',
   '6. 如果问题是在查英文名、内部 id、对象名、字段名、文件路径、版本 tag、release、提交记录或源码位置，默认先调工具，再组织回答。',
-  '7. Mindustry 问题里出现中文物品名、建筑名、单位名、液体名、状态名、星球名、天气名时，先查 bundle_zh_CN.properties 确认英文名或 id，再继续查 JSON 或源码。'
+  '7. Mindustry 问题里出现中文物品名、建筑名、单位名、液体名、状态名、星球名、天气名时，先查 bundle_zh_CN.properties 确认英文名或 id，再继续查 JSON 或源码。',
+  '8. 如果你需要在最终回复里 @ 某个 QQ 用户，直接输出 <<at:QQ号>>；系统会把它转成真实 at。不要输出 CQ 码。'
 ].join('\n');
 
 function formatJsonSnippet(value, maxChars = 2400) {
@@ -831,14 +892,42 @@ export class ChatSessionManager {
       };
       this.stateStore.appendChatSessionEntry(sessionKey, userEntry, this.config.answer.maxTimelineMessages);
 
+      const timelineText = buildTimelineBlock(
+        this.stateStore.getChatSession(sessionKey).messages,
+        this.config.answer.contextWindowMessages
+      );
+      const lookupSeedText = String(normalizedInput.text || normalizedInput.historyText).trim();
       const sessionMessages = this.stateStore.getChatSession(sessionKey).messages;
-      const { requestMessages, lookupSeedText } = await this.#buildAnswerRequestMessages(context, normalizedInput, sessionMessages);
+      const systemPrompt = await this.#buildAnswerSystemPrompt(context, sessionMessages);
+      const ragPrompt = await this.#maybeBuildRagPrompt(lookupSeedText);
+      const codexFolderGuidePrompt = await this.#maybeBuildCodexFolderGuidePrompt(lookupSeedText);
+      const mindustryPrompt = await this.#maybeBuildMindustryKnowledgePrompt(lookupSeedText);
+      const userContent = [
+        '以下是当前共享上下文：',
+        timelineText,
+        '',
+        '以下是本次需要你回答的请求：',
+        normalizedInput.text
+      ].join('\n');
+
+      const requestMessages = [
+        { role: 'system', content: systemPrompt },
+        ...(ragPrompt ? [{ role: 'system', content: ragPrompt }] : []),
+        ...(codexFolderGuidePrompt ? [{ role: 'system', content: codexFolderGuidePrompt }] : []),
+        ...(mindustryPrompt ? [{ role: 'system', content: mindustryPrompt }] : []),
+        { role: 'user', content: normalizedInput.images.length > 0 ? this.#buildMultimodalUserContent(userContent, normalizedInput.images) : userContent }
+      ];
 
       const completionRuntimeContext = {
         ...(normalizedInput.runtimeContext ?? {}),
         lookupSeedText
       };
-      const completion = await this.#completeWithReadonlyTools(context, completionRuntimeContext, requestMessages);
+      const completion = await this.#completeWithReadonlyTools(
+        context,
+        completionRuntimeContext,
+        requestMessages,
+        normalizedInput.images
+      );
       const assistantEntry = {
         role: 'assistant',
         kind: completion.notice === 'group-file-download-started' ? 'tool-handoff' : 'answer',
@@ -854,83 +943,6 @@ export class ChatSessionManager {
       }
       await this.stateStore.save();
       if (context.messageType === 'group' && assistantEntry.text) {
-        const snapshot = Array.isArray(this.stateStore.getChatSession(sessionKey).messages)
-          ? this.stateStore.getChatSession(sessionKey).messages.slice()
-          : [];
-        void this.#refreshStructuredGroupMemory(context.groupId, snapshot).catch((error) => {
-          this.logger.warn(`更新群记忆失败：${error.message}`);
-        });
-      }
-      return {
-        text: completion.text,
-        notice: completion.notice || ''
-      };
-    });
-  }
-
-  async retryLowInformationReply(context, input, rejectedReply, reviewReason = '') {
-    const sessionKey = this.buildSessionKey(context);
-    return await this.#runExclusive(sessionKey, async () => {
-      const normalizedInput = this.#normalizeInput(input);
-      if (!normalizedInput.historyText) {
-        throw new Error('聊天内容不能为空');
-      }
-
-      const normalizedRejectedReply = String(rejectedReply ?? '').trim();
-      const currentSession = this.stateStore.getChatSession(sessionKey);
-      const baseMessages = Array.isArray(currentSession?.messages) ? currentSession.messages.slice() : [];
-      const lastEntry = baseMessages.at(-1);
-      const sessionMessages = (
-        normalizedRejectedReply
-        && lastEntry?.role === 'assistant'
-        && String(lastEntry?.text ?? '').trim() === normalizedRejectedReply
-      )
-        ? baseMessages.slice(0, -1)
-        : baseMessages;
-      const { requestMessages, lookupSeedText } = await this.#buildAnswerRequestMessages(context, normalizedInput, sessionMessages);
-      const retryMessages = [
-        ...requestMessages,
-        ...(normalizedRejectedReply ? [{ role: 'assistant', content: normalizedRejectedReply }] : []),
-        {
-          role: 'user',
-          content: [
-            `系统质检打回：上一条回复不能直接发给用户。原因：${String(reviewReason ?? '').trim() || '回复低信息，缺少具体定位或可执行信息。'}`,
-            '请基于当前上下文和你已经拿到的工具结果重新回答。',
-            '不要再发“收到，我看看”“要我现在列出来吗”“还没定位到具体位置”“先去查一下”这类过渡话术。',
-            '如果用户问的是目录、文件、字段、对象、位置、版本或步骤，优先直接给出具体名字、路径、对象名、结论或明确的下一步读取结果。',
-            '如果确实还不能确定，就明确说出还缺哪一个具体读取结果，不要反问用户已经给过的信息。',
-            '不要使用 Markdown。'
-          ].join('\n')
-        }
-      ];
-      const completionRuntimeContext = {
-        ...(normalizedInput.runtimeContext ?? {}),
-        lookupSeedText
-      };
-      const completion = await this.#completeWithReadonlyTools(context, completionRuntimeContext, retryMessages);
-      const assistantText = completion.text || (completion.notice === 'group-file-download-started' ? '[已转交群文件下载流程]' : '');
-
-      if (lastEntry?.role === 'assistant' && String(lastEntry?.text ?? '').trim() === normalizedRejectedReply) {
-        lastEntry.kind = completion.notice === 'group-file-download-started' ? 'tool-handoff' : 'answer';
-        lastEntry.text = assistantText;
-        lastEntry.time = new Date().toISOString();
-        if (!lastEntry.createdAt) {
-          lastEntry.createdAt = lastEntry.time;
-        }
-      } else if (assistantText) {
-        this.stateStore.appendChatSessionEntry(sessionKey, {
-          role: 'assistant',
-          kind: completion.notice === 'group-file-download-started' ? 'tool-handoff' : 'answer',
-          messageId: '',
-          userId: String(context.selfId ?? '').trim(),
-          sender: 'Cain',
-          text: assistantText,
-          time: new Date().toISOString(),
-          createdAt: new Date().toISOString()
-        }, this.config.answer.maxTimelineMessages);
-      }
-      await this.stateStore.save();
-      if (context.messageType === 'group' && assistantText) {
         const snapshot = Array.isArray(this.stateStore.getChatSession(sessionKey).messages)
           ? this.stateStore.getChatSession(sessionKey).messages.slice()
           : [];
@@ -1172,36 +1184,6 @@ export class ChatSessionManager {
     return override?.filterPrompt || this.config.filter.prompt;
   }
 
-  async #buildAnswerRequestMessages(context, normalizedInput, sessionMessages) {
-    const timelineText = buildTimelineBlock(
-      sessionMessages,
-      this.config.answer.contextWindowMessages
-    );
-    const lookupSeedText = String(normalizedInput.text || normalizedInput.historyText).trim();
-    const systemPrompt = await this.#buildAnswerSystemPrompt(context, sessionMessages);
-    const ragPrompt = await this.#maybeBuildRagPrompt(lookupSeedText);
-    const codexFolderGuidePrompt = await this.#maybeBuildCodexFolderGuidePrompt(lookupSeedText);
-    const mindustryPrompt = await this.#maybeBuildMindustryKnowledgePrompt(lookupSeedText);
-    const userContent = [
-      '以下是当前共享上下文：',
-      timelineText,
-      '',
-      '以下是本次需要你回答的请求：',
-      normalizedInput.text
-    ].join('\n');
-
-    return {
-      lookupSeedText,
-      requestMessages: [
-        { role: 'system', content: systemPrompt },
-        ...(ragPrompt ? [{ role: 'system', content: ragPrompt }] : []),
-        ...(codexFolderGuidePrompt ? [{ role: 'system', content: codexFolderGuidePrompt }] : []),
-        ...(mindustryPrompt ? [{ role: 'system', content: mindustryPrompt }] : []),
-        { role: 'user', content: normalizedInput.images.length > 0 ? this.#buildMultimodalUserContent(userContent, normalizedInput.images) : userContent }
-      ]
-    };
-  }
-
   async #buildAnswerSystemPrompt(context, sessionMessages = []) {
     const override = context.messageType === 'group'
       ? this.runtimeConfigStore?.getGroupQaOverride(context.groupId)
@@ -1222,7 +1204,7 @@ export class ChatSessionManager {
       parts.push(this.localRagRetriever.getPromptInstructions());
     }
     if (this.codexTools && await this.codexTools.isEnabled()) {
-      parts.push(this.codexTools.getPromptInstructions());
+      parts.push(await this.codexTools.getPromptInstructions({ context }));
     }
     return parts.filter(Boolean).join('\n\n');
   }
@@ -1568,7 +1550,7 @@ export class ChatSessionManager {
       if (!guide) {
         return '';
       }
-      const codexRoot = String(this.config?.answer?.databaseRoot ?? this.config?.answer?.codexRoot ?? '').trim();
+      const codexRoot = String(this.config?.answer?.codexRoot ?? '').trim();
       const folderNames = (await fs.readdir(codexRoot, { withFileTypes: true }))
         .filter((entry) => entry?.isDirectory?.())
         .map((entry) => String(entry.name ?? '').trim())
@@ -1576,12 +1558,12 @@ export class ChatSessionManager {
         .sort((left, right) => left.localeCompare(right, 'zh-CN'));
 
       const lines = [
-        '【数据库根目录文件夹名称与用途索引已由系统预读】',
-        `数据库根目录：${guide.rootPath}`,
+        '【codex 根目录文件夹名称与用途索引已由系统预读】',
+        `codex 根目录：${guide.rootPath}`,
         `索引文件：${guide.indexPath}`,
-        `当前数据库根目录文件夹名称：${folderNames.join('、')}`,
+        `当前 codex 根目录文件夹名称：${folderNames.join('、')}`,
         '回答模组、插件、脚本、源码、仓库、项目目录、构建、编译、报错定位、服务端脚本这类问题前，先根据上面的文件夹名称判断应该看哪个目录，再参考下面的索引决定优先读哪个项目。',
-        '如果问题已经明显对应某个目录，就优先读取那个目录；不要在没做目录判断前就盲搜整个数据库目录。',
+        '如果问题已经明显对应某个目录，就优先读取那个目录；不要在没做目录判断前就盲搜整个 codex。',
         '文件夹用途索引：'
       ];
 
@@ -1589,10 +1571,10 @@ export class ChatSessionManager {
         lines.push(`- ${entry.name}: ${entry.purpose}`);
       }
 
-      lines.push('这份索引已经预读成功；不要再说自己还没看过数据库根目录。');
+      lines.push('这份索引已经预读成功；不要再说自己还没看过 codex 根目录。');
       return lines.join('\n');
     } catch (error) {
-      this.logger.warn(`数据库根目录索引自动预读失败：${error.message}`);
+      this.logger.warn(`codex 根目录索引自动预读失败：${error.message}`);
       return '';
     }
   }
@@ -1602,7 +1584,7 @@ export class ChatSessionManager {
       return this.mindustryKnowledgeCache;
     }
 
-    const codexRoot = String(this.config?.answer?.databaseRoot ?? this.config?.answer?.codexRoot ?? '').trim();
+    const codexRoot = String(this.config?.answer?.codexRoot ?? '').trim();
     if (!codexRoot) {
       return null;
     }
@@ -1639,7 +1621,7 @@ export class ChatSessionManager {
       return this.codexFolderGuideCache;
     }
 
-    const codexRoot = String(this.config?.answer?.databaseRoot ?? this.config?.answer?.codexRoot ?? '').trim();
+    const codexRoot = String(this.config?.answer?.codexRoot ?? '').trim();
     if (!codexRoot) {
       return null;
     }
@@ -1740,13 +1722,14 @@ export class ChatSessionManager {
     };
   }
 
-  async #completeWithReadonlyTools(context, runtimeContext, messages) {
+  async #completeWithReadonlyTools(context, runtimeContext, messages, requestImages = []) {
     const toolEnabled = Boolean(this.codexTools && await this.codexTools.isEnabled());
     const softToolRounds = Number(this.config.answer.maxToolRounds ?? 4) || 4;
     const hardToolRounds = Math.max(softToolRounds, 20);
     const contextBudget = Number(this.config.answer.maxContextChars ?? 80000) || 80000;
     const workingMessages = [...messages];
     const repeatedTruncatedReads = new Map();
+    let fishBotToolCalls = 0;
     const lookupSeedText = String(runtimeContext?.lookupSeedText ?? '').trim();
     const answerStreamSession = runtimeContext?.answerStreamSession && typeof runtimeContext.answerStreamSession === 'object'
       ? runtimeContext.answerStreamSession
@@ -1770,59 +1753,234 @@ export class ChatSessionManager {
     };
 
     const finalizeCompletion = async (text = '', notice = '') => {
-      let candidateText = String(text ?? '').trim();
-      if (notice || !candidateText) {
-        return { text: candidateText, notice };
+      const normalizedText = String(text ?? '').trim();
+      if (notice || !normalizedText) {
+        return { text: normalizedText, notice };
       }
+      let currentText = normalizedText;
+      const maxToolRepairAttempts = 4;
+      let toolRepairCount = 0;
 
-      const maxHallucinationRetries = Math.max(
-        0,
-        Math.min(3, Number(this.config.hallucinationCheck?.maxRewriteAttempts ?? 2) || 2)
-      );
-      let retryCount = 0;
+      while (true) {
+        const finalToolParsing = this.codexTools.parseToolCalls(currentText);
+        if (finalToolParsing.calls.length > 0) {
+          if (toolRepairCount >= maxToolRepairAttempts) {
+            this.logger.warn(`最终回复仍包含工具请求，抑制本次回复：reply=${JSON.stringify(String(currentText ?? '').slice(0, 160))}`);
+            discardPendingStreamText();
+            workingMessages.push({ role: 'assistant', content: currentText });
+            workingMessages.push({
+              role: 'user',
+              content: [
+                '系统抑制：你上一条最终回复仍然包含工具请求，这条内容不会发给用户。',
+                '请继续下一条回复：如果需要工具，只能输出一个合法工具请求；如果不需要工具，请直接给出普通文本答案，禁止再次输出无效或多余工具标记。'
+              ].join('\n')
+            });
+            const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+            currentText = String(retryText ?? '').trim() || currentText;
+            toolRepairCount = 0;
+            continue;
+          }
+          toolRepairCount += 1;
+          discardPendingStreamText();
 
-      while (candidateText) {
+          if (!toolEnabled) {
+            this.logger.warn(`最终回复请求了工具，但当前会话工具不可用，要求主模型直接回答：reply=${JSON.stringify(String(currentText ?? '').slice(0, 160))}`);
+            workingMessages.push({ role: 'assistant', content: currentText });
+            workingMessages.push({
+              role: 'user',
+              content: [
+                '系统纠偏：当前会话不允许执行工具，你刚才输出了工具请求，所以这条内容不能直接发给用户。',
+                '请直接给出普通文本回答，禁止包含任何工具调用标记。'
+              ].join('\n')
+            });
+            const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+            currentText = String(retryText ?? '').trim() || currentText;
+            continue;
+          }
+
+          const toolRequest = finalToolParsing.calls[0];
+          if (toolRequest.tool === 'call_fishbot' && fishBotToolCalls >= 9) {
+            this.logger.warn('最终回复触发 fishbot 工具超限，改为要求主模型直接回答');
+            workingMessages.push({ role: 'assistant', content: currentText });
+            workingMessages.push({
+              role: 'user',
+              content: '系统提示：本轮鱼鱼工具最多只能调用 9 次；请停止继续发鱼鱼命令，基于现有鱼鱼结果直接回答用户。'
+            });
+            const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+            currentText = String(retryText ?? '').trim() || currentText;
+            continue;
+          }
+
+          const warnings = [];
+          const readSignature = toolRequest.tool === 'read_codex_file'
+            ? JSON.stringify({
+              path: String(toolRequest?.path ?? '').trim(),
+              start: Number(toolRequest?.start_line ?? 1) || 1,
+              end: toolRequest?.end_line ?? 'auto',
+              maxChars: Number(toolRequest?.max_chars ?? 12000) || 12000
+            })
+            : '';
+          if (finalToolParsing.format === 'legacy') {
+            warnings.push('你刚才没有使用约定的工具标记；后续必须使用特殊标记包裹单个工具请求。');
+          }
+          if (finalToolParsing.calls.length > 1) {
+            warnings.push('你一次返回了多个工具请求；系统只执行第一个，后续必须一次只请求一个工具。');
+          }
+          if (finalToolParsing.invalidCount > 0) {
+            warnings.push('你的上一条输出还包含无效工具请求，系统已忽略并仅执行第一个合法工具。');
+          }
+
+          this.logger.info(`最终回复触发只读工具：${summarizeToolRequest(toolRequest)}`);
+          let toolResult;
+          if (toolRequest.tool === 'read_codex_file' && readSignature && (repeatedTruncatedReads.get(readSignature) ?? 0) > 0) {
+            toolResult = {
+              tool: 'read_codex_file',
+              path: String(toolRequest?.path ?? '').trim(),
+              truncated: true,
+              blocked: true,
+              error: '同一段已截断内容禁止重复读取；下一步请改用 subagent_codex_lookup，并在 question 中写明你要找的字段、对象或关键词。'
+            };
+          } else {
+            try {
+              if (toolRequest.tool === 'call_fishbot') {
+                fishBotToolCalls += 1;
+              }
+              toolResult = await this.codexTools.execute(toolRequest, { context, ...runtimeContext });
+            } catch (error) {
+              toolResult = {
+                tool: String(toolRequest.tool ?? 'unknown'),
+                error: error.message
+              };
+            }
+          }
+
+          if (toolResult?.error) {
+            this.logger.warn(`最终回复只读工具失败 ${toolRequest.tool}: ${toolResult.error}`);
+          } else {
+            this.logger.info(`最终回复只读工具结果：${summarizeToolResult(toolResult)}`);
+          }
+
+          if (toolRequest.tool === 'read_codex_file' && readSignature) {
+            if (toolResult?.truncated === true && !toolResult?.blocked) {
+              repeatedTruncatedReads.set(readSignature, (repeatedTruncatedReads.get(readSignature) ?? 0) + 1);
+              warnings.push('当前文件片段已截断；如果还不够，下一步不要再重复读同一段，必须改用 subagent_codex_lookup 定位具体内容。');
+            } else if (toolResult?.truncated !== true) {
+              repeatedTruncatedReads.delete(readSignature);
+            }
+          }
+
+          if (toolRequest.tool === 'start_group_file_download' && toolResult?.started === true) {
+            return { text: '', notice: 'group-file-download-started' };
+          }
+
+          workingMessages.push({ role: 'assistant', content: currentText });
+          workingMessages.push({
+            role: 'user',
+            content: [
+              warnings.length > 0 ? `工具调用警告：${warnings.join(' ')}` : '',
+              '以下是你请求的只读文件工具结果（只读、不可修改）：',
+              this.codexTools.formatToolResult(toolResult),
+              '请基于这些结果继续生成最终回复；如果信息还不够，可以继续请求一个工具，否则直接输出普通文本答案。'
+            ].filter(Boolean).join('\n')
+          });
+          const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+          currentText = String(retryText ?? '').trim() || currentText;
+          continue;
+        }
+
+        if (finalToolParsing.invalidCount > 0) {
+          if (toolRepairCount >= maxToolRepairAttempts) {
+            this.logger.warn(`最终回复仍包含无效工具请求，抑制本次回复：reply=${JSON.stringify(String(currentText ?? '').slice(0, 160))}`);
+            discardPendingStreamText();
+            workingMessages.push({ role: 'assistant', content: currentText });
+            workingMessages.push({
+              role: 'user',
+              content: [
+                '系统抑制：你上一条最终回复仍然包含无效工具请求，这条内容不会发给用户。',
+                '请继续下一条回复：要么输出一个合法工具请求，要么直接输出普通文本答案。'
+              ].join('\n')
+            });
+            const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+            currentText = String(retryText ?? '').trim() || currentText;
+            toolRepairCount = 0;
+            continue;
+          }
+          toolRepairCount += 1;
+          discardPendingStreamText();
+          this.logger.warn(`最终回复含无效工具请求，打回主模型重写：reply=${JSON.stringify(String(currentText ?? '').slice(0, 160))}`);
+          workingMessages.push({ role: 'assistant', content: currentText });
+          workingMessages.push({
+            role: 'user',
+            content: [
+              '系统纠偏：你刚才输出了无效工具请求，这条内容不能直接发给用户。',
+              '只允许使用系统已经声明过的工具名。当前唯一允许执行脚本的工具是 run_python_script，不存在 run_bash_command。',
+              '如果还需要工具，请重新输出一个合法工具请求；如果不需要工具，就直接给出普通文本回答。'
+            ].join('\n')
+          });
+          const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+          currentText = String(retryText ?? '').trim() || currentText;
+          continue;
+        }
+
+        const lowInformationResult = await this.#maybeRunLowInformationReview(
+          context,
+          runtimeContext,
+          [...workingMessages, { role: 'assistant', content: currentText }],
+          currentText
+        );
+        if (lowInformationResult && typeof lowInformationResult === 'object') {
+          if (lowInformationResult.startGroupFileDownload) {
+            return { text: '', notice: 'group-file-download-started' };
+          }
+          if (lowInformationResult.lowInformationFeedback) {
+            discardPendingStreamText();
+            this.logger.info(`低信息检查打回主模型重答：feedback=${lowInformationResult.lowInformationFeedback}`);
+            workingMessages.push({ role: 'assistant', content: currentText });
+            workingMessages.push({
+              role: 'user',
+              content: [
+                `系统质检纠偏：你上一条回答被低信息质检器打回，原因：${lowInformationResult.lowInformationFeedback}`,
+                '不要复述问题，不要说“还没定位到”“我先去查”“需要更多上下文”“请先读取文件”等空话。',
+                '下一条回答必须满足其一：',
+                '1. 直接给出已经从上下文或工具结果里确认过的具体字段、路径、对象名、数值、结论或可执行步骤；',
+                '2. 如果信息仍不足，就先请求一个只读工具。',
+                '可以使用 Markdown 或 LaTeX，但重点是给出已核实的具体信息。'
+              ].join('\n')
+            });
+            const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+            currentText = String(retryText ?? '').trim() || currentText;
+            continue;
+          }
+        }
+
         const checkResult = await this.#maybeRunHallucinationCheck(
           context,
           runtimeContext,
-          [...workingMessages, { role: 'assistant', content: candidateText }],
-          candidateText
+          [...workingMessages, { role: 'assistant', content: currentText }],
+          currentText,
+          requestImages
         );
-        if (!checkResult || typeof checkResult === 'string') {
-          return {
-            text: (typeof checkResult === 'string' ? checkResult : candidateText) || candidateText,
-            notice
-          };
-        }
-        if (!checkResult.hallucinationFeedback) {
-          return {
-            text: candidateText,
-            notice
-          };
-        }
-        if (retryCount >= maxHallucinationRetries) {
-          this.logger.warn(`幻觉检查重答超过上限，保留最后一版：feedback=${checkResult.hallucinationFeedback}`);
-          return {
-            text: candidateText,
-            notice
-          };
+        if (checkResult && typeof checkResult === 'object' && checkResult.hallucinationFeedback) {
+          discardPendingStreamText();
+          this.logger.info(`幻觉检查打回主模型重答：feedback=${checkResult.hallucinationFeedback}`);
+          workingMessages.push({ role: 'assistant', content: currentText });
+          workingMessages.push({
+            role: 'user',
+            content: [
+              `系统校对纠偏：你上一条回答被事实校对器打回，原因：${checkResult.hallucinationFeedback}`,
+              '请基于已有的工具结果重新组织回答，去掉无法确认的具体事实。如果确实不确定，就明确说不确定。'
+            ].join('\n')
+          });
+          const retryText = await this.chatClient.complete(workingMessages, buildCompletionOptions());
+          currentText = String(retryText ?? '').trim() || currentText;
+          continue;
         }
 
-        retryCount += 1;
-        discardPendingStreamText();
-        this.logger.info(`幻觉检查打回主模型重答：attempt=${retryCount} feedback=${checkResult.hallucinationFeedback}`);
-        workingMessages.push({ role: 'assistant', content: candidateText });
-        workingMessages.push({
-          role: 'user',
-          content: [
-            `系统校对纠偏：你上一条回答被事实校对器打回，原因：${checkResult.hallucinationFeedback}`,
-            '请基于已有的工具结果重新组织回答，去掉无法确认的具体事实。如果确实不确定，就明确说不确定。不要使用 Markdown。'
-          ].join('\n')
-        });
-        candidateText = String(await this.chatClient.complete(workingMessages, buildCompletionOptions()) ?? '').trim() || candidateText;
+        return {
+          text: (typeof checkResult === 'string' ? checkResult : currentText) || currentText,
+          notice: 'low-information-reviewed'
+        };
       }
-
-      return { text: '', notice };
     };
 
     const completeDirectAnswer = async (assistantText, reason = '') => {
@@ -1833,7 +1991,7 @@ export class ChatSessionManager {
         role: 'user',
         content: [
           reason,
-          '不要再调用任何工具。请只基于你已经拿到的信息直接回答用户；如果仍有不确定，就明确说明不确定点。回答不要使用 Markdown。'
+          '不要再调用任何工具。请只基于你已经拿到的信息直接回答用户；如果仍有不确定，就明确说明不确定点。允许使用 Markdown 与 LaTeX。'
         ].filter(Boolean).join('\n')
       });
 
@@ -1850,6 +2008,20 @@ export class ChatSessionManager {
 
       const toolParsing = this.codexTools.parseToolCalls(assistantText);
       if (toolParsing.calls.length === 0) {
+        if (toolParsing.invalidCount > 0) {
+          discardPendingStreamText();
+          this.logger.warn(`检测到无效工具请求，已打回重试：reply=${JSON.stringify(String(assistantText ?? '').slice(0, 160))}`);
+          workingMessages.push({ role: 'assistant', content: assistantText });
+          workingMessages.push({
+            role: 'user',
+            content: [
+              '系统纠偏：你刚才输出了无效工具请求，所以这条内容不能直接发给用户。',
+              '只允许使用系统已经声明过的工具名。当前唯一允许执行脚本的工具是 run_python_script，不存在 run_bash_command。',
+              '如果需要工具，请重新输出一个合法工具请求；如果不需要工具，就直接正常回答用户。'
+            ].join('\n')
+          });
+          continue;
+        }
         if (toolEnabled && requiresConcreteLookup(lookupSeedText) && looksLikeDeferringLowInformationAnswer(assistantText)) {
           discardPendingStreamText();
           this.logger.info(`低信息占位回答回炉：query=${JSON.stringify(lookupSeedText.slice(0, 120))} reply=${JSON.stringify(String(assistantText ?? '').slice(0, 120))}`);
@@ -1878,6 +2050,9 @@ export class ChatSessionManager {
       }
 
       const toolRequest = toolParsing.calls[0];
+      if (toolRequest.tool === 'call_fishbot' && fishBotToolCalls >= 9) {
+        return await completeDirectAnswer('', '系统提示：本轮鱼鱼工具最多只能调用 9 次；请停止继续发鱼鱼命令，基于现有鱼鱼结果直接回答用户。');
+      }
       const warnings = [];
       const readSignature = toolRequest.tool === 'read_codex_file'
         ? JSON.stringify({
@@ -1909,6 +2084,9 @@ export class ChatSessionManager {
         };
       } else {
         try {
+          if (toolRequest.tool === 'call_fishbot') {
+            fishBotToolCalls += 1;
+          }
           toolResult = await this.codexTools.execute(toolRequest, { context, ...runtimeContext });
         } catch (error) {
           toolResult = {
@@ -1956,7 +2134,79 @@ export class ChatSessionManager {
     return await completeDirectAnswer('', '系统提示：请基于现有信息直接回答用户。');
   }
 
-  async #maybeRunHallucinationCheck(context, runtimeContext, supportingMessages, draftText) {
+  async #maybeRunLowInformationReview(context, runtimeContext, supportingMessages, draftText) {
+    const candidateText = String(draftText ?? '').trim();
+    if (!candidateText) {
+      return draftText;
+    }
+
+    const transcript = buildReviewTranscript(supportingMessages);
+    if (!transcript) {
+      return draftText;
+    }
+
+    const reviewModel = String(this.config.lowInformationFilterModel ?? this.config.answer.model ?? '').trim() || this.config.answer.model;
+    let raw = '';
+    try {
+      raw = await this.chatClient.complete([
+        {
+          role: 'system',
+          content: [
+            '你是 Cain 的低信息回复质检器，只判断这条候选回答能不能直接发给用户。',
+            '如果回复只是复述问题、空泛总结、泛泛而谈、没有新增信息、没有具体定位、没有可执行内容，allow=false。',
+            '当用户在问“怎么改/怎么做/在哪里/哪个字段”时，像“改对应字段”“看对应对象”“去改相关配置”“还没定位到具体字段”“需要先查文档”这类话都算低信息空话。',
+            '如果这类问题本来就应该先读文件或调工具确认，而候选回答里既没有真实读取结果，也没有具体字段、路径、对象名、数值、版本或结论，也一律 allow=false。',
+            '如果用户本意是在要安装包、jar、zip、apk、客户端、release 资产、插件包、服务器插件，而候选回答只是口头说要去处理，但没有真正开始下载流程，则 allow=false，并设置 start_group_file_download=true。',
+            '如果你建议主模型调用工具，只能建议系统真实存在的工具名；当前唯一允许执行脚本的工具是 run_python_script，不存在 run_bash_command。',
+            '只输出 JSON：{"allow":boolean,"feedback":"allow=false 时必填，告诉主模型下一条至少要补什么","reason":"简短原因","start_group_file_download":boolean,"request_text":"可选"}',
+            'feedback 不是给用户看的，而是给主模型的纠偏说明；要直接指出缺了哪些具体信息。'
+          ].join('\n')
+        },
+        {
+          role: 'user',
+          content: [
+            `会话类型：${context?.messageType === 'group' ? 'group' : 'private'}`,
+            runtimeContext?.lookupSeedText
+              ? `用户核心问题：${String(runtimeContext.lookupSeedText).trim()}`
+              : '',
+            '以下是候选回答生成时可见的上下文：',
+            transcript,
+            '',
+            '以下是当前候选回答：',
+            candidateText
+          ].filter(Boolean).join('\n\n')
+        }
+      ], {
+        model: reviewModel,
+        temperature: 0.1
+      });
+    } catch (error) {
+      this.logger.warn(`低信息检查失败，回退原回答：${error.message}`);
+      return candidateText;
+    }
+
+    const decision = normalizeLowInformationReviewDecision(raw);
+    if (decision.approved) {
+      this.logger.info(`低信息检查通过：${decision.reason || 'no-reason'}`);
+      return candidateText;
+    }
+
+    if (decision.startGroupFileDownload) {
+      this.logger.info(`低信息检查改为下载流程：${decision.reason || 'no-reason'}`);
+      return {
+        startGroupFileDownload: true,
+        requestText: decision.requestText || String(runtimeContext?.lookupSeedText ?? '').trim()
+      };
+    }
+
+    const feedback = String(decision.feedback || decision.reason || '').trim();
+    this.logger.info(`低信息检查未通过，打回主模型重答：${feedback || 'no-feedback'}`);
+    return {
+      lowInformationFeedback: feedback || '回答缺少已核实的具体信息，请补充真实定位、字段、路径、数值或改用工具。'
+    };
+  }
+
+  async #maybeRunHallucinationCheck(context, runtimeContext, supportingMessages, draftText, reviewImages = []) {
     const reviewConfig = this.config.hallucinationCheck ?? {};
     if (reviewConfig.enabled !== true) {
       return draftText;
@@ -1997,21 +2247,29 @@ export class ChatSessionManager {
       '最终输出必须是 JSON：{"approved":boolean,"feedback":"如果有幻觉，简短说明哪里不对，最多80字；没有则留空","reason":"简短原因"}。'
     ].filter(Boolean).join('\n');
 
+    const normalizedReviewImages = Array.isArray(reviewImages) ? reviewImages.filter(Boolean) : [];
+    const reviewUserContent = [
+      `会话类型：${context?.messageType === 'group' ? 'group' : 'private'}`,
+      runtimeContext?.lookupSeedText
+        ? `用户核心问题：${String(runtimeContext.lookupSeedText).trim()}`
+        : '',
+      normalizedReviewImages.length > 0
+        ? `以下还附带了与主回答相同的 ${normalizedReviewImages.length} 张图片，请直接查看图片内容后再判断候选回答是否有幻觉。`
+        : '',
+      '以下是候选回答生成时可见的上下文：',
+      transcript,
+      '',
+      '以下是当前候选回答：',
+      candidateText
+    ].filter(Boolean).join('\n\n');
+
     const checkMessages = [
       { role: 'system', content: systemContent },
       {
         role: 'user',
-        content: [
-          `会话类型：${context?.messageType === 'group' ? 'group' : 'private'}`,
-          runtimeContext?.lookupSeedText
-            ? `用户核心问题：${String(runtimeContext.lookupSeedText).trim()}`
-            : '',
-          '以下是候选回答生成时可见的上下文：',
-          transcript,
-          '',
-          '以下是当前候选回答：',
-          candidateText
-        ].filter(Boolean).join('\n\n')
+        content: normalizedReviewImages.length > 0
+          ? this.#buildMultimodalUserContent(reviewUserContent, normalizedReviewImages)
+          : reviewUserContent
       }
     ];
 
@@ -2050,6 +2308,18 @@ export class ChatSessionManager {
               '以下是你请求的只读工具结果：',
               this.codexTools.formatToolResult(toolResult),
               '请根据工具结果做最终判断，输出 JSON。'
+            ].join('\n')
+          });
+          continue;
+        }
+        if (toolParsing.invalidCount > 0) {
+          checkMessages.push({ role: 'assistant', content: raw });
+          checkMessages.push({
+            role: 'user',
+            content: [
+              '你刚才请求了无效工具。只允许使用系统已经声明过的工具名。',
+              '当前唯一允许执行脚本的工具是 run_python_script，不存在 run_bash_command。',
+              '如果还需要核实，请重新请求一个合法工具；否则直接输出最终 JSON 判断。'
             ].join('\n')
           });
           continue;

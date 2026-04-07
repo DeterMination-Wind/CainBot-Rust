@@ -1,6 +1,6 @@
 [package]
 name = "napcat-cain-bot-rs"
-version = "1.0.0"
+version = "0.1.0"
 edition = "2024"
 
 [[bin]]
@@ -19,3 +19,7 @@ tiny_http = "0.12"
 tokio = { version = "1.45", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 url = "2.5"
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
+font8x8 = "0.3"
+ab_glyph = "0.2"
+imageproc = { version = "0.25", default-features = false }

@@ -1,7 +1,6 @@
 import path from 'node:path';
 import tls from 'node:tls';
 import fs from 'node:fs/promises';
-import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { loadConfig } from './config.mjs';
@@ -44,10 +43,8 @@ const LOW_INFORMATION_REPLY_FILTER_MODEL = null;
 const SHUTDOWN_VOTE_PROMPT = '确定要关闭此bot的功能吗，大于两个人回复本消息"Y"将确认此操作';
 const OWNER_LOG_MAX_CHARS = 1500;
 const GROUP_INVITE_POLL_INTERVAL_MS = 60 * 1000;
-const GROUP_INVITE_POLL_MAX_BACKOFF_MS = 15 * 60 * 1000;
-const GROUP_INVITE_POLL_WARN_COOLDOWN_MS = 10 * 60 * 1000;
 
-const E_SUBCOMMANDS = new Set(['过滤', '聊天', '状态', '启用', '禁用', '文件下载', '过滤心跳', '启用刺客', '关闭刺客', '刺客状态']);
+const E_SUBCOMMANDS = new Set(['过滤', '聊天', '状态', '启用', '禁用', '文件下载', '过滤心跳']);
 let fatalLogger = null;
 
 function trimOwnerLogText(text, maxChars = OWNER_LOG_MAX_CHARS) {
@@ -237,27 +234,10 @@ function buildLowInformationFallback(sourceText, replyText = '') {
   return '还没定位到具体答案。';
 }
 
-function looksLikeExplicitLongMemoryRequest(text) {
-  const normalized = String(text ?? '').trim();
-  if (!normalized) {
-    return false;
-  }
-  return /(记住|记一下|记下|长期记忆|写入记忆|写进记忆|加入记忆|加入长期记忆|写入长期记忆|记到长期记忆)/.test(normalized);
-}
-
-function looksLikeLongMemoryConfirmationReply(text) {
-  const normalized = String(text ?? '').trim();
-  if (!normalized || normalized.length > 40) {
-    return false;
-  }
-  return /^(记住了[。！!]?)$|^(已经记住了[。！!]?)$|^(已记住[。！!]?)$|^(已记录[。！!]?)$|^(已记下[。！!]?)$|^(这条已写入长期记忆[。！!]?)$|^(已写入长期记忆[。！!]?)$|^(这条已记入长期记忆[。！!]?)$|^(已记入长期记忆[。！!]?)$/.test(normalized);
-}
-
 async function maybeFilterLowInformationReply(qaClient, logger, sourceText, replyText, options = {}) {
   const normalizedReply = String(replyText ?? '').trim();
   if (!normalizedReply) {
     return {
-      blocked: false,
       text: '',
       startGroupFileDownload: false,
       requestText: '',
@@ -267,20 +247,10 @@ async function maybeFilterLowInformationReply(qaClient, logger, sourceText, repl
   const normalizedSource = String(sourceText ?? '').trim();
   if (!normalizedSource) {
     return {
-      blocked: false,
       text: normalizedReply,
       startGroupFileDownload: false,
       requestText: '',
       reason: ''
-    };
-  }
-  if (looksLikeExplicitLongMemoryRequest(normalizedSource) && looksLikeLongMemoryConfirmationReply(normalizedReply)) {
-    return {
-      blocked: false,
-      text: normalizedReply,
-      startGroupFileDownload: false,
-      requestText: '',
-      reason: 'memory-confirmation-bypass'
     };
   }
 
@@ -318,7 +288,6 @@ async function maybeFilterLowInformationReply(qaClient, logger, sourceText, repl
     const decision = parseLowInformationDecision(raw);
     if (decision.allow) {
       return {
-        blocked: false,
         text: normalizedReply,
         startGroupFileDownload: false,
         requestText: '',
@@ -328,7 +297,6 @@ async function maybeFilterLowInformationReply(qaClient, logger, sourceText, repl
     logger.info(`已拦截低信息回复：${decision.reason || 'no-reason'} | source=${normalizedSource.slice(0, 80)} | reply=${normalizedReply.slice(0, 80)}`);
     if (decision.startGroupFileDownload) {
       return {
-        blocked: true,
         text: '',
         startGroupFileDownload: true,
         requestText: decision.requestText || normalizedSource,
@@ -337,7 +305,6 @@ async function maybeFilterLowInformationReply(qaClient, logger, sourceText, repl
     }
     if (options.onLowInformation === 'fallback') {
       return {
-        blocked: true,
         text: buildLowInformationFallback(normalizedSource, normalizedReply),
         startGroupFileDownload: false,
         requestText: '',
@@ -345,7 +312,6 @@ async function maybeFilterLowInformationReply(qaClient, logger, sourceText, repl
       };
     }
     return {
-      blocked: true,
       text: '',
       startGroupFileDownload: false,
       requestText: '',
@@ -354,7 +320,6 @@ async function maybeFilterLowInformationReply(qaClient, logger, sourceText, repl
   } catch (error) {
     logger.warn(`低信息回复判定失败，回退为原回复：${error.message}`);
     return {
-      blocked: false,
       text: normalizedReply,
       startGroupFileDownload: false,
       requestText: '',
@@ -454,8 +419,6 @@ function buildHelpText(config) {
     '引用一条消息后发送 /chat',
     '引用一条消息后发送 /tr 或 #翻译',
     `群里直接 @${displayName} 也会按 /chat 处理。`,
-    '要写长期记忆时，直接说：记住：内容 或 加入长期记忆：内容',
-    '长期记忆只收稳定事实，不收版本号、时间、群号、用户名、临时安排这类会变的信息。',
     '发送 .msav 文件会自动解析；回复那条地图介绍消息会继续围绕同一张地图聊天。',
     '',
     '/e 状态',
@@ -463,193 +426,19 @@ function buildHelpText(config) {
     '/e 聊天 <要求>',
     '/e 启用',
     '/e 禁用',
-    '/e 刺客状态 [群号]',
-    '/e 启用刺客 [群号]',
-    '/e 关闭刺客 [群号]',
     '/e 过滤心跳 启用 [N]',
     '/e 过滤心跳 关闭',
     '/e 文件下载 启用 [群文件夹名]',
     '/e 文件下载 关闭',
     '',
-    '远程运维命令：',
-    'napcat-start-assassin  启动刺客插件',
-    'napcat-stop-assassin   停止刺客插件',
-    '',
     '说明：',
     '- 只有指定群会启用普通群消息的“问题过滤 + 提示”流程。',
     '- /e 的过滤和聊天 prompt 仅当前群的群主、管理员或 bot 主人可修改。',
     '- /e 启用 与 /e 禁用 仅 bot 主人可用。',
-    '- /e 启用刺客、/e 关闭刺客、/e 刺客状态 仅 bot 主人可用；启用刺客会同时把该群写入刺客配置并同步为 Cain 互斥群。',
     '- /e 过滤心跳 启用 [N] 与 /e 过滤心跳 关闭 仅当前群群主、管理员或 bot 主人可用；启用后每 N 条候选消息才会触发一次 AI 过滤。',
     '- /e 文件下载 启用 [群文件夹名] 与 /e 文件下载 关闭 仅当前群群主、管理员或 bot 主人可用。'
   ];
   return lines.join('\n');
-}
-
-function isGroupInvitePollTimeoutError(error) {
-  const message = String(error?.message ?? '');
-  if (!message) {
-    return false;
-  }
-  return message.includes('get_group_system_msg')
-    && message.includes('Timeout')
-    && message.includes('getSingleScreenNotifies');
-}
-
-function formatPollDelay(ms) {
-  const seconds = Math.max(1, Math.round(Number(ms ?? 0) / 1000));
-  if (seconds < 60) {
-    return `${seconds} 秒`;
-  }
-  const minutes = Math.floor(seconds / 60);
-  const remainSeconds = seconds % 60;
-  return remainSeconds > 0 ? `${minutes} 分 ${remainSeconds} 秒` : `${minutes} 分钟`;
-}
-
-function normalizeGroupIdList(values) {
-  return Array.from(new Set(
-    (Array.isArray(values) ? values : [])
-      .map((item) => String(item ?? '').trim())
-      .filter(Boolean)
-  ));
-}
-
-function resolveAssassinControlPaths(config) {
-  const exclusivePath = String(config?.qa?.externalExclusiveGroupsFile ?? '').trim();
-  if (!exclusivePath) {
-    throw new Error('未配置 qa.externalExclusiveGroupsFile，无法定位刺客配置。');
-  }
-  const dataDir = path.dirname(exclusivePath);
-  return {
-    configPath: path.join(dataDir, 'config.json'),
-    exclusivePath
-  };
-}
-
-async function readJsonFileSafe(filePath, fallback = null) {
-  try {
-    return JSON.parse(await fs.readFile(filePath, 'utf8'));
-  } catch {
-    return fallback;
-  }
-}
-
-async function writeJsonFilePretty(filePath, payload) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
-}
-
-function buildAssassinExclusivePayload(assassinConfig) {
-  const enabledGroups = normalizeGroupIdList(assassinConfig?.bot?.enabled_groups);
-  const mode = enabledGroups.includes('all') ? 'all' : 'list';
-  return {
-    version: 1,
-    source: 'NapCatAIChatAssassin',
-    updatedAt: new Date().toISOString(),
-    mode,
-    groupIds: mode === 'all' ? [] : enabledGroups.filter((item) => item !== 'all')
-  };
-}
-
-function formatAssassinStatusText(targetGroupId, assassinConfig, exclusivePayload, paths) {
-  const enabledGroups = normalizeGroupIdList(assassinConfig?.bot?.enabled_groups);
-  const allMode = enabledGroups.includes('all');
-  const enabled = allMode || enabledGroups.includes(targetGroupId);
-  return [
-    `刺客群状态：${enabled ? '已启用' : '未启用'}`,
-    `目标群号：${targetGroupId || '-'}`,
-    `刺客模式：${allMode ? '全群' : '指定群'}`,
-    `已配置群数：${allMode ? '全部' : enabledGroups.filter((item) => item !== 'all').length}`,
-    `Cain 互斥同步：${assassinConfig?.integration?.write_cainbot_exclusive_groups === false ? '关闭' : '开启'}`,
-    `刺客配置文件：${paths.configPath}`,
-    `Cain 互斥文件：${paths.exclusivePath}`,
-    '',
-    '当前互斥文件：',
-    JSON.stringify(exclusivePayload, null, 2)
-  ].join('\n');
-}
-
-function restartAssassinServiceBestEffort() {
-  try {
-    execFileSync('systemctl', ['restart', 'napcat-aichat-assassin'], {
-      stdio: 'pipe',
-      encoding: 'utf8'
-    });
-    return '刺客服务已重启。';
-  } catch (error) {
-    const stderr = String(error?.stderr ?? '').trim();
-    const stdout = String(error?.stdout ?? '').trim();
-    return `刺客服务重启失败：${stderr || stdout || error.message}`;
-  }
-}
-
-function resolveAssassinTargetGroupId(command, context) {
-  const explicit = String(command?.positionals?.[1] ?? '').trim();
-  const fallback = String(command?.flags?.group ?? context?.groupId ?? '').trim();
-  const targetGroupId = explicit || fallback;
-  if (!targetGroupId) {
-    throw new Error('请提供群号；群内可直接用 /e 启用刺客，私聊请用 /e 启用刺客 <群号>。');
-  }
-  return targetGroupId;
-}
-
-async function handleAssassinGroupCommand(config, command, context) {
-  const paths = resolveAssassinControlPaths(config);
-  const assassinConfig = await readJsonFileSafe(paths.configPath, null);
-  if (!assassinConfig || typeof assassinConfig !== 'object') {
-    throw new Error(`读取刺客配置失败：${paths.configPath}`);
-  }
-  assassinConfig.bot = assassinConfig.bot && typeof assassinConfig.bot === 'object' ? assassinConfig.bot : {};
-  assassinConfig.integration = assassinConfig.integration && typeof assassinConfig.integration === 'object'
-    ? assassinConfig.integration
-    : {};
-  const targetGroupId = resolveAssassinTargetGroupId(command, context);
-  const subcommand = String(command?.positionals?.[0] ?? '').trim();
-  const enabledGroups = normalizeGroupIdList(assassinConfig.bot.enabled_groups);
-  const allMode = enabledGroups.includes('all');
-
-  if (subcommand === '刺客状态') {
-    const exclusivePayload = await readJsonFileSafe(paths.exclusivePath, buildAssassinExclusivePayload(assassinConfig));
-    return formatAssassinStatusText(targetGroupId, assassinConfig, exclusivePayload, paths);
-  }
-
-  if (allMode && subcommand === '启用刺客') {
-    const exclusivePayload = await readJsonFileSafe(paths.exclusivePath, buildAssassinExclusivePayload(assassinConfig));
-    return [
-      '刺客当前已经是全群启用，无需再单独启用该群。',
-      '',
-      formatAssassinStatusText(targetGroupId, assassinConfig, exclusivePayload, paths)
-    ].join('\n');
-  }
-
-  const nextGroups = enabledGroups.filter((item) => item !== 'all');
-  if (subcommand === '启用刺客') {
-    if (!nextGroups.includes(targetGroupId)) {
-      nextGroups.push(targetGroupId);
-    }
-  } else if (subcommand === '关闭刺客') {
-    const nextIndex = nextGroups.indexOf(targetGroupId);
-    if (nextIndex >= 0) {
-      nextGroups.splice(nextIndex, 1);
-    }
-  } else {
-    throw new Error(`不支持的刺客子命令：${subcommand}`);
-  }
-
-  assassinConfig.bot.enabled_groups = nextGroups;
-  assassinConfig.integration.write_cainbot_exclusive_groups = true;
-  const exclusivePayload = buildAssassinExclusivePayload(assassinConfig);
-  await writeJsonFilePretty(paths.configPath, assassinConfig);
-  await writeJsonFilePretty(paths.exclusivePath, exclusivePayload);
-  const restartResult = restartAssassinServiceBestEffort();
-  return [
-    subcommand === '启用刺客'
-      ? `已启用刺客群 ${targetGroupId}，并同步关闭 Cain 在该群的普通回复。`
-      : `已关闭刺客群 ${targetGroupId}，该群将不再由刺客占用。`,
-    restartResult,
-    '',
-    formatAssassinStatusText(targetGroupId, assassinConfig, exclusivePayload, paths)
-  ].join('\n');
 }
 
 function parseIncomingCommand(text) {
@@ -828,30 +617,8 @@ async function sendChatResultIfPresent(config, qaClient, logger, napcatClient, c
   const streamReplySession = options?.streamReplySession && typeof options.streamReplySession === 'object'
     ? options.streamReplySession
     : null;
-  const maxLowInformationRetries = Math.max(0, Math.min(3, Number(options?.maxLowInformationRetries ?? 1) || 1));
-  let currentResult = result;
-  let review = null;
-
-  for (let attempt = 0; attempt <= maxLowInformationRetries; attempt += 1) {
-    await streamReplySession?.flushPending?.();
-    review = await maybeFilterLowInformationReply(qaClient, logger, options?.sourceText, currentResult?.text, options);
-    if (!review.blocked || review.startGroupFileDownload) {
-      break;
-    }
-    if (!options?.chatSessionManager || !options?.chatInput || attempt >= maxLowInformationRetries) {
-      break;
-    }
-    streamReplySession?.discardPending?.();
-    const feedback = String(review.reason ?? '').trim() || '回复低信息，缺少具体定位或可执行信息。';
-    logger.info(`低信息回复打回主模型重答：attempt=${attempt + 1} reason=${feedback}`);
-    currentResult = await options.chatSessionManager.retryLowInformationReply(
-      context,
-      options.chatInput,
-      currentResult?.text,
-      feedback
-    );
-  }
-
+  await streamReplySession?.flushPending?.();
+  const review = await maybeFilterLowInformationReply(qaClient, logger, options?.sourceText, result?.text, options);
   if (review.startGroupFileDownload && options?.groupFileDownloadManager && context?.messageType === 'group') {
     streamReplySession?.discardPending?.();
     const handoff = await options.groupFileDownloadManager.startGroupDownloadFlowFromTool(
@@ -881,7 +648,7 @@ async function sendChatResultIfPresent(config, qaClient, logger, napcatClient, c
     streamReplySession?.discardPending?.();
     return;
   }
-  const normalizedOriginal = String(currentResult?.text ?? '').trim();
+  const normalizedOriginal = String(result?.text ?? '').trim();
   const normalizedReviewed = String(review.text ?? '').trim();
   if (
     streamReplySession
@@ -1283,10 +1050,13 @@ async function handleCommand(params) {
     command,
     context,
     event,
+    logger,
     napcatClient,
+    qaClient,
     chatSessionManager,
     translator,
-    msavMapAnalyzer
+    msavMapAnalyzer,
+    groupFileDownloadManager
   } = params;
 
   switch (command.name) {
@@ -1317,8 +1087,6 @@ async function handleCommand(params) {
         sourceText: command.argument || plainTextFromMessage(event?.message, event?.raw_message),
         onLowInformation: 'fallback',
         lowInformationFilterModel: config.qa.lowInformationFilterModel,
-        chatSessionManager,
-        chatInput,
         streamReplySession,
         groupFileDownloadManager
       });
@@ -1345,15 +1113,6 @@ async function handleCommand(params) {
       if (subcommand === '状态') {
         const status = chatSessionManager.getGroupPromptStatus(groupId);
         await sendLongReply(napcatClient, context, event.message_id, formatGroupStatus(status));
-        return true;
-      }
-
-      if (subcommand === '刺客状态' || subcommand === '启用刺客' || subcommand === '关闭刺客') {
-        if (!isOwner) {
-          throw new Error(`/e ${subcommand} 仅 bot 主人可用。`);
-        }
-        const replyText = await handleAssassinGroupCommand(config, command, context);
-        await sendLongReply(napcatClient, context, event.message_id, replyText);
         return true;
       }
 
@@ -1570,7 +1329,6 @@ async function main() {
   });
 
   const codexReadonlyTools = new CodexReadonlyTools(config.qa.answer, logger, {
-    ownerUserId: config.bot.ownerUserId,
     memoryFile: config.qa.answer.memoryFile,
     promptImageRoot: config.qa.answer.promptImageRoot,
     readRecentMessages: async () => [],
@@ -2018,71 +1776,15 @@ async function main() {
 
   let shuttingDown = false;
   let groupInvitePollTimer = null;
-  let groupInvitePollBackoffMs = GROUP_INVITE_POLL_INTERVAL_MS;
-  let groupInvitePollConsecutiveFailures = 0;
-  let lastGroupInvitePollWarn = {
-    time: 0,
-    message: ''
-  };
-  const scheduleGroupInvitePoll = (delayMs = GROUP_INVITE_POLL_INTERVAL_MS) => {
-    if (shuttingDown) {
-      return;
-    }
-    if (groupInvitePollTimer) {
-      clearTimeout(groupInvitePollTimer);
-    }
-    groupInvitePollTimer = setTimeout(() => {
-      void runGroupInvitePoll();
-    }, Math.max(1_000, Math.trunc(delayMs)));
-  };
-  const logGroupInvitePollFailure = (error, delayMs) => {
-    const message = String(error?.message ?? error ?? '').trim() || '未知错误';
-    const now = Date.now();
-    const timeoutNoise = isGroupInvitePollTimeoutError(error);
-    const shouldWarn = !timeoutNoise
-      || groupInvitePollConsecutiveFailures <= 1
-      || lastGroupInvitePollWarn.message !== message
-      || (now - lastGroupInvitePollWarn.time) >= GROUP_INVITE_POLL_WARN_COOLDOWN_MS;
-    if (shouldWarn) {
-      const prefix = timeoutNoise ? '轮询待处理群邀请超时' : '轮询待处理群邀请失败';
-      logger.warn(`${prefix}：${message}；将在 ${formatPollDelay(delayMs)} 后重试`);
-      lastGroupInvitePollWarn = { time: now, message };
-    }
-  };
-  const runGroupInvitePoll = async () => {
-    if (shuttingDown) {
-      return;
-    }
-    try {
-      await pollPendingGroupInvites();
-      if (groupInvitePollConsecutiveFailures > 0) {
-        logger.info('待处理群邀请轮询已恢复。');
-      }
-      groupInvitePollConsecutiveFailures = 0;
-      groupInvitePollBackoffMs = GROUP_INVITE_POLL_INTERVAL_MS;
-      scheduleGroupInvitePoll(groupInvitePollBackoffMs);
-    } catch (error) {
-      groupInvitePollConsecutiveFailures += 1;
-      groupInvitePollBackoffMs = Math.min(
-        GROUP_INVITE_POLL_MAX_BACKOFF_MS,
-        groupInvitePollConsecutiveFailures <= 1
-          ? GROUP_INVITE_POLL_INTERVAL_MS
-          : groupInvitePollBackoffMs * 2
-      );
-      logGroupInvitePollFailure(error, groupInvitePollBackoffMs);
-      scheduleGroupInvitePoll(groupInvitePollBackoffMs);
-    }
-  };
   const shutdown = async (signal = 'shutdown') => {
     if (shuttingDown) {
       return;
     }
     shuttingDown = true;
     logger.info(`收到 ${signal}，准备停止 Cain Bot。`);
-    logger.setNonInfoNotifier(null);
-    await napcatClient.stop();
+    napcatClient.stop();
     if (groupInvitePollTimer) {
-      clearTimeout(groupInvitePollTimer);
+      clearInterval(groupInvitePollTimer);
       groupInvitePollTimer = null;
     }
     for (const item of idleTimers.values()) {
@@ -2092,10 +1794,7 @@ async function main() {
     await Promise.allSettled([
       codexBridgeServer.stop()
     ]);
-    await Promise.race([
-      logger.flush(),
-      new Promise((resolve) => setTimeout(resolve, 5000))
-    ]);
+    await logger.flush();
   };
 
   process.once('SIGINT', () => { void shutdown('SIGINT'); });
@@ -2105,11 +1804,13 @@ async function main() {
   try {
     await pollPendingGroupInvites();
   } catch (error) {
-    groupInvitePollConsecutiveFailures = 1;
-    groupInvitePollBackoffMs = GROUP_INVITE_POLL_INTERVAL_MS;
-    logGroupInvitePollFailure(error, groupInvitePollBackoffMs);
+    logger.warn(`启动时检查待处理群邀请失败：${error.message}`);
   }
-  scheduleGroupInvitePoll(groupInvitePollBackoffMs);
+  groupInvitePollTimer = setInterval(() => {
+    void pollPendingGroupInvites().catch((error) => {
+      logger.warn(`轮询待处理群邀请失败：${error.message}`);
+    });
+  }, GROUP_INVITE_POLL_INTERVAL_MS);
   await napcatClient.startEventLoop(async (event) => {
     if (!event) {
       return;
@@ -2159,11 +1860,14 @@ async function main() {
           command,
           context,
           event,
+          logger,
           napcatClient,
+          qaClient,
           chatSessionManager,
           translator,
           runtimeConfigStore,
-          msavMapAnalyzer
+          msavMapAnalyzer,
+          groupFileDownloadManager
         });
         return;
       }
@@ -2196,8 +1900,6 @@ async function main() {
           sourceText: text,
           onLowInformation: 'fallback',
           lowInformationFilterModel: config.qa.lowInformationFilterModel,
-          chatSessionManager,
-          chatInput,
           streamReplySession,
           groupFileDownloadManager
         });
@@ -2243,8 +1945,6 @@ async function main() {
             sourceText: text,
             onLowInformation: 'suppress',
             lowInformationFilterModel: config.qa.lowInformationFilterModel,
-            chatSessionManager,
-            chatInput,
             streamReplySession,
             groupFileDownloadManager
           });

@@ -9,11 +9,56 @@ use tokio::fs;
 use crate::napcat_client::NapCatClient;
 
 const TEXT_EXTENSIONS: &[&str] = &[
-    ".txt", ".md", ".markdown", ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
-    ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".java", ".kt", ".kts", ".gradle", ".properties",
-    ".xml", ".html", ".css", ".scss", ".less", ".py", ".rb", ".php", ".go", ".rs", ".cpp", ".c", ".h",
-    ".hpp", ".cs", ".sh", ".ps1", ".bat", ".cmd", ".sql", ".csv", ".env", ".gitignore", ".gitattributes",
-    ".vue", ".svelte", ".lua", ".log",
+    ".txt",
+    ".md",
+    ".markdown",
+    ".json",
+    ".jsonc",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".java",
+    ".kt",
+    ".kts",
+    ".gradle",
+    ".properties",
+    ".xml",
+    ".html",
+    ".css",
+    ".scss",
+    ".less",
+    ".py",
+    ".rb",
+    ".php",
+    ".go",
+    ".rs",
+    ".cpp",
+    ".c",
+    ".h",
+    ".hpp",
+    ".cs",
+    ".sh",
+    ".ps1",
+    ".bat",
+    ".cmd",
+    ".sql",
+    ".csv",
+    ".env",
+    ".gitignore",
+    ".gitattributes",
+    ".vue",
+    ".svelte",
+    ".lua",
+    ".log",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,7 +137,9 @@ pub async fn read_text_file_from_segment(
             .context("解码文件 base64 失败")?;
         decode_text_bytes(&bytes, &file_name)?
     } else if let Some(path) = file_info.get("file").and_then(Value::as_str) {
-        let bytes = fs::read(path).await.with_context(|| format!("读取文件失败: {path}"))?;
+        let bytes = fs::read(path)
+            .await
+            .with_context(|| format!("读取文件失败: {path}"))?;
         decode_text_bytes(&bytes, &file_name)?
     } else if let Some(url) = file_info.get("url").and_then(Value::as_str) {
         let bytes = reqwest::get(url)
@@ -116,7 +163,10 @@ pub async fn read_text_file_from_segment(
     Ok(ReadTextFileResult {
         file_id,
         file_name,
-        file_size: file_info.get("file_size").and_then(Value::as_u64).unwrap_or(text.len() as u64),
+        file_size: file_info
+            .get("file_size")
+            .and_then(Value::as_u64)
+            .unwrap_or(text.len() as u64),
         text,
         truncated,
     })
@@ -182,7 +232,10 @@ fn truncate_text(text: &str, max_chars: usize) -> (String, bool) {
         return (text.to_string(), false);
     }
     (
-        format!("{}\n...(已截断)", text.chars().take(max_chars).collect::<String>()),
+        format!(
+            "{}\n...(已截断)",
+            text.chars().take(max_chars).collect::<String>()
+        ),
         true,
     )
 }

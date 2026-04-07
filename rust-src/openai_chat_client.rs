@@ -64,7 +64,11 @@ impl OpenAiChatClient {
     }
 
     // 先保留原版最关键的两条传输链路：chat/completions 与 responses。
-    pub async fn complete(&self, messages: &[ChatMessage], options: CompleteOptions) -> Result<String> {
+    pub async fn complete(
+        &self,
+        messages: &[ChatMessage],
+        options: CompleteOptions,
+    ) -> Result<String> {
         self.validate()?;
         self.ensure_not_in_cooldown().await?;
         let transports = self.available_transports().await;
@@ -80,7 +84,10 @@ impl OpenAiChatClient {
             match result {
                 Ok(text) => {
                     *self.retryable_failure_streak.lock().await = 0;
-                    self.transport_suppressed_until.lock().await.remove(&transport);
+                    self.transport_suppressed_until
+                        .lock()
+                        .await
+                        .remove(&transport);
                     return Ok(text);
                 }
                 Err(error) => {
@@ -100,8 +107,10 @@ impl OpenAiChatClient {
             let mut streak = self.retryable_failure_streak.lock().await;
             *streak += 1;
             if *streak >= self.config.failure_cooldown_threshold.max(1) {
-                *self.cooldown_until.lock().await =
-                    Some(Instant::now() + Duration::from_millis(self.config.failure_cooldown_ms.max(1_000)));
+                *self.cooldown_until.lock().await = Some(
+                    Instant::now()
+                        + Duration::from_millis(self.config.failure_cooldown_ms.max(1_000)),
+                );
                 *self.cooldown_reason.lock().await = format!("{error:#}");
             }
         } else {
@@ -120,8 +129,15 @@ impl OpenAiChatClient {
         Ok(())
     }
 
-    async fn complete_via_chat(&self, messages: &[ChatMessage], options: &CompleteOptions) -> Result<String> {
-        let model = options.model.clone().unwrap_or_else(|| self.config.model.clone());
+    async fn complete_via_chat(
+        &self,
+        messages: &[ChatMessage],
+        options: &CompleteOptions,
+    ) -> Result<String> {
+        let model = options
+            .model
+            .clone()
+            .unwrap_or_else(|| self.config.model.clone());
         let temperature = options.temperature.unwrap_or(self.config.temperature);
         let body = json!({
             "model": model,
@@ -140,14 +156,24 @@ impl OpenAiChatClient {
             if !response.status().is_success() {
                 bail!("聊天接口返回 HTTP {}", response.status());
             }
-            let payload: Value = response.json().await.context("解析 chat/completions 响应失败")?;
+            let payload: Value = response
+                .json()
+                .await
+                .context("解析 chat/completions 响应失败")?;
             extract_assistant_text(&payload).context("聊天接口未返回可用文本")
         })
         .await
     }
 
-    async fn complete_via_responses(&self, messages: &[ChatMessage], options: &CompleteOptions) -> Result<String> {
-        let model = options.model.clone().unwrap_or_else(|| self.config.model.clone());
+    async fn complete_via_responses(
+        &self,
+        messages: &[ChatMessage],
+        options: &CompleteOptions,
+    ) -> Result<String> {
+        let model = options
+            .model
+            .clone()
+            .unwrap_or_else(|| self.config.model.clone());
         let temperature = options.temperature.unwrap_or(self.config.temperature);
         let body = json!({
             "model": model,
@@ -183,7 +209,9 @@ impl OpenAiChatClient {
                 Err(error) if attempt < max_attempts && is_retryable_error(&error) => {
                     let delay_ms = self.config.retry_delay_ms.max(200) * attempt as u64;
                     self.logger
-                        .warn(format!("聊天接口请求异常，准备重试（{attempt}/{max_attempts}）：{error:#}"))
+                        .warn(format!(
+                            "聊天接口请求异常，准备重试（{attempt}/{max_attempts}）：{error:#}"
+                        ))
                         .await;
                     sleep_ms(delay_ms).await;
                 }
@@ -198,7 +226,10 @@ impl OpenAiChatClient {
         if let Some(until) = until
             && Instant::now() < until
         {
-            let seconds = until.saturating_duration_since(Instant::now()).as_secs().max(1);
+            let seconds = until
+                .saturating_duration_since(Instant::now())
+                .as_secs()
+                .max(1);
             let reason = self.cooldown_reason.lock().await.clone();
             bail!("聊天接口暂时不可用，已进入 {seconds} 秒冷却：{reason}");
         }
@@ -303,16 +334,20 @@ fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
     messages
         .iter()
         .filter_map(|message| {
+            let text_item_type = responses_text_item_type(&message.role);
             let content = match &message.content {
-                Value::String(text) => vec![json!({ "type": "input_text", "text": text })],
+                Value::String(text) => vec![json!({ "type": text_item_type, "text": text })],
                 Value::Array(items) => items
                     .iter()
                     .filter_map(|item| {
                         if let Some(text) = item.get("text").and_then(Value::as_str) {
-                            Some(json!({ "type": "input_text", "text": text }))
+                            Some(json!({ "type": text_item_type, "text": text }))
                         } else if let Some(url) = item.get("image_url").and_then(|value| {
                             value.as_str().map(ToString::to_string).or_else(|| {
-                                value.get("url").and_then(Value::as_str).map(ToString::to_string)
+                                value
+                                    .get("url")
+                                    .and_then(Value::as_str)
+                                    .map(ToString::to_string)
                             })
                         }) {
                             Some(json!({ "type": "input_image", "image_url": url }))
@@ -321,7 +356,7 @@ fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
                         }
                     })
                     .collect::<Vec<_>>(),
-                other => vec![json!({ "type": "input_text", "text": other.to_string() })],
+                other => vec![json!({ "type": text_item_type, "text": other.to_string() })],
             };
             (!content.is_empty()).then(|| {
                 json!({
@@ -331,6 +366,14 @@ fn build_responses_input(messages: &[ChatMessage]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+fn responses_text_item_type(role: &str) -> &'static str {
+    if normalize_message_role(role) == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    }
 }
 
 fn normalize_message_role(role: &str) -> &str {
@@ -345,12 +388,16 @@ fn normalize_message_role(role: &str) -> &str {
 
 fn is_cc_switch_proxy(base_url: &str) -> bool {
     let lower = base_url.to_ascii_lowercase();
-    (lower.contains("127.0.0.1:15721") || lower.contains("localhost:15721")) && lower.contains("/v1")
+    (lower.contains("127.0.0.1:15721") || lower.contains("localhost:15721"))
+        && lower.contains("/v1")
 }
 
 fn is_retryable_error(error: &anyhow::Error) -> bool {
     let text = format!("{error:#}").to_ascii_lowercase();
-    text.contains("network") || text.contains("socket") || text.contains("timeout") || text.contains("timed out")
+    text.contains("network")
+        || text.contains("socket")
+        || text.contains("timeout")
+        || text.contains("timed out")
 }
 
 #[derive(Debug, Deserialize)]

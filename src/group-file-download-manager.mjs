@@ -412,9 +412,21 @@ function looksLikeGameMention(text) {
   return /(mindustryx|mindustry|mdt|牡丹亭|x端|原版)/i.test(normalized);
 }
 
+function isShareCardPlaceholderText(text) {
+  const normalized = normalizeText(text);
+  if (!normalized) {
+    return false;
+  }
+  return /^\[(?:qq小程序|小程序|小程序卡片|链接分享|分享)\]/i.test(normalized)
+    || /^\[CQ:(?:json|xml),/i.test(normalized);
+}
+
 function looksLikeDownloadRequest(text) {
   const normalized = normalizeText(text);
   if (!normalized) {
+    return false;
+  }
+  if (isShareCardPlaceholderText(normalized)) {
     return false;
   }
   const localReleaseChoices = detectLocalReleaseChoices(normalized);
@@ -744,14 +756,7 @@ export class GroupFileDownloadManager {
     this.napcatClient = napcatClient;
     this.logger = logger;
     this.chatClient = options.chatClient ?? null;
-    this.databaseRoot = path.resolve(
-      options.databaseRoot
-      ?? options.codexRoot
-      ?? config?.databaseRoot
-      ?? config?.codexRoot
-      ?? path.join(process.cwd(), '..', 'codex')
-    );
-    this.codexRoot = this.databaseRoot;
+    this.codexRoot = path.resolve(options.codexRoot ?? config?.codexRoot ?? path.join(process.cwd(), '..', 'codex'));
     this.localBuildRoot = path.resolve(options.localBuildRoot ?? config?.localBuildRoot ?? path.join(this.codexRoot, 'builds'));
     this.downloadRoot = path.resolve(options.downloadRoot ?? path.join(process.cwd(), 'data', 'release-downloads'));
     this.vanillaRepoRoot = path.resolve(options.vanillaRepoRoot ?? config?.vanillaRepoRoot ?? path.join(this.codexRoot, 'Mindustry-master'));
@@ -2527,11 +2532,14 @@ export class GroupFileDownloadManager {
   async #handleFlowError(sessionKey, context, event, error) {
     this.sessions.delete(sessionKey);
     this.logger.warn(`群文件下载流程失败：group=${context?.groupId || '-'} user=${context?.userId || '-'} error=${error?.message || error}`);
-    if (isTimeoutAbortError(error)) {
-      await this.#reply(context, event, '下载超时，已退出本次流程。');
-      return true;
+    const notifyText = isTimeoutAbortError(error)
+      ? '下载超时，已退出本次流程。'
+      : `文件下载失败：${String(error?.message ?? error).slice(0, 120)}`;
+    try {
+      await this.#reply(context, event, notifyText);
+    } catch (notifyError) {
+      this.logger.warn(`下载失败提示发送失败，已忽略：group=${context?.groupId || '-'} user=${context?.userId || '-'} error=${notifyError?.message || notifyError}`);
     }
-    await this.#reply(context, event, `文件下载失败：${String(error?.message ?? error).slice(0, 120)}`);
     return true;
   }
 
