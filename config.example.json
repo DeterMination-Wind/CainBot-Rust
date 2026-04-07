@@ -46,6 +46,20 @@
     ],
     "codexTimeoutMs": 1800000
   },
+  "workflowAgent": {
+    "enabled": true,
+    "ownerOnly": true,
+    "allowPrivate": true,
+    "autoTriggerOnMention": true,
+    "triggerGroupIds": [],
+    "workDir": ".",
+    "codexCommand": "codex",
+    "model": "gpt-5.4-high",
+    "classifyModel": "gpt-5.4-mini",
+    "followupModel": "gpt-5.4-mini",
+    "satisfactionModel": "gpt-5.4-mini",
+    "codexTimeoutMs": 1800000
+  },
   "ai": {
     "baseUrl": "http://127.0.0.1:15721/v1",
     "apiKey": "YOUR_API_KEY"

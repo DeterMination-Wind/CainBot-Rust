@@ -168,7 +168,12 @@ impl IssueRepairManager {
         Ok(())
     }
 
-    pub async fn handle_incoming_message(&self, context: &EventContext, event: &Value, text: &str) -> Result<bool> {
+    pub async fn handle_incoming_message(
+        &self,
+        context: &EventContext,
+        event: &Value,
+        text: &str,
+    ) -> Result<bool> {
         if !self.config.enabled {
             return Ok(false);
         }
@@ -202,8 +207,14 @@ impl IssueRepairManager {
             return Ok(false);
         }
 
-        let decision = self.classify_candidate(context, event, &normalized_text).await?;
-        if !decision.get("should_offer").and_then(Value::as_bool).unwrap_or(false) {
+        let decision = self
+            .classify_candidate(context, event, &normalized_text)
+            .await?;
+        if !decision
+            .get("should_offer")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             return Ok(false);
         }
         let project_key = normalize_text(opt_value_to_string(decision.get("project_key")));
@@ -218,9 +229,16 @@ impl IssueRepairManager {
             return Ok(false);
         };
 
-        let issue_summary = normalize_issue_summary(opt_value_to_string(decision.get("issue_summary")));
+        let issue_summary =
+            normalize_issue_summary(opt_value_to_string(decision.get("issue_summary")));
         let mut offer = OfferRecord {
-            id: format!("offer-{}", sha1_hex(format!("{scope_key}\n{issue_summary}\n{}", current_time_ms()))),
+            id: format!(
+                "offer-{}",
+                sha1_hex(format!(
+                    "{scope_key}\n{issue_summary}\n{}",
+                    current_time_ms()
+                ))
+            ),
             scope_key,
             context: stored_context(context),
             target_user_id: context.user_id.clone(),
@@ -311,14 +329,22 @@ impl IssueRepairManager {
             let Ok(session) = serde_json::from_value::<IssueRepairSession>(value) else {
                 continue;
             };
-            if session.scope_key == scope_key && session.status != "completed" && session.status != "failed" {
+            if session.scope_key == scope_key
+                && session.status != "completed"
+                && session.status != "failed"
+            {
                 return Ok(Some(session));
             }
         }
         Ok(None)
     }
 
-    async fn classify_candidate(&self, context: &EventContext, event: &Value, text: &str) -> Result<Value> {
+    async fn classify_candidate(
+        &self,
+        context: &EventContext,
+        event: &Value,
+        text: &str,
+    ) -> Result<Value> {
         let catalog = self
             .mod_index
             .lock()
@@ -329,9 +355,21 @@ impl IssueRepairManager {
                     "projectKey={} | folder={} | displayName={} | version={} | description={}",
                     item.id,
                     item.project_folder_name,
-                    if item.display_name.is_empty() { "-" } else { &item.display_name },
-                    if item.version.is_empty() { "-" } else { &item.version },
-                    if item.description.is_empty() { "-" } else { &item.description }
+                    if item.display_name.is_empty() {
+                        "-"
+                    } else {
+                        &item.display_name
+                    },
+                    if item.version.is_empty() {
+                        "-"
+                    } else {
+                        &item.version
+                    },
+                    if item.description.is_empty() {
+                        "-"
+                    } else {
+                        &item.description
+                    }
                 )
             })
             .collect::<Vec<_>>()
@@ -420,7 +458,11 @@ impl IssueRepairManager {
                 },
             )
             .await?;
-        let decision = normalize_text(opt_value_to_string(parse_json_value(&raw).as_ref().and_then(|item| item.get("decision"))));
+        let decision = normalize_text(opt_value_to_string(
+            parse_json_value(&raw)
+                .as_ref()
+                .and_then(|item| item.get("decision")),
+        ));
         if decision == "ignore" {
             return Ok(false);
         }
@@ -444,7 +486,15 @@ impl IssueRepairManager {
         };
 
         let mut session = IssueRepairSession {
-            id: format!("session-{}", sha1_hex(format!("{}\n{}\n{}", offer.scope_key, offer.issue_summary, current_time_ms()))),
+            id: format!(
+                "session-{}",
+                sha1_hex(format!(
+                    "{}\n{}\n{}",
+                    offer.scope_key,
+                    offer.issue_summary,
+                    current_time_ms()
+                ))
+            ),
             scope_key: offer.scope_key.clone(),
             status: "running".to_string(),
             codex_thread_id: String::new(),
@@ -502,7 +552,10 @@ impl IssueRepairManager {
         event: &Value,
         text: &str,
     ) -> Result<bool> {
-        let reply_id = extract_reply_id(event.get("message").unwrap_or(&Value::Null), event.get("raw_message").and_then(Value::as_str));
+        let reply_id = extract_reply_id(
+            event.get("message").unwrap_or(&Value::Null),
+            event.get("raw_message").and_then(Value::as_str),
+        );
         let directly_replying = reply_id
             .as_ref()
             .map(|id| session.bot_message_ids.iter().any(|item| item == id))
@@ -561,8 +614,12 @@ impl IssueRepairManager {
         self.state_store.save().await?;
 
         if session.status == "waiting-user-feedback" && self.is_satisfied(&session).await? {
-            self.publish_and_close(session, context, &opt_value_to_string(event.get("message_id")))
-                .await?;
+            self.publish_and_close(
+                session,
+                context,
+                &opt_value_to_string(event.get("message_id")),
+            )
+            .await?;
             return Ok(true);
         }
 
@@ -622,7 +679,11 @@ impl IssueRepairManager {
                         role: "user".to_string(),
                         content: Value::String(format!(
                             "用户最新消息：{}",
-                            session.messages.last().map(|item| item.text.as_str()).unwrap_or_default()
+                            session
+                                .messages
+                                .last()
+                                .map(|item| item.text.as_str())
+                                .unwrap_or_default()
                         )),
                     },
                 ],
@@ -667,13 +728,19 @@ impl IssueRepairManager {
             bail!("会话缺少 mod projectRoot");
         }
 
-        let session_dir = std::env::temp_dir().join("napcat-cain-repair").join(&session.id);
+        let session_dir = std::env::temp_dir()
+            .join("napcat-cain-repair")
+            .join(&session.id);
         ensure_dir(&session_dir).await?;
         let prompt_path = session_dir.join(format!("prompt-{}.txt", current_time_ms()));
         let schema_path = session_dir.join("output-schema.json");
         let output_path = session_dir.join(format!("last-message-{}.json", current_time_ms()));
         fs::write(&schema_path, serde_json::to_string_pretty(&codex_schema())?).await?;
-        fs::write(&prompt_path, build_codex_prompt(&session, self.bridge_info.as_ref())).await?;
+        fs::write(
+            &prompt_path,
+            build_codex_prompt(&session, self.bridge_info.as_ref()),
+        )
+        .await?;
 
         let exec_result = run_codex(
             &self.config.codex_command,
@@ -883,8 +950,15 @@ impl IssueRepairManager {
         Ok(())
     }
 
-    async fn publish_and_close(&self, mut session: IssueRepairSession, context: &EventContext, reply_id: &str) -> Result<()> {
-        if !session.latest_artifact_path.trim().is_empty() && !self.config.publish_group_id.trim().is_empty() {
+    async fn publish_and_close(
+        &self,
+        mut session: IssueRepairSession,
+        context: &EventContext,
+        reply_id: &str,
+    ) -> Result<()> {
+        if !session.latest_artifact_path.trim().is_empty()
+            && !self.config.publish_group_id.trim().is_empty()
+        {
             self.napcat_client
                 .send_local_file_to_group(
                     &self.config.publish_group_id,
@@ -900,7 +974,9 @@ impl IssueRepairManager {
             .set_issue_repair_session(serde_json::to_value(&session)?)
             .await?;
         self.state_store.save().await?;
-        let reply_text = if !self.config.publish_group_id.trim().is_empty() && !session.publish_folder_name.trim().is_empty() {
+        let reply_text = if !self.config.publish_group_id.trim().is_empty()
+            && !session.publish_folder_name.trim().is_empty()
+        {
             format!(
                 "那我就按这版收口，已经同步到 {} 的 {} 里了。",
                 self.config.publish_group_id, session.publish_folder_name
@@ -942,7 +1018,11 @@ async fn run_codex(
     let resolved = resolve_command(command).await;
     let mut args = Vec::<String>::new();
     if !thread_id.trim().is_empty() {
-        args.extend(["exec".to_string(), "resume".to_string(), thread_id.trim().to_string()]);
+        args.extend([
+            "exec".to_string(),
+            "resume".to_string(),
+            thread_id.trim().to_string(),
+        ]);
     } else {
         args.push("exec".to_string());
     }
@@ -964,8 +1044,12 @@ async fn run_codex(
     ]);
 
     let mut cmd = spawnable_command(&resolved, &args);
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().with_context(|| format!("启动 Codex 失败: {resolved}"))?;
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("启动 Codex 失败: {resolved}"))?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(prompt.as_bytes()).await?;
         stdin.shutdown().await?;
@@ -990,7 +1074,8 @@ async fn run_codex(
 fn spawnable_command(command: &str, args: &[String]) -> Command {
     if cfg!(windows) && (command.ends_with(".cmd") || command.ends_with(".bat")) {
         let mut wrapped = Command::new(
-            std::env::var("ComSpec").unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".to_string()),
+            std::env::var("ComSpec")
+                .unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".to_string()),
         );
         let joined = std::iter::once(quote_for_cmd(command))
             .chain(args.iter().map(|item| quote_for_cmd(item)))
@@ -1007,8 +1092,16 @@ fn spawnable_command(command: &str, args: &[String]) -> Command {
 
 async fn resolve_command(command: &str) -> String {
     let normalized = normalize_text(command);
-    if normalized.is_empty() || Path::new(&normalized).is_absolute() || normalized.contains('/') || normalized.contains('\\') {
-        return if normalized.is_empty() { "codex".to_string() } else { normalized };
+    if normalized.is_empty()
+        || Path::new(&normalized).is_absolute()
+        || normalized.contains('/')
+        || normalized.contains('\\')
+    {
+        return if normalized.is_empty() {
+            "codex".to_string()
+        } else {
+            normalized
+        };
     }
     if cfg!(windows)
         && let Ok(output) = Command::new("where.exe").arg(&normalized).output().await
@@ -1037,14 +1130,20 @@ fn quote_for_cmd(value: &str) -> String {
         return "\"\"".to_string();
     }
     let escaped = value.replace('"', "\"\"");
-    if escaped.chars().any(|ch| ch.is_whitespace() || matches!(ch, '"' | '&' | '<' | '>' | '|' | '^')) {
+    if escaped
+        .chars()
+        .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '&' | '<' | '>' | '|' | '^'))
+    {
         format!("\"{escaped}\"")
     } else {
         escaped
     }
 }
 
-fn build_codex_prompt(session: &IssueRepairSession, bridge_info: Option<&CodexBridgeInfo>) -> String {
+fn build_codex_prompt(
+    session: &IssueRepairSession,
+    bridge_info: Option<&CodexBridgeInfo>,
+) -> String {
     let mod_name = if session.mod_info.display_name.is_empty() {
         &session.mod_info.project_folder_name
     } else {
@@ -1085,7 +1184,10 @@ fn build_codex_prompt(session: &IssueRepairSession, bridge_info: Option<&CodexBr
             format!("send group message: {}", bridge.send_group_message_url),
             format!("send private message: {}", bridge.send_private_message_url),
             format!("read group messages: {}", bridge.read_group_messages_url),
-            format!("read private messages: {}", bridge.read_private_messages_url),
+            format!(
+                "read private messages: {}",
+                bridge.read_private_messages_url
+            ),
             format!("send group file: {}", bridge.send_group_file_url),
             format!(
                 "send group file to folder: {}",
@@ -1187,7 +1289,10 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
     if normalized.chars().count() <= max_chars {
         normalized
     } else {
-        format!("{}...(已截断)", normalized.chars().take(max_chars).collect::<String>())
+        format!(
+            "{}...(已截断)",
+            normalized.chars().take(max_chars).collect::<String>()
+        )
     }
 }
 
@@ -1252,7 +1357,9 @@ fn extract_message_ids(results: &[Value]) -> Vec<String> {
 
 fn extract_reply_id(message: &Value, raw_message: Option<&str>) -> Option<String> {
     if let Some(items) = message.as_array()
-        && let Some(reply) = items.iter().find(|segment| segment.get("type").and_then(Value::as_str) == Some("reply"))
+        && let Some(reply) = items
+            .iter()
+            .find(|segment| segment.get("type").and_then(Value::as_str) == Some("reply"))
     {
         return reply
             .get("data")
@@ -1309,8 +1416,17 @@ fn scan_owned_mods(codex_root: &Path, owner_name: &str) -> Result<Vec<ModInfo>> 
             if file_type.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.starts_with('.')
-                    || ["node_modules", "build", "bin", "dist", "release", "out", "target", "构建"]
-                        .contains(&name.as_str())
+                    || [
+                        "node_modules",
+                        "build",
+                        "bin",
+                        "dist",
+                        "release",
+                        "out",
+                        "target",
+                        "构建",
+                    ]
+                    .contains(&name.as_str())
                 {
                     continue;
                 }
@@ -1334,13 +1450,25 @@ fn scan_owned_mods(codex_root: &Path, owner_name: &str) -> Result<Vec<ModInfo>> 
                 continue;
             };
             let author = read_loose_field(&raw, "author");
-            if author.is_empty() || !author.to_ascii_lowercase().contains(&owner_name.trim().to_ascii_lowercase()) {
+            if author.is_empty()
+                || !author
+                    .to_ascii_lowercase()
+                    .contains(&owner_name.trim().to_ascii_lowercase())
+            {
                 continue;
             }
             results.push(ModInfo {
-                id: project_root.file_name().and_then(|item| item.to_str()).unwrap_or_default().to_string(),
+                id: project_root
+                    .file_name()
+                    .and_then(|item| item.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
                 project_root: project_root.display().to_string(),
-                project_folder_name: project_root.file_name().and_then(|item| item.to_str()).unwrap_or_default().to_string(),
+                project_folder_name: project_root
+                    .file_name()
+                    .and_then(|item| item.to_str())
+                    .unwrap_or_default()
+                    .to_string(),
                 name: read_loose_field(&raw, "name"),
                 display_name: read_loose_field(&raw, "displayName"),
                 version: read_loose_field(&raw, "version"),
@@ -1352,7 +1480,10 @@ fn scan_owned_mods(codex_root: &Path, owner_name: &str) -> Result<Vec<ModInfo>> 
 }
 
 fn project_root_from_mod_file(path: &Path) -> Option<PathBuf> {
-    let normalized = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let normalized = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
     if normalized.contains("/node_modules/") || normalized.contains("/.git/") {
         return None;
     }
@@ -1371,10 +1502,7 @@ fn project_root_from_mod_file(path: &Path) -> Option<PathBuf> {
 }
 
 fn read_loose_field(text: &str, field_name: &str) -> String {
-    let variants = [
-        format!("\"{field_name}\""),
-        field_name.to_string(),
-    ];
+    let variants = [format!("\"{field_name}\""), field_name.to_string()];
     for key in variants {
         let Some(start) = text.find(&key) else {
             continue;

@@ -36,7 +36,10 @@ pub fn normalize_path(path: impl AsRef<Path>) -> PathBuf {
     path.as_ref().to_path_buf()
 }
 
-pub fn resolve_maybe_relative(base_dir: impl AsRef<Path>, target_path: impl AsRef<str>) -> Option<PathBuf> {
+pub fn resolve_maybe_relative(
+    base_dir: impl AsRef<Path>,
+    target_path: impl AsRef<str>,
+) -> Option<PathBuf> {
     let raw = target_path.as_ref().trim();
     if raw.is_empty() {
         return None;
@@ -132,13 +135,24 @@ pub fn plain_text_from_message(message: &Value, raw_message: Option<&str>) -> St
     strip_cq_codes(raw_message.unwrap_or_default())
 }
 
-pub fn build_reply_message(reply_to_message_id: Option<&str>, text: impl AsRef<str>, enable_mentions: bool) -> Value {
+pub fn build_reply_message(
+    reply_to_message_id: Option<&str>,
+    text: impl AsRef<str>,
+    enable_mentions: bool,
+) -> Value {
     build_message_payload(text.as_ref(), reply_to_message_id, enable_mentions)
 }
 
-pub fn build_message_payload(text: &str, reply_to_message_id: Option<&str>, enable_mentions: bool) -> Value {
+pub fn build_message_payload(
+    text: &str,
+    reply_to_message_id: Option<&str>,
+    enable_mentions: bool,
+) -> Value {
     let mut segments = Vec::new();
-    if let Some(message_id) = reply_to_message_id.map(str::trim).filter(|item| !item.is_empty()) {
+    if let Some(message_id) = reply_to_message_id
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
         segments.push(json!({
             "type": "reply",
             "data": { "id": message_id }
@@ -186,7 +200,10 @@ pub fn split_message_payloads(text: &str, max_length: usize, enable_mentions: bo
             }
             OutgoingToken::At(qq) => {
                 let segment_len = 0usize;
-                if current_len > 0 && current_len + segment_len > normalized_max && !current.is_empty() {
+                if current_len > 0
+                    && current_len + segment_len > normalized_max
+                    && !current.is_empty()
+                {
                     chunks.push(current);
                     current = Vec::new();
                     current_len = 0;
@@ -291,7 +308,11 @@ fn take_text_prefix(text: &str, max_length: usize) -> (String, usize) {
         safe_limit -= 1;
     }
     if safe_limit == 0 {
-        safe_limit = text.char_indices().nth(1).map(|(index, _)| index).unwrap_or(text.len());
+        safe_limit = text
+            .char_indices()
+            .nth(1)
+            .map(|(index, _)| index)
+            .unwrap_or(text.len());
     }
 
     let mut candidate = text[..safe_limit]
@@ -302,7 +323,11 @@ fn take_text_prefix(text: &str, max_length: usize) -> (String, usize) {
         candidate -= 1;
     }
     if candidate == 0 {
-        candidate = text.char_indices().nth(1).map(|(index, _)| index).unwrap_or(text.len());
+        candidate = text
+            .char_indices()
+            .nth(1)
+            .map(|(index, _)| index)
+            .unwrap_or(text.len());
     }
     (text[..candidate].trim().to_string(), candidate)
 }

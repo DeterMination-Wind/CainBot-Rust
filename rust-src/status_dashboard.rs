@@ -3,8 +3,8 @@ use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
+use anyhow::{Context, Result};
 use chrono::Local;
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 use image::{Rgba, RgbaImage};
@@ -24,7 +24,8 @@ const BTOP_X11_DISPLAY: &str = ":97";
 const BTOP_X11_SOCKET_PATH: &str = "/tmp/.X11-unix/X97";
 const BTOP_XTERM_GEOMETRY: &str = "182x91+0+0";
 const BTOP_XTERM_TITLE: &str = "cainbot-btop-live";
-const BTOP_XTERM_PROCESS_PATTERN: &str = "xterm.*cainbot-btop-live.*-geometry 182x91\\+0\\+0.*-fs 8";
+const BTOP_XTERM_PROCESS_PATTERN: &str =
+    "xterm.*cainbot-btop-live.*-geometry 182x91\\+0\\+0.*-fs 8";
 const BTOP_XTERM_ANY_PROCESS_PATTERN: &str = "xterm.*cainbot-btop-live";
 const BTOP_XTERM_LEGACY_PROCESS_PATTERN: &str = "xterm.*:97.*cainbot_btop";
 const STATUS_CACHE_TTL_SECS: u64 = 12 * 60 * 60;
@@ -285,11 +286,19 @@ async fn ensure_btop_tmux_session() -> Result<()> {
     }
 
     let pane_dead = Command::new("tmux")
-        .args(["display-message", "-p", "-t", &format!("{BTOP_SESSION_NAME}:0.0"), "#{pane_dead}"])
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            &format!("{BTOP_SESSION_NAME}:0.0"),
+            "#{pane_dead}",
+        ])
         .output()
         .await
         .context("检查 btop pane 状态失败")?;
-    let dead_flag = String::from_utf8_lossy(&pane_dead.stdout).trim().to_string();
+    let dead_flag = String::from_utf8_lossy(&pane_dead.stdout)
+        .trim()
+        .to_string();
     if dead_flag == "1" {
         let respawned = Command::new("tmux")
             .args([
@@ -305,7 +314,9 @@ async fn ensure_btop_tmux_session() -> Result<()> {
             .await
             .context("重启 btop pane 失败")?;
         if !respawned.status.success() {
-            let stderr = String::from_utf8_lossy(&respawned.stderr).trim().to_string();
+            let stderr = String::from_utf8_lossy(&respawned.stderr)
+                .trim()
+                .to_string();
             anyhow::bail!("重启 btop pane 失败: {stderr}");
         }
     }
@@ -385,7 +396,10 @@ async fn capture_btop_x11_screenshot(output_path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn run_mss_capture_script(output_path: &Path, crop_rect: Option<(u32, u32, u32, u32)>) -> Result<()> {
+async fn run_mss_capture_script(
+    output_path: &Path,
+    crop_rect: Option<(u32, u32, u32, u32)>,
+) -> Result<()> {
     let output_string = output_path.to_string_lossy().to_string();
     let script = r#"import sys
 import time
@@ -487,10 +501,18 @@ async fn query_btop_xterm_window_rect() -> Result<Option<(u32, u32, u32, u32)>> 
         return Ok(None);
     }
     let raw = String::from_utf8_lossy(&output.stdout);
-    let x = parse_xwininfo_int(&raw, "Absolute upper-left X:").unwrap_or(0).max(0) as u32;
-    let y = parse_xwininfo_int(&raw, "Absolute upper-left Y:").unwrap_or(0).max(0) as u32;
-    let w = parse_xwininfo_int(&raw, "Width:").unwrap_or(BTOP_IMAGE_SIZE as i32).max(1) as u32;
-    let h = parse_xwininfo_int(&raw, "Height:").unwrap_or(BTOP_IMAGE_SIZE as i32).max(1) as u32;
+    let x = parse_xwininfo_int(&raw, "Absolute upper-left X:")
+        .unwrap_or(0)
+        .max(0) as u32;
+    let y = parse_xwininfo_int(&raw, "Absolute upper-left Y:")
+        .unwrap_or(0)
+        .max(0) as u32;
+    let w = parse_xwininfo_int(&raw, "Width:")
+        .unwrap_or(BTOP_IMAGE_SIZE as i32)
+        .max(1) as u32;
+    let h = parse_xwininfo_int(&raw, "Height:")
+        .unwrap_or(BTOP_IMAGE_SIZE as i32)
+        .max(1) as u32;
     Ok(Some((x, y, w, h)))
 }
 
@@ -551,11 +573,14 @@ async fn update_trend_history(path: &Path, snapshot: &StatusSnapshot) -> Vec<Tre
     let window_start = snapshot
         .captured_at_ms
         .saturating_sub(STATUS_TREND_WINDOW_SECS.saturating_mul(1_000));
-    history
-        .points
-        .retain(|point| point.timestamp_ms >= window_start && point.timestamp_ms <= snapshot.captured_at_ms + 3_000);
+    history.points.retain(|point| {
+        point.timestamp_ms >= window_start && point.timestamp_ms <= snapshot.captured_at_ms + 3_000
+    });
     if history.points.len() > STATUS_HISTORY_MAX_POINTS {
-        let keep_from = history.points.len().saturating_sub(STATUS_HISTORY_MAX_POINTS);
+        let keep_from = history
+            .points
+            .len()
+            .saturating_sub(STATUS_HISTORY_MAX_POINTS);
         history.points = history.points.split_off(keep_from);
     }
     history.points.sort_by_key(|point| point.timestamp_ms);
@@ -567,15 +592,21 @@ async fn update_trend_history(path: &Path, snapshot: &StatusSnapshot) -> Vec<Tre
 }
 
 async fn collect_status_snapshot() -> StatusSnapshot {
-    let hostname = read_hostname().await.unwrap_or_else(|| "unknown-host".to_string());
-    let kernel = read_kernel_text().await.unwrap_or_else(|| "Linux".to_string());
+    let hostname = read_hostname()
+        .await
+        .unwrap_or_else(|| "unknown-host".to_string());
+    let kernel = read_kernel_text()
+        .await
+        .unwrap_or_else(|| "Linux".to_string());
     let captured_at_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_millis() as i64)
         .unwrap_or_default();
     let cpu_percent = sample_cpu_usage_percent().await.unwrap_or(0.0);
-    let (memory_used_gib, memory_total_gib, memory_percent) = read_memory_usage().await.unwrap_or((0.0, 0.0, 0.0));
-    let (disk_used_gib, disk_total_gib, disk_percent) = read_disk_usage().await.unwrap_or((0.0, 0.0, 0.0));
+    let (memory_used_gib, memory_total_gib, memory_percent) =
+        read_memory_usage().await.unwrap_or((0.0, 0.0, 0.0));
+    let (disk_used_gib, disk_total_gib, disk_percent) =
+        read_disk_usage().await.unwrap_or((0.0, 0.0, 0.0));
     let (net_rx_mbps, net_tx_mbps) = sample_network_mbps().await.unwrap_or((0.0, 0.0));
     let uptime_secs = read_uptime_secs().await.unwrap_or(0);
     let load_avg = read_load_average().await.unwrap_or((0.0, 0.0, 0.0));
@@ -601,7 +632,11 @@ async fn collect_status_snapshot() -> StatusSnapshot {
     }
 }
 
-fn render_status_dashboard(output_path: &Path, snapshot: &StatusSnapshot, trend_points: &[TrendPoint]) -> Result<()> {
+fn render_status_dashboard(
+    output_path: &Path,
+    snapshot: &StatusSnapshot,
+    trend_points: &[TrendPoint],
+) -> Result<()> {
     let card_h = 138;
     let row1_y = 150;
     let chart_h = 140;
@@ -617,11 +652,33 @@ fn render_status_dashboard(output_path: &Path, snapshot: &StatusSnapshot, trend_
     let mut image = RgbaImage::from_pixel(CANVAS_WIDTH, canvas_height, rgba(240, 243, 247));
 
     // Main frame
-    draw_filled_rect(&mut image, 16, 16, CANVAS_WIDTH - 32, canvas_height - 32, rgba(255, 255, 255));
-    draw_rect_border(&mut image, 16, 16, CANVAS_WIDTH - 32, canvas_height - 32, rgba(220, 226, 234));
+    draw_filled_rect(
+        &mut image,
+        16,
+        16,
+        CANVAS_WIDTH - 32,
+        canvas_height - 32,
+        rgba(255, 255, 255),
+    );
+    draw_rect_border(
+        &mut image,
+        16,
+        16,
+        CANVAS_WIDTH - 32,
+        canvas_height - 32,
+        rgba(220, 226, 234),
+    );
 
     // Header
-    draw_text_weight(&mut image, 44, 42, 3, TextWeight::Bold, rgba(34, 45, 61), "CAIN STATUS");
+    draw_text_weight(
+        &mut image,
+        44,
+        42,
+        3,
+        TextWeight::Bold,
+        rgba(34, 45, 61),
+        "CAIN STATUS",
+    );
     draw_text_weight(
         &mut image,
         44,
@@ -675,7 +732,10 @@ fn render_status_dashboard(output_path: &Path, snapshot: &StatusSnapshot, trend_
         card_h,
         "MEMORY",
         &format!("{:.1}%", snapshot.memory_percent.max(0.0)),
-        &format!("{:.2} / {:.2} GiB", snapshot.memory_used_gib, snapshot.memory_total_gib),
+        &format!(
+            "{:.2} / {:.2} GiB",
+            snapshot.memory_used_gib, snapshot.memory_total_gib
+        ),
     );
     draw_metric_card(
         &mut image,
@@ -700,7 +760,10 @@ fn render_status_dashboard(output_path: &Path, snapshot: &StatusSnapshot, trend_
         .saturating_sub(STATUS_TREND_WINDOW_SECS.saturating_mul(1_000));
     let mut points = trend_points
         .iter()
-        .filter(|point| point.timestamp_ms >= window_start_ms && point.timestamp_ms <= snapshot.captured_at_ms + 3_000)
+        .filter(|point| {
+            point.timestamp_ms >= window_start_ms
+                && point.timestamp_ms <= snapshot.captured_at_ms + 3_000
+        })
         .cloned()
         .collect::<Vec<_>>();
     points.sort_by_key(|point| point.timestamp_ms);
@@ -759,8 +822,22 @@ fn render_status_dashboard(output_path: &Path, snapshot: &StatusSnapshot, trend_
     // Process table
     let table_x = 40;
     let table_w = CANVAS_WIDTH - 80;
-    draw_filled_rect(&mut image, table_x, table_y, table_w, table_h, rgba(250, 252, 255));
-    draw_rect_border(&mut image, table_x, table_y, table_w, table_h, rgba(220, 226, 234));
+    draw_filled_rect(
+        &mut image,
+        table_x,
+        table_y,
+        table_w,
+        table_h,
+        rgba(250, 252, 255),
+    );
+    draw_rect_border(
+        &mut image,
+        table_x,
+        table_y,
+        table_w,
+        table_h,
+        rgba(220, 226, 234),
+    );
     draw_text_weight(
         &mut image,
         table_x + 20,
@@ -906,7 +983,15 @@ fn draw_single_line_time_chart<F>(
 {
     draw_filled_rect(image, x, y, w, h, rgba(250, 252, 255));
     draw_rect_border(image, x, y, w, h, rgba(220, 226, 234));
-    draw_text_weight(image, x + 16, y + 12, 2, TextWeight::SemiBold, rgba(56, 71, 89), title);
+    draw_text_weight(
+        image,
+        x + 16,
+        y + 12,
+        2,
+        TextWeight::SemiBold,
+        rgba(56, 71, 89),
+        title,
+    );
     draw_text_weight(
         image,
         x + w - 170,
@@ -966,7 +1051,9 @@ fn draw_single_line_time_chart<F>(
     draw_time_grid_and_labels(image, plot_x, plot_y, plot_w, plot_h, window_secs);
 
     let safe_max = max_value.max(1.0);
-    let sampled = build_smoothed_minute_series(points, now_ms, window_secs, |point| selector(point).clamp(0.0, safe_max));
+    let sampled = build_smoothed_minute_series(points, now_ms, window_secs, |point| {
+        selector(point).clamp(0.0, safe_max)
+    });
     let xy_points = sampled
         .iter()
         .map(|(timestamp_ms, value)| {
@@ -976,7 +1063,14 @@ fn draw_single_line_time_chart<F>(
             )
         })
         .collect::<Vec<_>>();
-    draw_smooth_polyline(image, &xy_points, line_color, 2, plot_y as i32, (plot_y + plot_h.saturating_sub(1)) as i32);
+    draw_smooth_polyline(
+        image,
+        &xy_points,
+        line_color,
+        2,
+        plot_y as i32,
+        (plot_y + plot_h.saturating_sub(1)) as i32,
+    );
 }
 
 fn draw_network_time_chart(
@@ -993,8 +1087,14 @@ fn draw_network_time_chart(
     draw_filled_rect(image, x, y, w, h, rgba(250, 252, 255));
     draw_rect_border(image, x, y, w, h, rgba(220, 226, 234));
 
-    let max_rx = points.iter().map(|point| point.net_rx_mbps).fold(0.0_f64, f64::max);
-    let max_tx = points.iter().map(|point| point.net_tx_mbps).fold(0.0_f64, f64::max);
+    let max_rx = points
+        .iter()
+        .map(|point| point.net_rx_mbps)
+        .fold(0.0_f64, f64::max);
+    let max_tx = points
+        .iter()
+        .map(|point| point.net_tx_mbps)
+        .fold(0.0_f64, f64::max);
     let max_value = nice_upper_bound(max_rx.max(max_tx).max(1.0));
     draw_text_weight(
         image,
@@ -1066,8 +1166,12 @@ fn draw_network_time_chart(
 
     let rx_color = rgba(62, 121, 244);
     let tx_color = rgba(235, 122, 74);
-    let rx_sampled = build_smoothed_minute_series(points, now_ms, window_secs, |point| point.net_rx_mbps.clamp(0.0, max_value));
-    let tx_sampled = build_smoothed_minute_series(points, now_ms, window_secs, |point| point.net_tx_mbps.clamp(0.0, max_value));
+    let rx_sampled = build_smoothed_minute_series(points, now_ms, window_secs, |point| {
+        point.net_rx_mbps.clamp(0.0, max_value)
+    });
+    let tx_sampled = build_smoothed_minute_series(points, now_ms, window_secs, |point| {
+        point.net_tx_mbps.clamp(0.0, max_value)
+    });
     let rx_xy = rx_sampled
         .iter()
         .map(|(timestamp_ms, value)| {
@@ -1086,11 +1190,32 @@ fn draw_network_time_chart(
             )
         })
         .collect::<Vec<_>>();
-    draw_smooth_polyline(image, &rx_xy, rx_color, 2, plot_y as i32, (plot_y + plot_h.saturating_sub(1)) as i32);
-    draw_smooth_polyline(image, &tx_xy, tx_color, 2, plot_y as i32, (plot_y + plot_h.saturating_sub(1)) as i32);
+    draw_smooth_polyline(
+        image,
+        &rx_xy,
+        rx_color,
+        2,
+        plot_y as i32,
+        (plot_y + plot_h.saturating_sub(1)) as i32,
+    );
+    draw_smooth_polyline(
+        image,
+        &tx_xy,
+        tx_color,
+        2,
+        plot_y as i32,
+        (plot_y + plot_h.saturating_sub(1)) as i32,
+    );
 }
 
-fn draw_time_grid_and_labels(image: &mut RgbaImage, plot_x: u32, plot_y: u32, plot_w: u32, plot_h: u32, window_secs: i64) {
+fn draw_time_grid_and_labels(
+    image: &mut RgbaImage,
+    plot_x: u32,
+    plot_y: u32,
+    plot_w: u32,
+    plot_h: u32,
+    window_secs: i64,
+) {
     let minutes = (window_secs.max(60) / 60) as u32;
     if minutes == 0 {
         return;
@@ -1102,7 +1227,13 @@ fn draw_time_grid_and_labels(image: &mut RgbaImage, plot_x: u32, plot_y: u32, pl
         } else {
             rgba(235, 239, 245)
         };
-        draw_vertical_line(image, x, plot_y + 1, plot_y + plot_h.saturating_sub(2), color);
+        draw_vertical_line(
+            image,
+            x,
+            plot_y + 1,
+            plot_y + plot_h.saturating_sub(2),
+            color,
+        );
         if minute % 5 == 0 || minute == minutes {
             let remaining = minutes.saturating_sub(minute);
             let label = if remaining == 0 {
@@ -1193,7 +1324,12 @@ where
     sampled
 }
 
-fn interpolate_series_value<F>(points: &[TrendPoint], cursor: usize, target_ms: i64, selector: &F) -> f64
+fn interpolate_series_value<F>(
+    points: &[TrendPoint],
+    cursor: usize,
+    target_ms: i64,
+    selector: &F,
+) -> f64
 where
     F: Fn(&TrendPoint) -> f64,
 {
@@ -1284,7 +1420,11 @@ fn draw_smooth_polyline(
     let mut previous = (points[0].0, points[0].1.clamp(min_y, max_y));
 
     for segment in 0..points.len() - 1 {
-        let p0 = if segment == 0 { points[segment] } else { points[segment - 1] };
+        let p0 = if segment == 0 {
+            points[segment]
+        } else {
+            points[segment - 1]
+        };
         let p1 = points[segment];
         let p2 = points[segment + 1];
         let p3 = if segment + 2 < points.len() {
@@ -1301,7 +1441,15 @@ fn draw_smooth_polyline(
                 .clamp(p1.0.min(p2.0) as f64, p1.0.max(p2.0) as f64)
                 .round() as i32;
             let clamped_y = raw_y.clamp(min_y as f64, max_y as f64).round() as i32;
-            draw_line_segment(image, previous.0, previous.1, clamped_x, clamped_y, color, thickness.max(1));
+            draw_line_segment(
+                image,
+                previous.0,
+                previous.1,
+                clamped_x,
+                clamped_y,
+                color,
+                thickness.max(1),
+            );
             previous = (clamped_x, clamped_y);
         }
     }
@@ -1401,7 +1549,15 @@ fn draw_text_weight(
         let mut cursor_y = y as i32;
         for line in text.lines() {
             if !line.is_empty() {
-                draw_text_mut(image, color, x as i32, cursor_y, PxScale::from(px), font, line);
+                draw_text_mut(
+                    image,
+                    color,
+                    x as i32,
+                    cursor_y,
+                    PxScale::from(px),
+                    font,
+                    line,
+                );
             }
             cursor_y += line_height;
         }
@@ -1419,7 +1575,16 @@ fn draw_text_right_fitted(
     text: &str,
     max_width: u32,
 ) {
-    draw_text_right_fitted_weight(image, right_x, y, scale, TextWeight::Regular, color, text, max_width);
+    draw_text_right_fitted_weight(
+        image,
+        right_x,
+        y,
+        scale,
+        TextWeight::Regular,
+        color,
+        text,
+        max_width,
+    );
 }
 
 fn draw_text_right_fitted_weight(
@@ -1499,7 +1664,14 @@ fn fit_text_to_width_weight(text: &str, scale: u32, weight: TextWeight, max_widt
     }
 }
 
-fn draw_text_bitmap(image: &mut RgbaImage, x: u32, y: u32, scale: u32, color: Rgba<u8>, text: &str) {
+fn draw_text_bitmap(
+    image: &mut RgbaImage,
+    x: u32,
+    y: u32,
+    scale: u32,
+    color: Rgba<u8>,
+    text: &str,
+) {
     let mut cursor_x = x as i32;
     let mut cursor_y = y as i32;
     let step_x = (8 * scale + scale) as i32;
@@ -1530,7 +1702,9 @@ fn draw_text_bitmap(image: &mut RgbaImage, x: u32, y: u32, scale: u32, color: Rg
 }
 
 fn status_font_family() -> Option<&'static FontFamily> {
-    STATUS_FONT_FAMILY.get_or_init(load_status_font_family).as_ref()
+    STATUS_FONT_FAMILY
+        .get_or_init(load_status_font_family)
+        .as_ref()
 }
 
 fn load_status_font_family() -> Option<FontFamily> {
@@ -1718,11 +1892,14 @@ async fn read_cpu_ticks() -> Option<(u64, u64)> {
     if parts.next()? != "cpu" {
         return None;
     }
-    let values = parts.filter_map(|item| item.parse::<u64>().ok()).collect::<Vec<_>>();
+    let values = parts
+        .filter_map(|item| item.parse::<u64>().ok())
+        .collect::<Vec<_>>();
     if values.len() < 4 {
         return None;
     }
-    let idle = values.get(3).copied().unwrap_or_default() + values.get(4).copied().unwrap_or_default();
+    let idle =
+        values.get(3).copied().unwrap_or_default() + values.get(4).copied().unwrap_or_default();
     let total = values.iter().sum::<u64>();
     Some((total, idle))
 }
@@ -1869,7 +2046,16 @@ mod tests {
     #[tokio::test]
     async fn creates_status_dashboard_png() {
         let output = create_status_dashboard_image().await.expect("status image");
-        let metadata = tokio::fs::metadata(&output).await.expect("status image metadata");
+        let metadata = tokio::fs::metadata(&output)
+            .await
+            .expect("status image metadata");
         assert!(metadata.len() > 0, "status image should not be empty");
+    }
+
+    #[tokio::test]
+    #[ignore = "manual snapshot probe"]
+    async fn render_probe_prints_status_path() {
+        let output = create_status_dashboard_image().await.expect("status image");
+        println!("status: {}", output.display());
     }
 }

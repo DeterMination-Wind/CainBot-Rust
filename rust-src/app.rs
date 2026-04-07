@@ -9,8 +9,8 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::chat_session_manager::ChatSessionManager;
-use crate::config::{Config, load_config};
 use crate::codex_bridge_server::CodexBridgeServer;
+use crate::config::{Config, load_config};
 use crate::event_utils::{
     build_help_text, create_context_from_event, ensure_message_event, event_mentions_other_user,
     event_mentions_self, get_sender_name, is_question_intent_text, parse_command_from_event,
@@ -28,7 +28,7 @@ use crate::state_store::StateStore;
 use crate::status_dashboard::{create_status_dashboard_image, ensure_btop_dashboard_runtime};
 use crate::utils::{build_message_payload, path_exists};
 use crate::webui_sync_store::WebUiSyncStore;
-use crate::worker_process::WorkerSupervisor;
+use crate::workflow_agent_manager::WorkflowAgentManager;
 
 const GROUP_CARD_SYNC_RETRY_MS: u64 = 10 * 60 * 1000;
 const GROUP_INVITE_POLL_INTERVAL_MS: u64 = 60 * 1000;
@@ -58,12 +58,10 @@ pub struct AppRuntime {
     pub translator: Option<OpenAiTranslator>,
     pub chat_session_manager: Option<ChatSessionManager>,
     pub group_file_download_worker: GroupFileDownloadWorker,
-    pub _worker_supervisor: WorkerSupervisor,
 }
 
 impl AppRuntime {
     pub async fn bootstrap(project_root: PathBuf, config_path: PathBuf) -> Result<Self> {
-        let exe_path = std::env::current_exe()?;
         ensure_config_exists(&config_path).await?;
 
         let loaded = load_config(&config_path).await?;
@@ -78,14 +76,17 @@ impl AppRuntime {
             loaded.config_dir.clone(),
             RuntimeConfigDefaults {
                 qa_external_exclusive_groups_file: config.qa.external_exclusive_groups_file.clone(),
-                qa_external_exclusive_groups_refresh_ms: config.qa.external_exclusive_groups_refresh_ms,
+                qa_external_exclusive_groups_refresh_ms: config
+                    .qa
+                    .external_exclusive_groups_refresh_ms,
                 qa_external_exclusive_groups_stale_ms: config.qa.external_exclusive_groups_stale_ms,
             },
             logger.clone(),
         );
         runtime_config_store.load().await?;
 
-        let webui_sync_store = WebUiSyncStore::new(project_root.join("data").join("webui-sync.json"));
+        let webui_sync_store =
+            WebUiSyncStore::new(project_root.join("data").join("webui-sync.json"));
         webui_sync_store.load().await?;
 
         let napcat_client = NapCatClient::new(
@@ -114,7 +115,9 @@ impl AppRuntime {
                     let owner_id = owner_id.clone();
                     let notify_client = notify_client.clone();
                     async move {
-                        let _ = notify_client.send_private_message(&owner_id, payload.text).await;
+                        let _ = notify_client
+                            .send_private_message(&owner_id, payload.text)
+                            .await;
                     }
                 })
                 .await;
@@ -157,13 +160,20 @@ impl AppRuntime {
         } else {
             None
         };
-        let worker_supervisor = WorkerSupervisor::new(exe_path, logger.clone());
-        let group_file_download_worker =
-            GroupFileDownloadWorker::start(&project_root, &config_path, logger.clone()).await?;
+        let group_file_download_worker = GroupFileDownloadWorker::start(
+            &project_root,
+            runtime_config_store.clone(),
+            napcat_client.clone(),
+            logger.clone(),
+            config.qa.answer.local_build_root.clone(),
+            config.qa.answer.vanilla_repo_root.clone(),
+            config.qa.answer.x_repo_root.clone(),
+        )
+        .await?;
 
         logger
             .info(format!(
-                "Cain Rust 运行时已启动，当前已接管基础层：config/logger/state/runtime/openai/napcat。配置文件：{}",
+                "Cain Rust 运行时已启动，当前已接管业务链路：chat/translate/group-download/issue-repair/codex-bridge。配置文件：{}",
                 loaded.config_path.display()
             ))
             .await;
@@ -173,7 +183,9 @@ impl AppRuntime {
                     &project_root,
                     &config_path,
                     config.qa.clone(),
-                    qa_client.clone().expect("qa_client must exist when starting chat_session_manager"),
+                    qa_client
+                        .clone()
+                        .expect("qa_client must exist when starting chat_session_manager"),
                     state_store.clone(),
                     logger.clone(),
                     runtime_config_store.clone(),
@@ -184,16 +196,12 @@ impl AppRuntime {
             None
         };
 
-        logger
-            .warn("业务层仍在迁移：当前已接入 codex bridge、issueRepair 和文件下载兼容 worker；msav 与纯 Rust 业务重写尚未完成。")
-            .await;
-
         if !config.bot.owner_user_id.trim().is_empty() {
             let _ = napcat_client
                 .send_private_message(
                     &config.bot.owner_user_id,
                     format!(
-                        "Cain Rust 运行时已启动。\n当前已接管主事件循环，并接入 codex bridge、issueRepair、文件下载兼容 worker；其余业务层迁移仍在进行中。\n配置：{}",
+                        "Cain Rust 运行时已启动并接管主要业务链路。\n配置：{}",
                         loaded.config_path.display()
                     ),
                 )
@@ -214,14 +222,16 @@ impl AppRuntime {
             translator,
             chat_session_manager,
             group_file_download_worker,
-            _worker_supervisor: worker_supervisor,
         })
     }
 
     pub async fn run(self) -> Result<()> {
         let group_file_download_worker = self.group_file_download_worker.clone();
-        let mut codex_bridge_server =
-            CodexBridgeServer::new(self.config.codex_bridge.clone(), self.napcat_client.clone(), self.logger.clone());
+        let mut codex_bridge_server = CodexBridgeServer::new(
+            self.config.codex_bridge.clone(),
+            self.napcat_client.clone(),
+            self.logger.clone(),
+        );
         let codex_bridge_info = codex_bridge_server.start().await?;
         let issue_repair_manager = self.qa_client.clone().map(|chat_client| {
             IssueRepairManager::new(
@@ -233,18 +243,39 @@ impl AppRuntime {
                 codex_bridge_info.clone(),
             )
         });
+        let workflow_agent_manager = self.qa_client.clone().map(|chat_client| {
+            WorkflowAgentManager::new(
+                self.config.workflow_agent.clone(),
+                chat_client,
+                self.napcat_client.clone(),
+                self.state_store.clone(),
+                self.logger.clone(),
+                codex_bridge_info.clone(),
+                self.owner_user_id.clone(),
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            )
+        });
         if let Some(manager) = issue_repair_manager.as_ref() {
             manager.initialize().await?;
         }
-        let shutdown_votes_by_group = Arc::new(tokio::sync::Mutex::new(HashMap::<String, ShutdownVote>::new()));
-        let shutdown_vote_message_to_group = Arc::new(tokio::sync::Mutex::new(HashMap::<String, String>::new()));
-        let group_nickname_sync_state = Arc::new(tokio::sync::Mutex::new(HashMap::<String, GroupNicknameSyncState>::new()));
+        let shutdown_votes_by_group = Arc::new(tokio::sync::Mutex::new(HashMap::<
+            String,
+            ShutdownVote,
+        >::new()));
+        let shutdown_vote_message_to_group =
+            Arc::new(tokio::sync::Mutex::new(HashMap::<String, String>::new()));
+        let group_nickname_sync_state = Arc::new(tokio::sync::Mutex::new(HashMap::<
+            String,
+            GroupNicknameSyncState,
+        >::new()));
         let idle_activity_tokens = Arc::new(tokio::sync::Mutex::new(HashMap::<String, u64>::new()));
         let background_stop = Arc::new(AtomicBool::new(false));
 
         if let Err(error) = ensure_btop_dashboard_runtime().await {
             self.logger
-                .warn(format!("初始化 btop 状态采样会话失败（后续将继续后台重试）：{error:#}"))
+                .warn(format!(
+                    "初始化 btop 状态采样会话失败（后续将继续后台重试）：{error:#}"
+                ))
                 .await;
         }
 
@@ -276,7 +307,10 @@ impl AppRuntime {
                             .await;
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(GROUP_INVITE_POLL_INTERVAL_MS)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    GROUP_INVITE_POLL_INTERVAL_MS,
+                ))
+                .await;
             }
         });
 
@@ -289,7 +323,10 @@ impl AppRuntime {
                         .warn(format!("维护 btop 状态采样会话失败：{error:#}"))
                         .await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(BTOP_RUNTIME_GUARD_INTERVAL_MS)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    BTOP_RUNTIME_GUARD_INTERVAL_MS,
+                ))
+                .await;
             }
         });
         let event_logger = self.logger.clone();
@@ -302,6 +339,7 @@ impl AppRuntime {
         let event_config = self.config.clone();
         let event_chat_session_manager = self.chat_session_manager.clone();
         let event_group_file_download_worker = group_file_download_worker.clone();
+        let event_workflow_agent_manager = workflow_agent_manager.clone();
         let event_issue_repair_manager = issue_repair_manager.clone();
         let event_shutdown_votes_by_group = shutdown_votes_by_group.clone();
         let event_shutdown_vote_message_to_group = shutdown_vote_message_to_group.clone();
@@ -322,6 +360,7 @@ impl AppRuntime {
                 let translator = event_translator.clone();
                 let chat_session_manager = event_chat_session_manager.clone();
                 let group_file_download_worker = event_group_file_download_worker.clone();
+                let workflow_agent_manager = event_workflow_agent_manager.clone();
                 let issue_repair_manager = event_issue_repair_manager.clone();
                 let shutdown_votes_by_group = event_shutdown_votes_by_group.clone();
                 let shutdown_vote_message_to_group = event_shutdown_vote_message_to_group.clone();
@@ -330,7 +369,10 @@ impl AppRuntime {
                 let owner_user_id = owner_user_id.clone();
                 async move {
                     log_event_summary(&event_logger, &event).await;
-                    let post_type = event.get("post_type").and_then(Value::as_str).unwrap_or_default();
+                    let post_type = event
+                        .get("post_type")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     if post_type == "request" {
                         handle_group_invite_stub(
                             &event_logger,
@@ -361,6 +403,7 @@ impl AppRuntime {
                         translator.as_ref(),
                         chat_session_manager.as_ref(),
                         &group_file_download_worker,
+                        workflow_agent_manager.as_ref(),
                         issue_repair_manager.as_ref(),
                         &shutdown_votes_by_group,
                         &shutdown_vote_message_to_group,
@@ -410,7 +453,10 @@ async fn ensure_config_exists(config_path: &Path) -> Result<()> {
 }
 
 async fn log_event_summary(logger: &Logger, event: &Value) {
-    let post_type = event.get("post_type").and_then(Value::as_str).unwrap_or("-");
+    let post_type = event
+        .get("post_type")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
     let detail_type = event
         .get("message_type")
         .or_else(|| event.get("request_type"))
@@ -418,7 +464,9 @@ async fn log_event_summary(logger: &Logger, event: &Value) {
         .and_then(Value::as_str)
         .unwrap_or("-");
     logger
-        .debug(format!("收到事件：post_type={post_type}, detail={detail_type}"))
+        .debug(format!(
+            "收到事件：post_type={post_type}, detail={detail_type}"
+        ))
         .await;
 }
 
@@ -429,7 +477,10 @@ async fn handle_group_invite_stub(
     static_group_ids: &[String],
     event: &Value,
 ) -> Result<()> {
-    let post_type = event.get("post_type").and_then(Value::as_str).unwrap_or_default();
+    let post_type = event
+        .get("post_type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let request_type = event
         .get("request_type")
         .and_then(Value::as_str)
@@ -443,7 +494,9 @@ async fn handle_group_invite_stub(
         .map(|item| item.to_string())
         .unwrap_or_default();
     if group_id.is_empty() {
-        logger.warn(format!("收到群邀请请求但缺少群号：{event}")).await;
+        logger
+            .warn(format!("收到群邀请请求但缺少群号：{event}"))
+            .await;
         return Ok(());
     }
     let enabled = runtime_config_store
@@ -469,7 +522,9 @@ async fn handle_group_invite_stub(
         .await;
     if flag.is_empty() {
         logger
-            .warn(format!("群邀请请求缺少 flag，无法自动通过：groupId={group_id}"))
+            .warn(format!(
+                "群邀请请求缺少 flag，无法自动通过：groupId={group_id}"
+            ))
             .await;
         return Ok(());
     }
@@ -505,6 +560,7 @@ async fn handle_message_event(
     translator: Option<&OpenAiTranslator>,
     chat_session_manager: Option<&ChatSessionManager>,
     group_file_download_worker: &GroupFileDownloadWorker,
+    workflow_agent_manager: Option<&WorkflowAgentManager>,
     issue_repair_manager: Option<&IssueRepairManager>,
     shutdown_votes_by_group: &Arc<tokio::sync::Mutex<HashMap<String, ShutdownVote>>>,
     shutdown_vote_message_to_group: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
@@ -528,6 +584,7 @@ async fn handle_message_event(
         .get("message_id")
         .map(value_to_string)
         .filter(|item| !item.is_empty());
+    let mentioned_self = event_mentions_self(event, bot_display_name);
 
     // 先把显式命令单独切出来，保证后续迁移会话逻辑时入口稳定。
     if let Some(command) = command {
@@ -544,6 +601,7 @@ async fn handle_message_event(
             translator,
             chat_session_manager,
             group_file_download_worker,
+            workflow_agent_manager,
             &context,
             event,
             static_group_ids,
@@ -568,72 +626,155 @@ async fn handle_message_event(
         return Ok(());
     }
 
-    if context.message_type == "group" {
-        ensure_group_nickname(
-            napcat_client,
-            logger,
-            config,
-            group_nickname_sync_state,
-            &context.group_id,
-            &context.self_id,
-        )
-        .await;
-        if let Some(chat_session_manager) = chat_session_manager {
-            touch_group_activity(idle_activity_tokens, chat_session_manager, context.group_id.clone(), logger.clone());
-            if maybe_handle_shutdown_vote_reply(
-                logger,
-                napcat_client,
-                chat_session_manager,
-                shutdown_votes_by_group,
-                shutdown_vote_message_to_group,
-                &context,
-                event,
-                &text,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-            if maybe_start_shutdown_vote(
-                config,
-                logger,
-                napcat_client,
-                qa_client,
-                chat_session_manager,
-                shutdown_votes_by_group,
-                shutdown_vote_message_to_group,
-                &context,
-                event,
-                &text,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-        }
-        if maybe_handle_group_topup_codes(logger, napcat_client, &context, event, &text).await? {
-            return Ok(());
-        }
-        if group_file_download_worker
-            .handle_group_message(&context, event, &text)
-            .await?
-        {
-            return Ok(());
-        }
-        if let Some(issue_repair_manager) = issue_repair_manager
-            && issue_repair_manager
-                .handle_incoming_message(&context, event, &text)
+    if context.message_type != "group" {
+        if let Some(workflow_agent_manager) = workflow_agent_manager
+            && workflow_agent_manager
+                .handle_incoming_message(&context, event, &text, mentioned_self)
                 .await?
         {
             return Ok(());
         }
-        if event_mentions_other_user(event, bot_display_name) {
+        return Ok(());
+    }
+
+    ensure_group_nickname(
+        napcat_client,
+        logger,
+        config,
+        group_nickname_sync_state,
+        &context.group_id,
+        &context.self_id,
+    )
+    .await;
+    if let Some(chat_session_manager) = chat_session_manager {
+        touch_group_activity(
+            idle_activity_tokens,
+            chat_session_manager,
+            context.group_id.clone(),
+            logger.clone(),
+        );
+        if maybe_handle_shutdown_vote_reply(
+            logger,
+            napcat_client,
+            chat_session_manager,
+            shutdown_votes_by_group,
+            shutdown_vote_message_to_group,
+            &context,
+            event,
+            &text,
+        )
+        .await?
+        {
             return Ok(());
         }
-        if let Some(chat_session_manager) = chat_session_manager {
-            if chat_session_manager.is_group_enabled(&context.group_id).await {
-                if event_mentions_self(event, bot_display_name) {
-                    if let Some(qa_client) = qa_client {
+        if maybe_start_shutdown_vote(
+            config,
+            logger,
+            napcat_client,
+            qa_client,
+            chat_session_manager,
+            shutdown_votes_by_group,
+            shutdown_vote_message_to_group,
+            &context,
+            event,
+            &text,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+    }
+    if maybe_handle_group_topup_codes(logger, napcat_client, &context, event, &text).await? {
+        return Ok(());
+    }
+    if group_file_download_worker
+        .handle_group_message(&context, event, &text)
+        .await?
+    {
+        return Ok(());
+    }
+    if let Some(workflow_agent_manager) = workflow_agent_manager
+        && workflow_agent_manager
+            .handle_incoming_message(&context, event, &text, mentioned_self)
+            .await?
+    {
+        return Ok(());
+    }
+    if let Some(issue_repair_manager) = issue_repair_manager
+        && issue_repair_manager
+            .handle_incoming_message(&context, event, &text)
+            .await?
+    {
+        return Ok(());
+    }
+    if event_mentions_other_user(event, bot_display_name) {
+        return Ok(());
+    }
+    if let Some(chat_session_manager) = chat_session_manager {
+        if chat_session_manager
+            .is_group_enabled(&context.group_id)
+            .await
+        {
+            if mentioned_self {
+                if let Some(qa_client) = qa_client {
+                    let input = build_chat_input(
+                        napcat_client,
+                        event,
+                        BuildChatInputOptions {
+                            argument: text.clone(),
+                            allow_current_text_fallback: true,
+                            ai_runtime_prefix: format!(
+                                "当前 AI 身份：{}\n当前日期时间：{}",
+                                config.bot.display_name,
+                                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                            ),
+                        },
+                    )
+                    .await?;
+                    let result = chat_session_manager.chat(&context, &input).await?;
+                    send_chat_result_if_present(
+                        chat_session_manager,
+                        logger,
+                        group_file_download_worker,
+                        napcat_client,
+                        workflow_agent_manager,
+                        &context,
+                        event,
+                        reply_message_id.as_deref(),
+                        &result,
+                        &text,
+                        "fallback",
+                    )
+                    .await?;
+                    let _ = qa_client;
+                    return Ok(());
+                }
+            }
+            chat_session_manager
+                .record_incoming_message(&context, event, &text)
+                .await?;
+            if let Err(error) = chat_session_manager
+                .maybe_capture_correction_memory(&context, event)
+                .await
+            {
+                logger
+                    .warn(format!("后台长期记忆捕获失败：{error:#}"))
+                    .await;
+            }
+            if chat_session_manager
+                .is_group_proactive_reply_enabled(&context.group_id)
+                .await
+                && is_question_intent_text(&text)
+            {
+                let (allowed, _, _) = chat_session_manager
+                    .should_run_group_proactive_filter(&context.group_id)
+                    .await;
+                if allowed {
+                    let (should_prompt, reason) = chat_session_manager
+                        .should_suggest_reply(&context, event, &text)
+                        .await?;
+                    if should_prompt {
+                        logger.info(format!("群消息通过主动过滤：{reason}")).await;
                         let input = build_chat_input(
                             napcat_client,
                             event,
@@ -654,87 +795,39 @@ async fn handle_message_event(
                             logger,
                             group_file_download_worker,
                             napcat_client,
+                            workflow_agent_manager,
                             &context,
+                            event,
                             reply_message_id.as_deref(),
                             &result,
                             &text,
-                            "fallback",
+                            "suppress",
                         )
                         .await?;
-                        let _ = qa_client;
-                        return Ok(());
-                    }
-                }
-                chat_session_manager.record_incoming_message(&context, event, &text).await?;
-                if let Err(error) = chat_session_manager
-                    .maybe_capture_correction_memory(&context, event)
-                    .await
-                {
-                    logger
-                        .warn(format!("后台长期记忆捕获失败：{error:#}"))
-                        .await;
-                }
-                if chat_session_manager.is_group_proactive_reply_enabled(&context.group_id).await
-                    && is_question_intent_text(&text)
-                {
-                    let (allowed, _, _) = chat_session_manager
-                        .should_run_group_proactive_filter(&context.group_id)
-                        .await;
-                    if allowed {
-                        let (should_prompt, reason) = chat_session_manager
-                            .should_suggest_reply(&context, event, &text)
-                            .await?;
-                        if should_prompt {
-                            logger.info(format!("群消息通过主动过滤：{reason}")).await;
-                            let input = build_chat_input(
-                                napcat_client,
-                                event,
-                                BuildChatInputOptions {
-                                    argument: text.clone(),
-                                    allow_current_text_fallback: true,
-                                    ai_runtime_prefix: format!(
-                                        "当前 AI 身份：{}\n当前日期时间：{}",
-                                        config.bot.display_name,
-                                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-                                    ),
-                                },
-                            )
-                            .await?;
-                            let result = chat_session_manager.chat(&context, &input).await?;
-                            send_chat_result_if_present(
-                                chat_session_manager,
-                                logger,
-                                group_file_download_worker,
-                                napcat_client,
+                        chat_session_manager
+                            .mark_hinted(
                                 &context,
-                                reply_message_id.as_deref(),
-                                &result,
-                                &text,
-                                "suppress",
+                                &event
+                                    .get("message_id")
+                                    .map(value_to_string)
+                                    .unwrap_or_default(),
                             )
                             .await?;
-                            chat_session_manager
-                                .mark_hinted(
-                                    &context,
-                                    &event.get("message_id").map(value_to_string).unwrap_or_default(),
-                                )
-                                .await?;
-                            return Ok(());
-                        }
+                        return Ok(());
                     }
                 }
             }
         }
-        if event_mentions_self(event, bot_display_name) || is_question_intent_text(&text) {
-            logger
-                .info(format!(
-                    "捕获到后续可接管问答的候选消息：groupId={}, sender={}, text={}",
-                    context.group_id,
-                    get_sender_name(event),
-                    text.chars().take(120).collect::<String>()
-                ))
-                .await;
-        }
+    }
+    if mentioned_self || is_question_intent_text(&text) {
+        logger
+            .info(format!(
+                "捕获到后续可接管问答的候选消息：groupId={}, sender={}, text={}",
+                context.group_id,
+                get_sender_name(event),
+                text.chars().take(120).collect::<String>()
+            ))
+            .await;
     }
     Ok(())
 }
@@ -747,6 +840,7 @@ async fn execute_command(
     translator: Option<&OpenAiTranslator>,
     chat_session_manager: Option<&ChatSessionManager>,
     group_file_download_worker: &GroupFileDownloadWorker,
+    workflow_agent_manager: Option<&WorkflowAgentManager>,
     context: &crate::event_utils::EventContext,
     event: &Value,
     static_group_ids: &[String],
@@ -770,9 +864,23 @@ async fn execute_command(
         "status" => {
             send_status_dashboard_image(napcat_client, context, reply_message_id).await?;
         }
+        "agent" => {
+            let Some(workflow_agent_manager) = workflow_agent_manager else {
+                bail!("当前未启用通用 workflow agent。");
+            };
+            workflow_agent_manager
+                .handle_explicit_request(context, event, &command.argument)
+                .await?;
+        }
         "chat" => {
-            if context.message_type == "group" && !runtime_config_store.is_qa_group_enabled(&context.group_id, static_group_ids).await {
-                bail!("当前群未启用 Cain 问答。请先由 bot 主人执行 /e 启用，或把群号加入 qa.enabledGroupIds。");
+            if context.message_type == "group"
+                && !runtime_config_store
+                    .is_qa_group_enabled(&context.group_id, static_group_ids)
+                    .await
+            {
+                bail!(
+                    "当前群未启用 Cain 问答。请先由 bot 主人执行 /e 启用，或把群号加入 qa.enabledGroupIds。"
+                );
             }
             let Some(chat_session_manager) = chat_session_manager else {
                 bail!("当前未启用聊天会话管理器。");
@@ -817,7 +925,9 @@ async fn execute_command(
                 logger,
                 group_file_download_worker,
                 napcat_client,
+                workflow_agent_manager,
                 context,
+                event,
                 reply_message_id,
                 &result,
                 &source_text,
@@ -833,17 +943,32 @@ async fn execute_command(
             if !source.has_content() {
                 bail!("没有可翻译的内容；请直接写在命令后，或引用一条消息，或附带图片/文本文件。");
             }
-            let translated = translator.translate(source.into_translation_input()).await?;
+            let translated = translator
+                .translate(source.into_translation_input())
+                .await?;
             napcat_client
-                .reply_text(&context.message_type, target_id, reply_message_id, &translated)
+                .reply_text(
+                    &context.message_type,
+                    target_id,
+                    reply_message_id,
+                    &translated,
+                )
                 .await?;
         }
         "edit" => {
-            let subcommand = command.positionals.first().map(String::as_str).unwrap_or_default();
+            let subcommand = command
+                .positionals
+                .first()
+                .map(String::as_str)
+                .unwrap_or_default();
             if subcommand == "状态" {
                 let group_id = require_group_id(command, context)?;
                 let status = if let Some(chat_session_manager) = chat_session_manager {
-                    format_group_status(&chat_session_manager.get_group_prompt_status(&group_id).await)
+                    format_group_status(
+                        &chat_session_manager
+                            .get_group_prompt_status(&group_id)
+                            .await,
+                    )
                 } else {
                     build_group_status_text(runtime_config_store, &group_id, static_group_ids).await
                 };
@@ -856,10 +981,18 @@ async fn execute_command(
                 }
                 let group_id = require_group_id(command, context)?;
                 let result = runtime_config_store
-                    .set_qa_group_enabled(&group_id, subcommand == "启用", Some(subcommand == "启用"))
+                    .set_qa_group_enabled(
+                        &group_id,
+                        subcommand == "启用",
+                        Some(subcommand == "启用"),
+                    )
                     .await?;
                 let status = if let Some(chat_session_manager) = chat_session_manager {
-                    format_group_status(&chat_session_manager.get_group_prompt_status(&group_id).await)
+                    format_group_status(
+                        &chat_session_manager
+                            .get_group_prompt_status(&group_id)
+                            .await,
+                    )
                 } else {
                     build_group_status_text(runtime_config_store, &group_id, static_group_ids).await
                 };
@@ -881,21 +1014,41 @@ async fn execute_command(
                     .await?;
             } else if subcommand == "文件下载" {
                 let group_id = require_group_id(command, context)?;
-                ensure_group_manager_permission(napcat_client, event, context, owner_user_id).await?;
-                let action = command.positionals.get(1).map(String::as_str).unwrap_or_default();
+                ensure_group_manager_permission(napcat_client, event, context, owner_user_id)
+                    .await?;
+                let action = command
+                    .positionals
+                    .get(1)
+                    .map(String::as_str)
+                    .unwrap_or_default();
                 if action != "启用" && action != "关闭" {
                     bail!("用法：/e 文件下载 启用 [群文件夹名]|关闭");
                 }
                 let folder_name = if action == "启用" {
-                    command.positionals.iter().skip(2).cloned().collect::<Vec<_>>().join(" ")
+                    command
+                        .positionals
+                        .iter()
+                        .skip(2)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 } else {
                     String::new()
                 };
                 let result = runtime_config_store
-                    .set_qa_group_file_download_enabled(&group_id, action == "启用", static_group_ids, &folder_name)
+                    .set_qa_group_file_download_enabled(
+                        &group_id,
+                        action == "启用",
+                        static_group_ids,
+                        &folder_name,
+                    )
                     .await?;
                 let status = if let Some(chat_session_manager) = chat_session_manager {
-                    format_group_status(&chat_session_manager.get_group_prompt_status(&group_id).await)
+                    format_group_status(
+                        &chat_session_manager
+                            .get_group_prompt_status(&group_id)
+                            .await,
+                    )
                 } else {
                     build_group_status_text(runtime_config_store, &group_id, static_group_ids).await
                 };
@@ -917,8 +1070,13 @@ async fn execute_command(
                     .await?;
             } else if subcommand == "过滤心跳" {
                 let group_id = require_group_id(command, context)?;
-                ensure_group_manager_permission(napcat_client, event, context, owner_user_id).await?;
-                let action = command.positionals.get(1).map(String::as_str).unwrap_or_default();
+                ensure_group_manager_permission(napcat_client, event, context, owner_user_id)
+                    .await?;
+                let action = command
+                    .positionals
+                    .get(1)
+                    .map(String::as_str)
+                    .unwrap_or_default();
                 if action != "启用" && action != "关闭" {
                     bail!("用法：/e 过滤心跳 启用 [N]|关闭");
                 }
@@ -935,10 +1093,19 @@ async fn execute_command(
                     bail!("过滤心跳间隔必须是 1 到 1000 之间的整数。");
                 }
                 let result = runtime_config_store
-                    .set_qa_group_filter_heartbeat(&group_id, action == "启用", interval, static_group_ids)
+                    .set_qa_group_filter_heartbeat(
+                        &group_id,
+                        action == "启用",
+                        interval,
+                        static_group_ids,
+                    )
                     .await?;
                 let status = if let Some(chat_session_manager) = chat_session_manager {
-                    format_group_status(&chat_session_manager.get_group_prompt_status(&group_id).await)
+                    format_group_status(
+                        &chat_session_manager
+                            .get_group_prompt_status(&group_id)
+                            .await,
+                    )
                 } else {
                     build_group_status_text(runtime_config_store, &group_id, static_group_ids).await
                 };
@@ -960,7 +1127,8 @@ async fn execute_command(
                     .await?;
             } else if subcommand == "过滤" || subcommand == "聊天" {
                 let group_id = require_group_id(command, context)?;
-                ensure_group_manager_permission(napcat_client, event, context, owner_user_id).await?;
+                ensure_group_manager_permission(napcat_client, event, context, owner_user_id)
+                    .await?;
                 let instruction = get_edit_instruction(command, subcommand);
                 if instruction.is_empty() {
                     bail!("/e {} 后必须跟修改要求。", subcommand);
@@ -969,11 +1137,19 @@ async fn execute_command(
                     bail!("当前未启用聊天会话管理器。");
                 };
                 let (prompt, reason) = if subcommand == "过滤" {
-                    chat_session_manager.update_filter_prompt(&group_id, &instruction).await?
+                    chat_session_manager
+                        .update_filter_prompt(&group_id, &instruction)
+                        .await?
                 } else {
-                    chat_session_manager.update_answer_prompt(&group_id, &instruction).await?
+                    chat_session_manager
+                        .update_answer_prompt(&group_id, &instruction)
+                        .await?
                 };
-                let status = format_group_status(&chat_session_manager.get_group_prompt_status(&group_id).await);
+                let status = format_group_status(
+                    &chat_session_manager
+                        .get_group_prompt_status(&group_id)
+                        .await,
+                );
                 napcat_client
                     .reply_text(
                         &context.message_type,
@@ -1027,10 +1203,19 @@ fn get_edit_instruction(command: &crate::commands::ParsedCommand, subcommand: &s
     if raw_args.starts_with(subcommand) {
         return raw_args[subcommand.len()..].trim().to_string();
     }
-    command.positionals.iter().skip(1).cloned().collect::<Vec<_>>().join(" ")
+    command
+        .positionals
+        .iter()
+        .skip(1)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-fn require_group_id(command: &crate::commands::ParsedCommand, context: &crate::event_utils::EventContext) -> Result<String> {
+fn require_group_id(
+    command: &crate::commands::ParsedCommand,
+    context: &crate::event_utils::EventContext,
+) -> Result<String> {
     let group_id = command
         .flags
         .get("group")
@@ -1076,7 +1261,8 @@ async fn get_user_group_role(
     if sender_role == "owner" || sender_role == "admin" {
         return sender_role;
     }
-    if context.message_type != "group" || context.group_id.is_empty() || context.user_id.is_empty() {
+    if context.message_type != "group" || context.group_id.is_empty() || context.user_id.is_empty()
+    {
         return "member".to_string();
     }
     match napcat_client
@@ -1108,10 +1294,17 @@ async fn build_group_status_text(
         .find(|item| item.group_id == group_id);
     let group_override = runtime_config_store.get_group_qa_override(group_id).await;
     [
-        format!("当前群启用状态：{}", if enabled { "已启用" } else { "未启用" }),
+        format!(
+            "当前群启用状态：{}",
+            if enabled { "已启用" } else { "未启用" }
+        ),
         format!(
             "当前主动回复状态：{}",
-            if group_entry.as_ref().map(|item| item.proactive_reply_enabled).unwrap_or(true) {
+            if group_entry
+                .as_ref()
+                .map(|item| item.proactive_reply_enabled)
+                .unwrap_or(true)
+            {
                 "已启用"
             } else {
                 "已关闭"
@@ -1119,7 +1312,11 @@ async fn build_group_status_text(
         ),
         format!(
             "当前过滤心跳：{}",
-            if group_entry.as_ref().map(|item| item.filter_heartbeat_enabled).unwrap_or(false) {
+            if group_entry
+                .as_ref()
+                .map(|item| item.filter_heartbeat_enabled)
+                .unwrap_or(false)
+            {
                 format!(
                     "已启用（每 {} 条候选消息审核一次）",
                     group_entry
@@ -1133,7 +1330,11 @@ async fn build_group_status_text(
         ),
         format!(
             "当前文件下载状态：{}",
-            if group_entry.as_ref().map(|item| item.file_download_enabled).unwrap_or(false) {
+            if group_entry
+                .as_ref()
+                .map(|item| item.file_download_enabled)
+                .unwrap_or(false)
+            {
                 "已启用"
             } else {
                 "已关闭"
@@ -1169,22 +1370,40 @@ async fn build_group_status_text(
 
 fn format_group_status(status: &crate::chat_session_manager::GroupPromptStatus) -> String {
     [
-        format!("当前群启用状态：{}", if status.enabled { "已启用" } else { "未启用" }),
+        format!(
+            "当前群启用状态：{}",
+            if status.enabled {
+                "已启用"
+            } else {
+                "未启用"
+            }
+        ),
         format!(
             "当前主动回复状态：{}",
-            if status.proactive_reply_enabled { "已启用" } else { "已关闭" }
+            if status.proactive_reply_enabled {
+                "已启用"
+            } else {
+                "已关闭"
+            }
         ),
         format!(
             "当前过滤心跳：{}",
             if status.filter_heartbeat_enabled {
-                format!("已启用（每 {} 条候选消息审核一次）", status.filter_heartbeat_interval)
+                format!(
+                    "已启用（每 {} 条候选消息审核一次）",
+                    status.filter_heartbeat_interval
+                )
             } else {
                 "已关闭".to_string()
             }
         ),
         format!(
             "当前文件下载状态：{}",
-            if status.file_download_enabled { "已启用" } else { "已关闭" }
+            if status.file_download_enabled {
+                "已启用"
+            } else {
+                "已关闭"
+            }
         ),
         format!(
             "当前文件下载群文件夹：{}",
@@ -1209,7 +1428,9 @@ async fn send_chat_result_if_present(
     logger: &Logger,
     group_file_download_worker: &GroupFileDownloadWorker,
     napcat_client: &NapCatClient,
+    workflow_agent_manager: Option<&WorkflowAgentManager>,
     context: &crate::event_utils::EventContext,
+    event: &Value,
     reply_message_id: Option<&str>,
     result: &crate::chat_session_manager::ChatResult,
     source_text: &str,
@@ -1221,44 +1442,68 @@ async fn send_chat_result_if_present(
         context.user_id.as_str()
     };
 
-    if result.notice == "group-file-download-started" && context.message_type == "group" {
-        let request_text = result
-            .group_file_download_request
-            .as_ref()
-            .map(|item| item.request_text.as_str())
-            .filter(|item| !item.trim().is_empty())
-            .unwrap_or(source_text)
-            .trim()
-            .to_string();
-        let request = result
-            .group_file_download_request
-            .as_ref()
-            .map(|item| item.request.clone())
-            .filter(|item| !item.is_null())
-            .unwrap_or_else(|| json!({ "request_text": request_text }));
-        let handoff = group_file_download_worker
-            .start_group_download_flow_from_tool(
-                context,
-                reply_message_id.unwrap_or_default(),
-                &request_text,
-                &request,
-            )
-            .await?;
-        if handoff.get("started").and_then(Value::as_bool) == Some(true) {
+    if result.notice == "group-file-download-started" {
+        if context.message_type == "group" {
+            let request_text = result
+                .group_file_download_request
+                .as_ref()
+                .map(|item| item.request_text.as_str())
+                .filter(|item| !item.trim().is_empty())
+                .unwrap_or(source_text)
+                .trim()
+                .to_string();
+            let request = result
+                .group_file_download_request
+                .as_ref()
+                .map(|item| item.request.clone())
+                .filter(|item| !item.is_null())
+                .unwrap_or_else(|| json!({ "request_text": request_text }));
+            let handoff = group_file_download_worker
+                .start_group_download_flow_from_tool(
+                    context,
+                    reply_message_id.unwrap_or_default(),
+                    &request_text,
+                    &request,
+                )
+                .await?;
+            if handoff.get("started").and_then(Value::as_bool) == Some(true) {
+                return Ok(());
+            }
+            if let Some(reason) = handoff
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+            {
+                reply_text_with_markdown_image(
+                    chat_session_manager,
+                    napcat_client,
+                    logger,
+                    context,
+                    target_id,
+                    reply_message_id,
+                    reason,
+                )
+                .await?;
+            }
             return Ok(());
         }
-        if let Some(reason) = handoff.get("reason").and_then(Value::as_str).map(str::trim).filter(|item| !item.is_empty()) {
-            reply_text_with_markdown_image(
-                chat_session_manager,
-                napcat_client,
-                logger,
-                context,
+        napcat_client
+            .reply_text(
+                &context.message_type,
                 target_id,
                 reply_message_id,
-                reason,
+                "文件下载流程仅支持群聊，请在群里 @ Cain 后再发起下载请求。",
             )
             .await?;
-        }
+        return Ok(());
+    }
+
+    if let Some(workflow_agent_manager) = workflow_agent_manager
+        && workflow_agent_manager
+            .maybe_handoff_from_chat(context, event, source_text, &result.text)
+            .await?
+    {
         return Ok(());
     }
 
@@ -1303,7 +1548,12 @@ async fn send_chat_result_if_present(
         if handoff.get("started").and_then(Value::as_bool) == Some(true) {
             return Ok(());
         }
-        if let Some(reason) = handoff.get("reason").and_then(Value::as_str).map(str::trim).filter(|item| !item.is_empty()) {
+        if let Some(reason) = handoff
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        {
             reply_text_with_markdown_image(
                 chat_session_manager,
                 napcat_client,
@@ -1349,7 +1599,12 @@ async fn reply_text_with_markdown_image(
         return Ok(());
     }
     let send_results = napcat_client
-        .reply_text(&context.message_type, target_id, reply_message_id, normalized)
+        .reply_text(
+            &context.message_type,
+            target_id,
+            reply_message_id,
+            normalized,
+        )
         .await?;
     let markdown_image_already_sent = match send_markdown_image_if_available(
         chat_session_manager,
@@ -1367,17 +1622,16 @@ async fn reply_text_with_markdown_image(
             false
         }
     };
-    if let Err(error) =
-        verify_recent_delivery_or_send_markdown_fallback(
-            chat_session_manager,
-            napcat_client,
-            logger,
-            context,
-            normalized,
-            &send_results,
-            markdown_image_already_sent,
-        )
-        .await
+    if let Err(error) = verify_recent_delivery_or_send_markdown_fallback(
+        chat_session_manager,
+        napcat_client,
+        logger,
+        context,
+        normalized,
+        &send_results,
+        markdown_image_already_sent,
+    )
+    .await
     {
         logger
             .warn(format!("发送消息最终兜底检查失败（已忽略）：{error:#}"))
@@ -1437,7 +1691,13 @@ async fn trigger_markdown_fallback_if_needed(
         return Ok(());
     }
     logger.warn(reason).await;
-    let sent = send_markdown_image_if_available(chat_session_manager, napcat_client, context, expected_text).await?;
+    let sent = send_markdown_image_if_available(
+        chat_session_manager,
+        napcat_client,
+        context,
+        expected_text,
+    )
+    .await?;
     if !sent {
         logger.warn("图片兜底触发，但渲染未生成可发送图片。").await;
     }
@@ -1478,7 +1738,8 @@ async fn verify_recent_delivery_or_send_markdown_fallback(
         return Ok(());
     }
 
-    let expected_visible_text = build_expected_visible_text_for_delivery_check(context, expected_text);
+    let expected_visible_text =
+        build_expected_visible_text_for_delivery_check(context, expected_text);
     let expected_prefix = text_prefix(&expected_visible_text, 10);
     if expected_prefix.is_empty() {
         if !sent_message_ids.is_empty() {
@@ -1609,7 +1870,8 @@ fn pick_latest_self_message<'a>(messages: &'a [Value], self_id: &str) -> Option<
         .iter()
         .enumerate()
         .filter(|(_, message)| {
-            extract_sender_id(message) == self_id && !extract_visible_text_for_delivery_check(message).is_empty()
+            extract_sender_id(message) == self_id
+                && !extract_visible_text_for_delivery_check(message).is_empty()
         })
         .max_by_key(|(index, message)| {
             (
@@ -1628,7 +1890,10 @@ fn extract_sender_id(message: &Value) -> String {
             return value;
         }
     }
-    if let Some(user_id) = message.get("sender").and_then(|sender| sender.get("user_id")) {
+    if let Some(user_id) = message
+        .get("sender")
+        .and_then(|sender| sender.get("user_id"))
+    {
         let value = value_to_string(user_id);
         if !value.is_empty() {
             return value;
@@ -1667,12 +1932,9 @@ fn extract_message_text(message: &Value) -> String {
         .get("raw_message")
         .and_then(Value::as_str)
         .or_else(|| message.get("message").and_then(Value::as_str));
-    plain_text_from_message(
-        message.get("message").unwrap_or(&Value::Null),
-        raw_message,
-    )
-    .trim()
-    .to_string()
+    plain_text_from_message(message.get("message").unwrap_or(&Value::Null), raw_message)
+        .trim()
+        .to_string()
 }
 
 fn extract_visible_text_for_delivery_check(message: &Value) -> String {
@@ -1800,7 +2062,10 @@ async fn maybe_handle_group_topup_codes(
         .await
     {
         logger
-            .warn(format!("兑换结果私聊发送失败：target={} error={error:#}", TOPUP_RESULT_RECEIVER_USER_ID))
+            .warn(format!(
+                "兑换结果私聊发送失败：target={} error={error:#}",
+                TOPUP_RESULT_RECEIVER_USER_ID
+            ))
             .await;
     }
     Ok(true)
@@ -1917,7 +2182,10 @@ async fn send_status_dashboard_image(
 ) -> Result<()> {
     let image_path = create_status_dashboard_image().await?;
     let mut segments = Vec::new();
-    if let Some(reply_id) = reply_message_id.map(str::trim).filter(|item| !item.is_empty()) {
+    if let Some(reply_id) = reply_message_id
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
         segments.push(json!({
             "type": "reply",
             "data": { "id": reply_id }
@@ -1976,7 +2244,8 @@ async fn ensure_group_nickname(
             }
             if current.status == "failed"
                 && current.nickname == target_nickname
-                && current_time_ms().saturating_sub(current.updated_at_ms) < GROUP_CARD_SYNC_RETRY_MS
+                && current_time_ms().saturating_sub(current.updated_at_ms)
+                    < GROUP_CARD_SYNC_RETRY_MS
             {
                 return;
             }
@@ -2010,7 +2279,10 @@ async fn ensure_group_nickname(
                 },
             );
         }
-        _ => match napcat_client.set_group_card(group_id, self_id, target_nickname).await {
+        _ => match napcat_client
+            .set_group_card(group_id, self_id, target_nickname)
+            .await
+        {
             Ok(_) => {
                 state.lock().await.insert(
                     key,
@@ -2021,7 +2293,9 @@ async fn ensure_group_nickname(
                     },
                 );
                 logger
-                    .info(format!("已同步群 {group_id} 的 bot 群名片为 {target_nickname}"))
+                    .info(format!(
+                        "已同步群 {group_id} 的 bot 群名片为 {target_nickname}"
+                    ))
                     .await;
             }
             Err(error) => {
@@ -2060,7 +2334,10 @@ fn touch_group_activity(
         if current != Some(token) || !chat_session_manager.is_group_enabled(&group_id).await {
             return;
         }
-        if let Ok((should_end, reason)) = chat_session_manager.maybe_close_group_topic(&group_id).await {
+        if let Ok((should_end, reason)) = chat_session_manager
+            .maybe_close_group_topic(&group_id)
+            .await
+        {
             logger
                 .info(format!(
                     "群 {group_id} 空闲话题判断：{}{}",
@@ -2089,7 +2366,12 @@ async fn maybe_handle_shutdown_vote_reply(
     let Some(reply_id) = extract_reply_id_from_event(event) else {
         return Ok(false);
     };
-    let Some(group_id) = shutdown_vote_message_to_group.lock().await.get(&reply_id).cloned() else {
+    let Some(group_id) = shutdown_vote_message_to_group
+        .lock()
+        .await
+        .get(&reply_id)
+        .cloned()
+    else {
         return Ok(false);
     };
     if !text_contains_shutdown_vote_approval(text) {
@@ -2142,7 +2424,9 @@ async fn maybe_start_shutdown_vote(
     event: &Value,
     text: &str,
 ) -> Result<bool> {
-    if !chat_session_manager.is_group_enabled(&context.group_id).await
+    if !chat_session_manager
+        .is_group_enabled(&context.group_id)
+        .await
         || !chat_session_manager
             .is_group_proactive_reply_enabled(&context.group_id)
             .await
@@ -2151,7 +2435,11 @@ async fn maybe_start_shutdown_vote(
     {
         return Ok(false);
     }
-    if let Some(vote) = shutdown_votes_by_group.lock().await.get(&context.group_id).cloned()
+    if let Some(vote) = shutdown_votes_by_group
+        .lock()
+        .await
+        .get(&context.group_id)
+        .cloned()
         && vote.expires_at_ms > current_time_ms()
     {
         napcat_client
@@ -2228,7 +2516,10 @@ fn schedule_shutdown_vote_expiry(
         if expired.is_some() {
             clear_shutdown_vote_message_map(&shutdown_vote_message_to_group, &group_id).await;
             if let Err(error) = napcat_client
-                .send_group_message(&group_id, Value::String("关闭投票 10 分钟内未通过，已自动关闭。".to_string()))
+                .send_group_message(
+                    &group_id,
+                    Value::String("关闭投票 10 分钟内未通过，已自动关闭。".to_string()),
+                )
                 .await
             {
                 logger
@@ -2322,7 +2613,9 @@ async fn poll_pending_group_invites(
             .set_group_add_request(&request_id, true, "", 100, "invite")
             .await?;
         logger
-            .info(format!("已通过系统消息轮询自动同意群邀请：group={group_id} request={request_id}"))
+            .info(format!(
+                "已通过系统消息轮询自动同意群邀请：group={group_id} request={request_id}"
+            ))
             .await;
     }
     Ok(())
@@ -2333,7 +2626,10 @@ async fn handle_notice_event(
     shutdown_vote_message_to_group: &Arc<tokio::sync::Mutex<HashMap<String, String>>>,
     event: &Value,
 ) {
-    let notice_type = event.get("notice_type").and_then(Value::as_str).unwrap_or_default();
+    let notice_type = event
+        .get("notice_type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if notice_type != "group_recall" && notice_type != "friend_recall" {
         return;
     }
@@ -2345,7 +2641,10 @@ async fn handle_notice_event(
     if recalled_message_id.is_empty() {
         return;
     }
-    let removed_group = shutdown_vote_message_to_group.lock().await.remove(&recalled_message_id);
+    let removed_group = shutdown_vote_message_to_group
+        .lock()
+        .await
+        .remove(&recalled_message_id);
     if let Some(group_id) = removed_group {
         let should_remove_group = {
             let mut votes = shutdown_votes_by_group.lock().await;
@@ -2369,7 +2668,13 @@ fn normalize_invited_requests(payload: &Value) -> Vec<Value> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .chain(payload.get("InvitedRequest").and_then(Value::as_array).into_iter().flatten())
+        .chain(
+            payload
+                .get("InvitedRequest")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
     {
         let request_id = item
             .get("request_id")
@@ -2386,7 +2691,9 @@ fn normalize_invited_requests(payload: &Value) -> Vec<Value> {
 fn extract_reply_id_from_event(event: &Value) -> Option<String> {
     let message = event.get("message").unwrap_or(&Value::Null);
     if let Some(items) = message.as_array()
-        && let Some(reply) = items.iter().find(|segment| segment.get("type").and_then(Value::as_str) == Some("reply"))
+        && let Some(reply) = items
+            .iter()
+            .find(|segment| segment.get("type").and_then(Value::as_str) == Some("reply"))
     {
         return reply
             .get("data")
@@ -2394,22 +2701,27 @@ fn extract_reply_id_from_event(event: &Value) -> Option<String> {
             .map(value_to_string)
             .filter(|item| !item.is_empty());
     }
-    event.get("raw_message").and_then(Value::as_str).and_then(|raw| {
-        let marker = "[CQ:reply,id=";
-        let start = raw.find(marker)?;
-        let remain = &raw[start + marker.len()..];
-        let end = remain.find([',', ']']).unwrap_or(remain.len());
-        let reply_id = remain[..end].trim();
-        (!reply_id.is_empty()).then(|| reply_id.to_string())
-    })
+    event
+        .get("raw_message")
+        .and_then(Value::as_str)
+        .and_then(|raw| {
+            let marker = "[CQ:reply,id=";
+            let start = raw.find(marker)?;
+            let remain = &raw[start + marker.len()..];
+            let end = remain.find([',', ']']).unwrap_or(remain.len());
+            let reply_id = remain[..end].trim();
+            (!reply_id.is_empty()).then(|| reply_id.to_string())
+        })
 }
 
 fn parse_json_object_field_bool(text: &str, field: &str) -> Option<bool> {
-    let parsed = serde_json::from_str::<Value>(text.trim()).ok().or_else(|| {
-        let start = text.find('{')?;
-        let end = text.rfind('}')?;
-        serde_json::from_str::<Value>(&text[start..=end]).ok()
-    })?;
+    let parsed = serde_json::from_str::<Value>(text.trim())
+        .ok()
+        .or_else(|| {
+            let start = text.find('{')?;
+            let end = text.rfind('}')?;
+            serde_json::from_str::<Value>(&text[start..=end]).ok()
+        })?;
     parsed.get(field).and_then(Value::as_bool)
 }
 
@@ -2427,7 +2739,8 @@ fn looks_like_bot_opposition_candidate(text: &str, display_name: &str) -> bool {
         || normalized.contains("太吵")
         || normalized.contains("关掉")
         || normalized.contains("关闭")
-        || (!display_name.trim().is_empty() && normalized.contains(&display_name.trim().to_ascii_lowercase()))
+        || (!display_name.trim().is_empty()
+            && normalized.contains(&display_name.trim().to_ascii_lowercase()))
 }
 
 fn text_looks_like_explicit_shutdown_request(text: &str) -> bool {
@@ -2450,7 +2763,11 @@ fn text_looks_like_explicit_shutdown_request(text: &str) -> bool {
 
 fn text_contains_shutdown_vote_approval(text: &str) -> bool {
     let normalized = text.trim();
-    normalized == "Y" || normalized == "y" || normalized.split_whitespace().any(|item| item.eq_ignore_ascii_case("y"))
+    normalized == "Y"
+        || normalized == "y"
+        || normalized
+            .split_whitespace()
+            .any(|item| item.eq_ignore_ascii_case("y"))
 }
 
 fn extract_message_ids_from_send_results(results: &[Value]) -> Vec<String> {

@@ -1,10 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, AtomicUsize, Ordering},
-};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Result, bail};
 use chrono::{Local, TimeZone, Utc};
@@ -17,7 +13,7 @@ use crate::event_utils::{EventContext, get_sender_name, plain_text_from_message}
 use crate::logger::Logger;
 use crate::message_input::ChatInput;
 use crate::openai_chat_client::{ChatMessage, CompleteOptions, OpenAiChatClient};
-use crate::qa_session_worker::QaSessionWorker;
+use crate::reply_markdown_renderer::render_reply_markdown_image;
 use crate::runtime_config_store::{GroupQaOverride, RuntimeConfigStore};
 use crate::state_store::StateStore;
 
@@ -62,19 +58,13 @@ pub struct ChatSessionManager {
     runtime_config_store: RuntimeConfigStore,
     heartbeat_counters: Arc<Mutex<BTreeMap<String, u64>>>,
     correction_memory_checked: Arc<Mutex<HashSet<String>>>,
-    project_root: PathBuf,
-    config_path: PathBuf,
     logger: Logger,
-    worker: Arc<Mutex<Option<QaSessionWorker>>>,
-    active_requests: Arc<AtomicUsize>,
-    last_used_ms: Arc<AtomicU64>,
-    idle_timeout_ms: u64,
 }
 
 impl ChatSessionManager {
     pub async fn start(
-        project_root: &Path,
-        config_path: &Path,
+        _project_root: &Path,
+        _config_path: &Path,
         config: QaConfig,
         chat_client: OpenAiChatClient,
         state_store: StateStore,
@@ -88,72 +78,13 @@ impl ChatSessionManager {
             runtime_config_store,
             heartbeat_counters: Default::default(),
             correction_memory_checked: Default::default(),
-            project_root: project_root.to_path_buf(),
-            config_path: config_path.to_path_buf(),
             logger,
-            worker: Arc::new(Mutex::new(None)),
-            active_requests: Arc::new(AtomicUsize::new(0)),
-            last_used_ms: Arc::new(AtomicU64::new(now_ms())),
-            idle_timeout_ms: 5 * 60 * 1000,
         };
-        manager.spawn_idle_reaper();
         Ok(manager)
     }
 
     pub async fn stop(&self) -> Result<()> {
-        if let Some(worker) = self.worker.lock().await.take() {
-            worker.stop().await?;
-        }
         Ok(())
-    }
-
-    fn spawn_idle_reaper(&self) {
-        let worker = self.worker.clone();
-        let logger = self.logger.clone();
-        let active_requests = self.active_requests.clone();
-        let last_used_ms = self.last_used_ms.clone();
-        let idle_timeout_ms = self.idle_timeout_ms;
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                if active_requests.load(Ordering::SeqCst) != 0 {
-                    continue;
-                }
-                let idle_for_ms = now_ms().saturating_sub(last_used_ms.load(Ordering::SeqCst));
-                if idle_for_ms < idle_timeout_ms {
-                    continue;
-                }
-                let maybe_worker = worker.lock().await.take();
-                if let Some(worker) = maybe_worker {
-                    logger
-                        .info(format!(
-                            "QA session worker 空闲超时，已回收常驻进程：idleMs={idle_for_ms}"
-                        ))
-                        .await;
-                    let _ = worker.stop().await;
-                }
-            }
-        });
-    }
-
-    async fn request(&self, action: &str, payload: Value) -> Result<Value> {
-        self.active_requests.fetch_add(1, Ordering::SeqCst);
-        self.last_used_ms.store(now_ms(), Ordering::SeqCst);
-        let worker = self.ensure_worker().await?;
-        let result = worker.request(action, payload).await;
-        self.last_used_ms.store(now_ms(), Ordering::SeqCst);
-        self.active_requests.fetch_sub(1, Ordering::SeqCst);
-        result
-    }
-
-    async fn ensure_worker(&self) -> Result<QaSessionWorker> {
-        let mut guard = self.worker.lock().await;
-        if let Some(worker) = guard.as_ref() {
-            return Ok(worker.clone());
-        }
-        let worker = QaSessionWorker::start(&self.project_root, &self.config_path, self.logger.clone()).await?;
-        *guard = Some(worker.clone());
-        Ok(worker)
     }
 
     pub fn build_session_key(&self, context: &EventContext) -> String {
@@ -177,7 +108,10 @@ impl ChatSessionManager {
     }
 
     pub async fn get_group_prompt_status(&self, group_id: &str) -> GroupPromptStatus {
-        let override_entry = self.runtime_config_store.get_group_qa_override(group_id).await;
+        let override_entry = self
+            .runtime_config_store
+            .get_group_qa_override(group_id)
+            .await;
         GroupPromptStatus {
             enabled: self.is_group_enabled(group_id).await,
             proactive_reply_enabled: self.is_group_proactive_reply_enabled(group_id).await,
@@ -269,7 +203,11 @@ impl ChatSessionManager {
             "createdAt": Utc::now().to_rfc3339(),
         });
         self.state_store
-            .append_chat_session_entry(&session_key, entry, self.config.answer.max_timeline_messages)
+            .append_chat_session_entry(
+                &session_key,
+                entry,
+                self.config.answer.max_timeline_messages,
+            )
             .await?;
         Ok(())
     }
@@ -284,69 +222,206 @@ impl ChatSessionManager {
     }
 
     pub async fn chat(&self, context: &EventContext, input: &ChatInput) -> Result<ChatResult> {
-        let payload = self
-            .request(
-                "chat",
-                json!({
-                    "context": event_context_json(context),
-                    "input": chat_input_json(input),
-                }),
+        if !input.has_content() || input.history_text.trim().is_empty() {
+            bail!("聊天内容不能为空");
+        }
+
+        let session_key = self.build_session_key(context);
+        self.state_store.refresh_chat_sessions_from_disk().await?;
+
+        let user_entry = json!({
+            "role": "user",
+            "kind": if context.message_type == "group" { "direct-question" } else { "private-question" },
+            "messageId": input.runtime_context.current_message_id,
+            "userId": context.user_id,
+            "sender": if input.runtime_context.sender_name.trim().is_empty() {
+                if context.user_id.trim().is_empty() { "用户".to_string() } else { context.user_id.clone() }
+            } else {
+                input.runtime_context.sender_name.clone()
+            },
+            "text": if input.runtime_context.timeline_text.trim().is_empty() {
+                input.history_text.chars().take(600).collect::<String>()
+            } else {
+                input.runtime_context.timeline_text.chars().take(600).collect::<String>()
+            },
+            "time": format_event_time((input.runtime_context.current_time > 0).then_some(input.runtime_context.current_time)),
+            "createdAt": Utc::now().to_rfc3339(),
+        });
+        self.state_store
+            .append_chat_session_entry(
+                &session_key,
+                user_entry,
+                self.config.answer.max_timeline_messages,
             )
             .await?;
+
+        if context.message_type == "group"
+            && self
+                .runtime_config_store
+                .is_qa_group_file_download_enabled(&context.group_id)
+                .await
+        {
+            let request_text = if !input.runtime_context.timeline_text.trim().is_empty() {
+                input.runtime_context.timeline_text.trim().to_string()
+            } else if !input.text.trim().is_empty() {
+                input.text.trim().to_string()
+            } else {
+                input.history_text.trim().to_string()
+            };
+            if looks_like_group_file_download_request(&request_text) {
+                let handoff_entry = json!({
+                    "role": "assistant",
+                    "kind": "tool-handoff",
+                    "messageId": "",
+                    "userId": context.self_id,
+                    "sender": "Cain",
+                    "text": "[已转交群文件下载流程]",
+                    "time": Utc::now().to_rfc3339(),
+                    "createdAt": Utc::now().to_rfc3339(),
+                });
+                self.state_store
+                    .append_chat_session_entry(
+                        &session_key,
+                        handoff_entry,
+                        self.config.answer.max_timeline_messages,
+                    )
+                    .await?;
+                return Ok(ChatResult {
+                    text: String::new(),
+                    notice: "group-file-download-started".to_string(),
+                    group_file_download_request: Some(GroupFileDownloadRequest {
+                        request_text: request_text.clone(),
+                        request: json!({
+                            "request_text": request_text
+                        }),
+                    }),
+                });
+            }
+        }
+
+        let session = self.state_store.get_chat_session(&session_key).await?;
+        let timeline = self
+            .build_timeline_from_messages(
+                &session.messages,
+                self.config.answer.context_window_messages,
+            )
+            .await;
+        let system_prompt = self.build_answer_system_prompt(context).await;
+        let user_prompt = format!(
+            "以下是当前共享上下文：\n{}\n\n以下是本次需要你回答的请求：\n{}",
+            timeline,
+            input.text.trim()
+        );
+        let user_content = if input.images.is_empty() {
+            Value::String(user_prompt)
+        } else {
+            let mut parts = vec![json!({
+                "type": "text",
+                "text": user_prompt,
+            })];
+            parts.extend(input.images.iter().cloned());
+            Value::Array(parts)
+        };
+        let completion = self
+            .chat_client
+            .complete(
+                &[
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: Value::String(system_prompt),
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: user_content,
+                    },
+                ],
+                CompleteOptions {
+                    model: Some(self.config.answer.model.clone()),
+                    temperature: Some(self.config.answer.temperature),
+                },
+            )
+            .await?;
+        if let Some(handoff) = parse_group_file_download_handoff(&completion) {
+            if context.message_type != "group" {
+                let fallback_text = "文件下载流程仅支持群聊。请在对应群里 @ 我并说明版本与平台，我会直接走下载状态机。";
+                let assistant_entry = json!({
+                    "role": "assistant",
+                    "kind": "answer",
+                    "messageId": "",
+                    "userId": context.self_id,
+                    "sender": "Cain",
+                    "text": fallback_text,
+                    "time": Utc::now().to_rfc3339(),
+                    "createdAt": Utc::now().to_rfc3339(),
+                });
+                self.state_store
+                    .append_chat_session_entry(
+                        &session_key,
+                        assistant_entry,
+                        self.config.answer.max_timeline_messages,
+                    )
+                    .await?;
+                return Ok(ChatResult {
+                    text: fallback_text.to_string(),
+                    notice: String::new(),
+                    group_file_download_request: None,
+                });
+            }
+            let handoff_entry = json!({
+                "role": "assistant",
+                "kind": "tool-handoff",
+                "messageId": "",
+                "userId": context.self_id,
+                "sender": "Cain",
+                "text": "[已转交群文件下载流程]",
+                "time": Utc::now().to_rfc3339(),
+                "createdAt": Utc::now().to_rfc3339(),
+            });
+            self.state_store
+                .append_chat_session_entry(
+                    &session_key,
+                    handoff_entry,
+                    self.config.answer.max_timeline_messages,
+                )
+                .await?;
+            return Ok(ChatResult {
+                text: String::new(),
+                notice: "group-file-download-started".to_string(),
+                group_file_download_request: Some(handoff),
+            });
+        }
+        let answer_text = completion.trim().to_string();
+        if answer_text.is_empty() {
+            bail!("模型返回空内容");
+        }
+
+        let assistant_entry = json!({
+            "role": "assistant",
+            "kind": "answer",
+            "messageId": "",
+            "userId": context.self_id,
+            "sender": "Cain",
+            "text": answer_text,
+            "time": Utc::now().to_rfc3339(),
+            "createdAt": Utc::now().to_rfc3339(),
+        });
+        self.state_store
+            .append_chat_session_entry(
+                &session_key,
+                assistant_entry,
+                self.config.answer.max_timeline_messages,
+            )
+            .await?;
+
         Ok(ChatResult {
-            text: payload.get("text").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
-            notice: payload.get("notice").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
-            group_file_download_request: payload
-                .get("groupFileDownloadRequest")
-                .and_then(Value::as_object)
-                .map(|request| GroupFileDownloadRequest {
-                    request_text: request
-                        .get("requestText")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .trim()
-                        .to_string(),
-                    request: request.get("request").cloned().unwrap_or(Value::Null),
-                })
-                .filter(|request| !request.request_text.is_empty()),
+            text: completion.trim().to_string(),
+            notice: String::new(),
+            group_file_download_request: None,
         })
     }
 
     pub async fn render_markdown_image(&self, text: &str) -> Result<Option<String>> {
-        let normalized = text.trim();
-        if normalized.is_empty() {
-            return Ok(None);
-        }
-        let payload = self
-            .request(
-                "render_markdown_image",
-                json!({
-                    "text": normalized,
-                }),
-            )
-            .await?;
-        let error_message = payload
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if !error_message.is_empty() {
-            self.logger
-                .warn(format!("回复图片渲染失败：{error_message}"))
-                .await;
-            return Ok(None);
-        }
-        let image_path = payload
-            .get("imagePath")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        if image_path.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(image_path))
+        render_reply_markdown_image(text).await
     }
 
     pub async fn should_suggest_reply(
@@ -358,12 +433,20 @@ impl ChatSessionManager {
         let session_key = self.build_session_key(context);
         self.state_store.refresh_chat_sessions_from_disk().await?;
         let session = self.state_store.get_chat_session(&session_key).await?;
-        if session.last_hinted_message_id.trim() == event.get("message_id").map(value_to_string).unwrap_or_default() {
+        if session.last_hinted_message_id.trim()
+            == event
+                .get("message_id")
+                .map(value_to_string)
+                .unwrap_or_default()
+        {
             return Ok((false, "already-hinted".to_string()));
         }
 
         let recent_context = self
-            .build_timeline_from_messages(&session.messages, self.config.answer.context_window_messages.min(12))
+            .build_timeline_from_messages(
+                &session.messages,
+                self.config.answer.context_window_messages.min(12),
+            )
             .await;
         let raw = self
             .chat_client
@@ -396,8 +479,16 @@ impl ChatSessionManager {
             .await?;
         let parsed = extract_json_object(&raw);
         Ok((
-            parsed.get("should_prompt").and_then(Value::as_bool).unwrap_or(false),
-            parsed.get("reason").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
+            parsed
+                .get("should_prompt")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            parsed
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
         ))
     }
 
@@ -427,8 +518,11 @@ impl ChatSessionManager {
                         content: Value::String(format!(
                             "群号：{}\n\n最近消息：\n{}",
                             group_id.trim(),
-                            self.build_timeline_from_messages(&session.messages, self.config.topic_closure.message_window)
-                                .await
+                            self.build_timeline_from_messages(
+                                &session.messages,
+                                self.config.topic_closure.message_window
+                            )
+                            .await
                         )),
                     },
                 ],
@@ -439,30 +533,48 @@ impl ChatSessionManager {
             )
             .await?;
         let parsed = extract_json_object(&raw);
-        let should_end = parsed.get("should_end").and_then(Value::as_bool).unwrap_or(false);
-        let reason = parsed.get("reason").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+        let should_end = parsed
+            .get("should_end")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let reason = parsed
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         if should_end {
             self.state_store.clear_chat_session(&session_key).await?;
         }
-        Ok((
-            should_end,
-            reason,
-        ))
+        Ok((should_end, reason))
     }
 
-    pub async fn disable_group_proactive_replies(&self, group_id: &str) -> Result<GroupPromptStatus> {
+    pub async fn disable_group_proactive_replies(
+        &self,
+        group_id: &str,
+    ) -> Result<GroupPromptStatus> {
         self.runtime_config_store
             .set_qa_group_proactive_reply_enabled(group_id, false, &self.config.enabled_group_ids)
             .await?;
         Ok(self.get_group_prompt_status(group_id).await)
     }
 
-    pub async fn update_filter_prompt(&self, group_id: &str, instruction: &str) -> Result<(String, String)> {
-        self.review_and_persist_prompt(group_id, "filter", instruction).await
+    pub async fn update_filter_prompt(
+        &self,
+        group_id: &str,
+        instruction: &str,
+    ) -> Result<(String, String)> {
+        self.review_and_persist_prompt(group_id, "filter", instruction)
+            .await
     }
 
-    pub async fn update_answer_prompt(&self, group_id: &str, instruction: &str) -> Result<(String, String)> {
-        self.review_and_persist_prompt(group_id, "answer", instruction).await
+    pub async fn update_answer_prompt(
+        &self,
+        group_id: &str,
+        instruction: &str,
+    ) -> Result<(String, String)> {
+        self.review_and_persist_prompt(group_id, "answer", instruction)
+            .await
     }
 
     pub async fn maybe_capture_correction_memory(
@@ -480,7 +592,10 @@ impl ChatSessionManager {
         if !looks_like_correction_candidate(&raw_text) {
             return Ok(None);
         }
-        let message_id = event.get("message_id").map(value_to_string).unwrap_or_default();
+        let message_id = event
+            .get("message_id")
+            .map(value_to_string)
+            .unwrap_or_default();
         let capture_key = format!(
             "{}:{}",
             self.build_session_key(context),
@@ -504,7 +619,10 @@ impl ChatSessionManager {
             return Ok(None);
         };
         self.state_store.refresh_chat_sessions_from_disk().await?;
-        let session = self.state_store.get_chat_session(&self.build_session_key(context)).await?;
+        let session = self
+            .state_store
+            .get_chat_session(&self.build_session_key(context))
+            .await?;
         if session.messages.len() < 2 {
             return Ok(None);
         }
@@ -558,7 +676,10 @@ impl ChatSessionManager {
             )
             .await?;
         let parsed = extract_json_object(&raw);
-        let should_append = parsed.get("should_append").and_then(Value::as_bool).unwrap_or(false);
+        let should_append = parsed
+            .get("should_append")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let memory = parsed
             .get("memory")
             .or_else(|| parsed.get("entry"))
@@ -567,7 +688,12 @@ impl ChatSessionManager {
             .unwrap_or_default()
             .trim()
             .to_string();
-        let reason = parsed.get("reason").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+        let reason = parsed
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         if !should_append || memory.is_empty() {
             return Ok(None);
         }
@@ -577,7 +703,11 @@ impl ChatSessionManager {
                 "长期记忆{}：{}{}",
                 if appended { "已新增" } else { "已存在" },
                 memory,
-                if reason.is_empty() { String::new() } else { format!(" ({reason})") }
+                if reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({reason})")
+                }
             ))
             .await;
         Ok(Some(memory))
@@ -654,9 +784,22 @@ impl ChatSessionManager {
         };
         let parsed = extract_json_object(&raw);
         let allow = parsed.get("allow").and_then(Value::as_bool).unwrap_or(true);
-        let reason = parsed.get("reason").and_then(Value::as_str).unwrap_or_default().trim().to_string();
-        let start_group_file_download = parsed.get("start_group_file_download").and_then(Value::as_bool).unwrap_or(false);
-        let request_text = parsed.get("request_text").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+        let reason = parsed
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let start_group_file_download = parsed
+            .get("start_group_file_download")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let request_text = parsed
+            .get("request_text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         if allow {
             return Ok(LowInformationReplyReview {
                 text: normalized_reply.to_string(),
@@ -667,7 +810,11 @@ impl ChatSessionManager {
         self.logger
             .info(format!(
                 "已拦截低信息回复：{} | source={} | reply={}",
-                if reason.is_empty() { "no-reason" } else { reason.as_str() },
+                if reason.is_empty() {
+                    "no-reason"
+                } else {
+                    reason.as_str()
+                },
                 normalized_source.chars().take(80).collect::<String>(),
                 normalized_reply.chars().take(80).collect::<String>()
             ))
@@ -675,7 +822,11 @@ impl ChatSessionManager {
         if start_group_file_download {
             return Ok(LowInformationReplyReview {
                 start_group_file_download: true,
-                request_text: if request_text.is_empty() { normalized_source.to_string() } else { request_text },
+                request_text: if request_text.is_empty() {
+                    normalized_source.to_string()
+                } else {
+                    request_text
+                },
                 reason,
                 ..Default::default()
             });
@@ -693,7 +844,73 @@ impl ChatSessionManager {
         })
     }
 
-    async fn build_timeline_from_messages(&self, messages: &[Value], max_messages: usize) -> String {
+    async fn build_answer_system_prompt(&self, context: &EventContext) -> String {
+        let override_entry = if context.message_type == "group" {
+            self.runtime_config_store
+                .get_group_qa_override(&context.group_id)
+                .await
+        } else {
+            None
+        };
+        let base_prompt = override_entry
+            .as_ref()
+            .map(|item| item.answer_prompt.as_str())
+            .filter(|item| !item.trim().is_empty())
+            .unwrap_or(self.config.answer.system_prompt.as_str())
+            .trim()
+            .to_string();
+        let mut parts = vec![base_prompt];
+        parts.push(
+            [
+                "回复要求：",
+                "- 先给结论，再给可执行步骤。",
+                "- 如果缺少关键上下文，明确说出还缺哪一个具体信息。",
+                "- 禁止只说“我去查一下/稍后再说”的空话。",
+                "- 默认使用简体中文，不要使用 Markdown。",
+            ]
+            .join("\n"),
+        );
+        if let Some(memory_prompt) = self.load_long_term_memory_prompt().await {
+            parts.push(memory_prompt);
+        }
+        parts
+            .into_iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    async fn load_long_term_memory_prompt(&self) -> Option<String> {
+        let memory_path = self.config.answer.memory_file.as_ref()?;
+        let raw = match fs::read_to_string(memory_path).await {
+            Ok(text) => text,
+            Err(_) => return None,
+        };
+        let lines = raw
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        if lines.is_empty() {
+            return None;
+        }
+        let selected = if lines.len() > 20 {
+            &lines[lines.len() - 20..]
+        } else {
+            &lines[..]
+        };
+        Some(format!(
+            "以下是长期记忆（仅用于提高一致性，遇到冲突以当前上下文为准）：\n{}",
+            selected.join("\n")
+        ))
+    }
+
+    async fn build_timeline_from_messages(
+        &self,
+        messages: &[Value],
+        max_messages: usize,
+    ) -> String {
         let items = if messages.len() > max_messages {
             &messages[messages.len() - max_messages..]
         } else {
@@ -702,7 +919,8 @@ impl ChatSessionManager {
         if items.is_empty() {
             return "(暂无共享上下文)".to_string();
         }
-        items.iter()
+        items
+            .iter()
             .enumerate()
             .map(|(index, item)| {
                 let speaker = item
@@ -736,7 +954,12 @@ impl ChatSessionManager {
             .join("\n")
     }
 
-    async fn review_and_persist_prompt(&self, group_id: &str, prompt_type: &str, instruction: &str) -> Result<(String, String)> {
+    async fn review_and_persist_prompt(
+        &self,
+        group_id: &str,
+        prompt_type: &str,
+        instruction: &str,
+    ) -> Result<(String, String)> {
         let current = self.get_group_prompt_status(group_id).await;
         let current_prompt = if prompt_type == "filter" {
             current.filter_prompt
@@ -756,7 +979,11 @@ impl ChatSessionManager {
                         content: Value::String(format!(
                             "群号：{}\n\n目标类型：{}\n\n当前 prompt：\n{}\n\n管理员要求：\n{}",
                             group_id.trim(),
-                            if prompt_type == "filter" { "过滤 prompt" } else { "聊天 prompt" },
+                            if prompt_type == "filter" {
+                                "过滤 prompt"
+                            } else {
+                                "聊天 prompt"
+                            },
                             current_prompt,
                             instruction.trim()
                         )),
@@ -769,7 +996,11 @@ impl ChatSessionManager {
             )
             .await?;
         let parsed = extract_json_object(&raw);
-        if !parsed.get("approved").and_then(Value::as_bool).unwrap_or(true) {
+        if !parsed
+            .get("approved")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+        {
             bail!(
                 "{}",
                 parsed
@@ -785,60 +1016,46 @@ impl ChatSessionManager {
             .filter(|item: &&str| !item.is_empty())
             .ok_or_else(|| anyhow::anyhow!("prompt 审核未返回有效 prompt"))?
             .to_string();
-        let existing = self.runtime_config_store.get_group_qa_override(group_id).await;
+        let existing = self
+            .runtime_config_store
+            .get_group_qa_override(group_id)
+            .await;
         self.runtime_config_store
             .set_group_qa_override(GroupQaOverride {
                 group_id: group_id.trim().to_string(),
                 filter_prompt: if prompt_type == "filter" {
                     prompt.clone()
                 } else {
-                    existing.as_ref().map(|item| item.filter_prompt.clone()).unwrap_or_default()
+                    existing
+                        .as_ref()
+                        .map(|item| item.filter_prompt.clone())
+                        .unwrap_or_default()
                 },
                 answer_prompt: if prompt_type == "answer" {
                     prompt.clone()
                 } else {
-                    existing.as_ref().map(|item| item.answer_prompt.clone()).unwrap_or_default()
+                    existing
+                        .as_ref()
+                        .map(|item| item.answer_prompt.clone())
+                        .unwrap_or_default()
                 },
-                created_at: existing.as_ref().map(|item| item.created_at.clone()).unwrap_or_default(),
+                created_at: existing
+                    .as_ref()
+                    .map(|item| item.created_at.clone())
+                    .unwrap_or_default(),
                 updated_at: String::new(),
             })
             .await?;
         Ok((
             prompt,
-            parsed.get("reason").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
+            parsed
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
         ))
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or_default()
-}
-
-fn event_context_json(context: &EventContext) -> Value {
-    json!({
-        "messageType": context.message_type,
-        "groupId": context.group_id,
-        "userId": context.user_id,
-        "selfId": context.self_id,
-    })
-}
-
-fn chat_input_json(input: &ChatInput) -> Value {
-    json!({
-        "text": input.text,
-        "images": input.images,
-        "historyText": input.history_text,
-        "runtimeContext": {
-            "senderName": input.runtime_context.sender_name,
-            "timelineText": input.runtime_context.timeline_text,
-            "currentMessageId": input.runtime_context.current_message_id,
-            "currentMessageSeq": input.runtime_context.current_message_seq,
-            "currentTime": input.runtime_context.current_time,
-        }
-    })
 }
 
 fn extract_json_object(text: &str) -> Value {
@@ -909,8 +1126,19 @@ fn looks_like_correction_candidate(text: &str) -> bool {
         return false;
     }
     if [
-        "说错", "讲错", "不对", "不是", "纠正", "更正", "其实", "应该", "应为", "而是", "正确",
-        "是指", "指的是",
+        "说错",
+        "讲错",
+        "不对",
+        "不是",
+        "纠正",
+        "更正",
+        "其实",
+        "应该",
+        "应为",
+        "而是",
+        "正确",
+        "是指",
+        "指的是",
     ]
     .iter()
     .any(|pattern| normalized.contains(pattern))
@@ -987,6 +1215,99 @@ fn build_low_information_fallback(source_text: &str, reply_text: &str) -> String
         return "还没定位到具体位置。".to_string();
     }
     "还没定位到具体答案。".to_string()
+}
+
+fn looks_like_group_file_download_request(text: &str) -> bool {
+    let normalized = text.trim().to_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+    let request_like = [
+        "下载",
+        "发一下",
+        "发个",
+        "来个",
+        "来一份",
+        "求",
+        "求发",
+        "能发",
+        "给我",
+        "有没有",
+    ]
+    .iter()
+    .any(|item| normalized.contains(item));
+    let artifact_like = [
+        "release",
+        "asset",
+        "最新版",
+        "latest",
+        "apk",
+        "jar",
+        "zip",
+        "客户端",
+        "安装包",
+        "服务端",
+        "server",
+        "desktop",
+    ]
+    .iter()
+    .any(|item| normalized.contains(item));
+    if request_like && artifact_like {
+        return true;
+    }
+
+    let has_commit = normalized
+        .split_whitespace()
+        .map(|token| token.trim_matches(|ch: char| !ch.is_ascii_hexdigit()))
+        .any(|token| {
+            (7..=40).contains(&token.len()) && token.chars().all(|ch| ch.is_ascii_hexdigit())
+        });
+    let build_like = ["commit", "hash", "sha", "提交", "构建", "编译", "build"]
+        .iter()
+        .any(|item| normalized.contains(item));
+    has_commit && build_like
+}
+
+fn parse_group_file_download_handoff(raw: &str) -> Option<GroupFileDownloadRequest> {
+    let parsed = extract_json_object(raw);
+    if parsed
+        .get("start_group_file_download")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return None;
+    }
+    let request_text = parsed
+        .get("request_text")
+        .or_else(|| parsed.get("requestText"))
+        .or_else(|| parsed.get("query"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let request = parsed
+        .get("request")
+        .cloned()
+        .unwrap_or_else(|| json!({ "request_text": request_text }));
+    let normalized_request_text = if request_text.is_empty() {
+        request
+            .get("request_text")
+            .or_else(|| request.get("text"))
+            .or_else(|| request.get("query"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        request_text
+    };
+    if normalized_request_text.is_empty() {
+        return None;
+    }
+    Some(GroupFileDownloadRequest {
+        request_text: normalized_request_text,
+        request,
+    })
 }
 
 async fn append_memory_entry(path: &Path, entry: &str) -> Result<bool> {

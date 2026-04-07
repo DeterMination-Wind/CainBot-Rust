@@ -2,7 +2,7 @@
 
 当前分支：
 
-- `experiment/rust-runtime`
+- `sync-rust-publish-main`
 
 ## 当前 Rust 模块
 
@@ -21,34 +21,37 @@
 - `rust-src/openai_chat_client.rs`
 - `rust-src/openai_translator.rs`
 - `rust-src/chat_session_manager.rs`
+- `rust-src/reply_markdown_renderer.rs`
 - `rust-src/group_file_download_worker.rs`
+- `rust-src/workflow_agent_manager.rs`
 - `rust-src/issue_repair_manager.rs`
 - `rust-src/codex_bridge_server.rs`
-- `rust-src/qa_session_worker.rs`
-- `rust-src/worker_process.rs`
+- `rust-src/status_dashboard.rs`
 - `rust-src/utils.rs`
 
 ## 当前状态
 
 - `cargo check` 已通过
-- `cargo test` 已通过（当前 11 个消息入口/工具层单测）
+- `cargo test` 已通过（当前 21 个单测）
 - Rust 主入口已经接管 NapCat 事件循环，而不是只有“基础层占位”
 - `request` / `notice` / `message` 三类事件都已经进入 Rust 主循环
-- 启动时会拉起：
+- 启动时会初始化：
   - NapCat HTTP + SSE 客户端
   - OpenAI 兼容聊天客户端
   - 翻译客户端
   - 运行时配置、状态文件、WebUI 同步
   - Codex Bridge Server
+  - WorkflowAgentManager
   - IssueRepairManager
-  - 群文件下载兼容 worker
-  - QA session 兼容 worker（按需懒启动）
+  - Rust 群文件下载工作流
+  - Rust 聊天会话与 Markdown 回复图渲染
 
 ## 已接入的业务能力
 
 - `/help`
 - `/chat`
 - `/tr`
+- `/agent`
 - `/e 状态`
 - `/e 启用`
 - `/e 禁用`
@@ -58,31 +61,29 @@
 - 群内疑问句主动回复判定
 - 低信息回复复审与回退
 - 低信息回复改走群文件下载流程
+- 通用主动工作流 Agent：
+  - 显式 `/agent`
+  - 由聊天链路中途 handoff
+  - 会话持久化、继续跟进、阶段性汇报
 - 关闭 bot 的投票链路（shutdown vote）
 - 自动入群：
   - 直接处理 `request_type=group`
   - 后台轮询群系统消息补捞邀请
 - 群名片同步
 - Issue repair 入口拦截与 Codex bridge 对接
+- Markdown 回复图片 Rust 渲染
 
-## 目前仍是“Rust 主控 + Node 兼容 worker”的部分
+## 当前运行时迁移判断
 
-- `chat_session_manager.rs`
-  - 仍通过 `scripts/rust-qa-session-worker.mjs` 托管一部分会话/审核链路
-- `group_file_download_worker.rs`
-  - 仍通过 `scripts/rust-group-download-worker.mjs` 托管原版超重下载/构建逻辑
+- 就主运行链路而言，当前分支已经不是“Rust 主控 + Node 兼容 worker”
+- 聊天、群文件下载、回复图片渲染、通用 Agent 都已经进入 Rust 运行时
+- 仓库里仍可能保留少量 `.mjs` 辅助脚本或历史工具，但它们不再是当前主运行路径
 
-这意味着当前仓库已经不是“只迁基础层”，但也还不是“100% 纯 Rust 业务层”。
+## 仍未 Rust 化或仍待继续整理的部分
 
-## 还没完成纯 Rust 化的部分
-
-- `msav-map-analyzer.mjs`
-- 群文件下载的大体量 Node 逻辑本体还没重写到 Rust
-- QA session worker 背后的 Node 会话逻辑还没彻底拔掉
-- `codex-readonly-tools.mjs`
-- `local-rag-retriever.mjs`
-- `message_attachment_reader.mjs` 的完整联网/图片混合输入路径
-- `/e` 的 prompt 审核链路和 prompt 生成/改写逻辑
+- 旧 `src/` 下部分历史 `.mjs` 工具尚未完全清理
+- 一些仓库级辅助工具仍不是 Rust 实现
+- 文档与配置说明需要继续随着运行时演进同步
 
 ## 已完成但文档过去写错的地方
 
@@ -90,9 +91,11 @@
 
 - 主循环不再只是事件监听和群邀请占位
 - `codex_bridge_server.rs` 已启动并接线
+- `workflow_agent_manager.rs` 已初始化并参与消息分流
 - `issue_repair_manager.rs` 已初始化并参与消息分流
 - `group_file_download_worker.rs` 已接线并可从消息入口/低信息回退链路触发
 - `chat_session_manager.rs` 已接入主动回复、过滤心跳、低信息复审、长期记忆捕获等业务入口
+- `reply_markdown_renderer.rs` 已承担 Markdown 回复图片生成
 - `shutdown vote` 已接到 notice/message 处理链路
 
 ## 兼容原则
@@ -102,13 +105,4 @@
 - 运行时配置继续兼容 `data/runtime-config.json`
 - WebUI 同步继续兼容 `data/webui-sync.json`
 - NapCat 侧继续走现有 OneBot HTTP + SSE
-- 在纯 Rust 重写完成前，允许局部保留 Node worker 作为兼容桥
-
-## 当前迁移判断
-
-如果只按“入口是否由 Rust 接管”来算，这个分支已经进入“Rust 主运行时”阶段。
-
-如果按“业务逻辑是否完全摆脱 Node 兼容 worker”来算，这个分支仍处于“半迁移完成”阶段：
-
-- Rust 负责主进程、协议、分流、状态和大部分控制逻辑
-- 一部分重量级业务实现仍挂在 Node worker 后面
+- 优先保持 Rust 运行时为单一真实实现，不再新增新的 Node worker 边界

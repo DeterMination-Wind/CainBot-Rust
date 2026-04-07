@@ -6,7 +6,9 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 use serde_json::{Value, json};
 use tokio::fs;
 
-use crate::event_utils::{EventContext, create_context_from_event, get_sender_name, plain_text_from_message};
+use crate::event_utils::{
+    EventContext, create_context_from_event, get_sender_name, plain_text_from_message,
+};
 use crate::message_attachment_reader::{ReadTextFilesResult, read_text_files_from_message};
 use crate::napcat_client::NapCatClient;
 use crate::openai_translator::TranslationInput;
@@ -110,9 +112,11 @@ pub async fn build_chat_input(
     );
     let replied_message = try_get_message(napcat_client, reply_id.as_deref()).await;
 
-    let current_images = extract_openai_images_from_message(event.get("message").unwrap_or(&Value::Null)).await;
+    let current_images =
+        extract_openai_images_from_message(event.get("message").unwrap_or(&Value::Null)).await;
     let reply_images = if let Some(replied_message) = replied_message.as_ref() {
-        extract_openai_images_from_message(replied_message.get("message").unwrap_or(&Value::Null)).await
+        extract_openai_images_from_message(replied_message.get("message").unwrap_or(&Value::Null))
+            .await
     } else {
         Vec::new()
     };
@@ -181,7 +185,10 @@ pub async fn build_chat_input(
     if !reply_text.is_empty() {
         sections.push(format!("引用消息文本：{reply_text}"));
     }
-    sections.extend(format_text_file_sections("当前消息附件文本", &current_files));
+    sections.extend(format_text_file_sections(
+        "当前消息附件文本",
+        &current_files,
+    ));
     sections.extend(format_text_file_sections("引用消息附件文本", &reply_files));
 
     let mut text = sections
@@ -194,7 +201,10 @@ pub async fn build_chat_input(
     if text.is_empty() && !combined_images.is_empty() {
         text = format!("请结合这 {} 张图片回答用户。", combined_images.len());
     } else if !text.is_empty() && !combined_images.is_empty() {
-        text = format!("{text}\n\n请结合附带的 {} 张图片一起回答。", combined_images.len());
+        text = format!(
+            "{text}\n\n请结合附带的 {} 张图片一起回答。",
+            combined_images.len()
+        );
     }
 
     Ok(ChatInput {
@@ -211,7 +221,10 @@ pub async fn build_chat_input(
                 .get("message_seq")
                 .map(value_to_compact_string)
                 .unwrap_or_default(),
-            current_time: event.get("time").and_then(Value::as_i64).unwrap_or_default(),
+            current_time: event
+                .get("time")
+                .and_then(Value::as_i64)
+                .unwrap_or_default(),
         },
         text,
         images: combined_images,
@@ -255,9 +268,11 @@ pub async fn build_translation_input(
     } else {
         ReadTextFilesResult::default()
     };
-    let current_images = extract_openai_images_from_message(event.get("message").unwrap_or(&Value::Null)).await;
+    let current_images =
+        extract_openai_images_from_message(event.get("message").unwrap_or(&Value::Null)).await;
     let reply_images = if let Some(replied_message) = replied_message.as_ref() {
-        extract_openai_images_from_message(replied_message.get("message").unwrap_or(&Value::Null)).await
+        extract_openai_images_from_message(replied_message.get("message").unwrap_or(&Value::Null))
+            .await
     } else {
         Vec::new()
     };
@@ -268,7 +283,10 @@ pub async fn build_translation_input(
     } else if !reply_text.is_empty() {
         parts.push(reply_text);
     }
-    parts.extend(format_text_file_sections("当前消息附件文本", &current_files));
+    parts.extend(format_text_file_sections(
+        "当前消息附件文本",
+        &current_files,
+    ));
     parts.extend(format_text_file_sections("引用消息附件文本", &reply_files));
 
     Ok(TranslationSource {
@@ -292,13 +310,25 @@ fn build_request_context_prefix(context: &EventContext, event: &Value) -> String
     [
         format!(
             "当前请求时间：{}",
-            format_epoch_time(event.get("time").and_then(Value::as_i64).unwrap_or_default())
+            format_epoch_time(
+                event
+                    .get("time")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default()
+            )
         ),
         format!("当前消息来源：{target}"),
-        format!("当前发送者：{} ({})", get_sender_name(event), context.user_id),
+        format!(
+            "当前发送者：{} ({})",
+            get_sender_name(event),
+            context.user_id
+        ),
         format!(
             "当前消息ID：{}",
-            event.get("message_id").map(value_to_compact_string).unwrap_or_else(|| "-".to_string())
+            event
+                .get("message_id")
+                .map(value_to_compact_string)
+                .unwrap_or_else(|| "-".to_string())
         ),
     ]
     .join("\n")
@@ -332,7 +362,10 @@ fn extract_reply_id(message: &Value, raw_message: Option<&str>) -> Option<String
     if let Some(items) = message.as_array()
         && let Some(reply) = items.iter().find(|segment| {
             segment.get("type").and_then(Value::as_str) == Some("reply")
-                && segment.get("data").and_then(|data| data.get("id")).is_some()
+                && segment
+                    .get("data")
+                    .and_then(|data| data.get("id"))
+                    .is_some()
         })
     {
         return reply
@@ -389,7 +422,10 @@ async fn image_segment_to_openai_content(data: &Value) -> Option<Value> {
         if candidate.is_empty() {
             continue;
         }
-        if candidate.starts_with("data:") || candidate.starts_with("http://") || candidate.starts_with("https://") {
+        if candidate.starts_with("data:")
+            || candidate.starts_with("http://")
+            || candidate.starts_with("https://")
+        {
             return Some(json!({
                 "type": "image_url",
                 "image_url": { "url": candidate }
@@ -456,8 +492,8 @@ fn value_to_compact_string(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use serde_json::Value;
+    use serde_json::json;
 
     use super::extract_reply_id;
 

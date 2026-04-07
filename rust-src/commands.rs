@@ -57,6 +57,7 @@ pub fn parse_command(text: &str) -> Option<ParsedCommand> {
         "help" => "help",
         "status" => "status",
         "chat" => "chat",
+        "agent" => "agent",
         "tr" => "translate",
         "e" => "edit",
         _ => return None,
@@ -160,7 +161,10 @@ mod tests {
         let command = parse_command("/chat --group 123 \"hello world\" tail").expect("command");
         assert_eq!(command.name, "chat");
         assert_eq!(command.flags.get("group").map(String::as_str), Some("123"));
-        assert_eq!(command.positionals, vec!["hello world".to_string(), "tail".to_string()]);
+        assert_eq!(
+            command.positionals,
+            vec!["hello world".to_string(), "tail".to_string()]
+        );
     }
 
     #[test]
@@ -184,6 +188,20 @@ mod tests {
     #[test]
     fn tokenizes_quoted_input() {
         let tokens = tokenize_command_line(r#"--name "Cain Bot" 'hello world'"#);
-        assert_eq!(tokens, vec!["--name".to_string(), "Cain Bot".to_string(), "hello world".to_string()]);
+        assert_eq!(
+            tokens,
+            vec![
+                "--name".to_string(),
+                "Cain Bot".to_string(),
+                "hello world".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_agent_command() {
+        let command = parse_command("/agent 帮我把这个任务做完").expect("command");
+        assert_eq!(command.name, "agent");
+        assert_eq!(command.argument, "帮我把这个任务做完");
     }
 }

@@ -11,8 +11,8 @@ use serde_json::{Value, json};
 use tokio::fs;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::logger::Logger;
 use crate::event_utils::EventContext;
+use crate::logger::Logger;
 use crate::utils::{join_url, sleep_ms, split_message_payloads, split_text};
 
 const HISTORY_READ_FAILURE_COOLDOWN_MS: u64 = 15_000;
@@ -141,7 +141,10 @@ impl NapCatClient {
                 }
                 Err(error) => {
                     if is_retryable_read_error(&error) {
-                        extend_cooldown(cooldown_until_ms, current_time_ms().saturating_add(cooldown_ms));
+                        extend_cooldown(
+                            cooldown_until_ms,
+                            current_time_ms().saturating_add(cooldown_ms),
+                        );
                         self.logger
                             .warn(format!(
                                 "NapCat 只读接口进入冷却：bucket={cooldown_label} cooldownMs={cooldown_ms} action={action} error={error:#}"
@@ -179,7 +182,8 @@ impl NapCatClient {
                     if is_retryable_write_error(&error) {
                         extend_cooldown(
                             cooldown_until_ms,
-                            current_time_ms().saturating_add(PRIVATE_FORWARD_SEND_FAILURE_COOLDOWN_MS),
+                            current_time_ms()
+                                .saturating_add(PRIVATE_FORWARD_SEND_FAILURE_COOLDOWN_MS),
                         );
                         self.logger
                             .warn(format!(
@@ -216,7 +220,11 @@ impl NapCatClient {
         .await
     }
 
-    pub async fn send_private_message(&self, user_id: &str, message: impl Into<Value>) -> Result<Value> {
+    pub async fn send_private_message(
+        &self,
+        user_id: &str,
+        message: impl Into<Value>,
+    ) -> Result<Value> {
         let message = message.into();
         if let Some(text) = extract_forwardable_text(&message, self.forward_threshold_chars()) {
             match self.send_private_forward_text(user_id, &text).await {
@@ -248,7 +256,12 @@ impl NapCatClient {
         .await
     }
 
-    pub async fn get_group_member_info(&self, group_id: &str, user_id: &str, no_cache: bool) -> Result<Value> {
+    pub async fn get_group_member_info(
+        &self,
+        group_id: &str,
+        user_id: &str,
+        no_cache: bool,
+    ) -> Result<Value> {
         self.call(
             "get_group_member_info",
             json!({
@@ -355,7 +368,11 @@ impl NapCatClient {
         .await
     }
 
-    pub async fn create_group_file_folder(&self, group_id: &str, folder_name: &str) -> Result<Value> {
+    pub async fn create_group_file_folder(
+        &self,
+        group_id: &str,
+        folder_name: &str,
+    ) -> Result<Value> {
         self.call(
             "create_group_file_folder",
             json!({
@@ -398,21 +415,32 @@ impl NapCatClient {
             .and_then(Value::as_array)
             .and_then(|folders| {
                 folders.iter().find(|folder| {
-                    folder.get("folder_name").and_then(Value::as_str).unwrap_or_default().trim() == normalized_folder
+                    folder
+                        .get("folder_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .trim()
+                        == normalized_folder
                 })
             })
             .and_then(|folder| folder.get("folder_id"))
         {
             return Ok(value_to_string(found));
         }
-        self.create_group_file_folder(group_id, normalized_folder).await?;
+        self.create_group_file_folder(group_id, normalized_folder)
+            .await?;
         let refreshed = self.get_group_root_files(group_id, 500).await?;
         refreshed
             .get("folders")
             .and_then(Value::as_array)
             .and_then(|folders| {
                 folders.iter().find(|folder| {
-                    folder.get("folder_name").and_then(Value::as_str).unwrap_or_default().trim() == normalized_folder
+                    folder
+                        .get("folder_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .trim()
+                        == normalized_folder
                 })
             })
             .and_then(|folder| folder.get("folder_id"))
@@ -435,11 +463,12 @@ impl NapCatClient {
         if !metadata.is_file() {
             bail!("目标不是普通文件：{file_path}");
         }
-        let folder_id = if let Some(folder_name) = folder_name.map(str::trim).filter(|item| !item.is_empty()) {
-            self.ensure_group_folder(group_id, folder_name).await?
-        } else {
-            String::new()
-        };
+        let folder_id =
+            if let Some(folder_name) = folder_name.map(str::trim).filter(|item| !item.is_empty()) {
+                self.ensure_group_folder(group_id, folder_name).await?
+            } else {
+                String::new()
+            };
 
         wait_for_stable_file(file_path, self.config.upload_stable_wait_ms).await?;
         let upload_result = self
@@ -447,11 +476,17 @@ impl NapCatClient {
                 group_id,
                 file_path,
                 file_name,
-                if folder_id.is_empty() { None } else { Some(folder_id.as_str()) },
+                if folder_id.is_empty() {
+                    None
+                } else {
+                    Some(folder_id.as_str())
+                },
             )
             .await?;
         if let Some(notify_text) = notify_text.map(str::trim).filter(|item| !item.is_empty()) {
-            let _ = self.send_group_message(group_id, Value::String(notify_text.to_string())).await?;
+            let _ = self
+                .send_group_message(group_id, Value::String(notify_text.to_string()))
+                .await?;
         }
         Ok(json!({
             "groupId": group_id.trim(),
@@ -491,7 +526,11 @@ impl NapCatClient {
         .await
     }
 
-    pub async fn send_context_message(&self, context: &EventContext, message: impl Into<Value>) -> Result<Value> {
+    pub async fn send_context_message(
+        &self,
+        context: &EventContext,
+        message: impl Into<Value>,
+    ) -> Result<Value> {
         let message = message.into();
         if context.message_type == "group" {
             self.send_group_message(&context.group_id, message).await
@@ -534,9 +573,11 @@ impl NapCatClient {
 
         if sanitized_text.chars().count() > self.forward_threshold_chars() {
             let forwarded = if message_type == "group" {
-                self.send_group_forward_text(target_id, &sanitized_text).await
+                self.send_group_forward_text(target_id, &sanitized_text)
+                    .await
             } else {
-                self.send_private_forward_text(target_id, &sanitized_text).await
+                self.send_private_forward_text(target_id, &sanitized_text)
+                    .await
             };
             match forwarded {
                 Ok(result) => return Ok(vec![result]),
@@ -547,9 +588,15 @@ impl NapCatClient {
                 }
             }
         }
-        for (index, part) in split_message_payloads(&sanitized_text, 1_400, enable_mentions).into_iter().enumerate() {
+        for (index, part) in split_message_payloads(&sanitized_text, 1_400, enable_mentions)
+            .into_iter()
+            .enumerate()
+        {
             let use_reply = index == 0
-                && reply_to_message_id.map(str::trim).filter(|item| !item.is_empty()).is_some();
+                && reply_to_message_id
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .is_some();
             let plain_message = normalize_plain_text_payload(part.clone(), enable_mentions);
             let message = if use_reply {
                 attach_reply_segment(part, reply_to_message_id)
@@ -559,7 +606,11 @@ impl NapCatClient {
             let result = if message_type == "group" {
                 match self.send_group_message(target_id, message).await {
                     Ok(result) => result,
-                    Err(error) if use_reply && (is_missing_reply_target_error(&error) || is_reply_send_rejected_error(&error)) => {
+                    Err(error)
+                        if use_reply
+                            && (is_missing_reply_target_error(&error)
+                                || is_reply_send_rejected_error(&error)) =>
+                    {
                         self.logger
                             .warn(format!("引用回复发送失败，回退为普通消息发送：{error:#}"))
                             .await;
@@ -625,7 +676,10 @@ impl NapCatClient {
             &self.config.event_base_url
         };
         let url = join_url(event_base, &self.config.event_path)?;
-        let mut request = self.event_client.get(url).header("Accept", "text/event-stream");
+        let mut request = self
+            .event_client
+            .get(url)
+            .header("Accept", "text/event-stream");
         for (key, value) in &self.config.headers {
             request = request.header(key, value);
         }
@@ -689,7 +743,10 @@ impl NapCatClient {
 }
 
 fn attach_reply_segment(payload: Value, reply_to_message_id: Option<&str>) -> Value {
-    let Some(message_id) = reply_to_message_id.map(str::trim).filter(|item| !item.is_empty()) else {
+    let Some(message_id) = reply_to_message_id
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    else {
         return payload;
     };
     let mut segments = vec![json!({
@@ -769,7 +826,12 @@ fn cooldown_remaining_ms(cooldown_until_ms: &AtomicU64) -> u64 {
 fn extend_cooldown(cooldown_until_ms: &AtomicU64, target_until_ms: u64) {
     let mut current = cooldown_until_ms.load(Ordering::SeqCst);
     while current < target_until_ms {
-        match cooldown_until_ms.compare_exchange(current, target_until_ms, Ordering::SeqCst, Ordering::SeqCst) {
+        match cooldown_until_ms.compare_exchange(
+            current,
+            target_until_ms,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
             Ok(_) => return,
             Err(actual) => current = actual,
         }
@@ -835,12 +897,14 @@ fn flatten_message_text(message: &Value) -> String {
                 None
             })
             .collect::<String>(),
-        Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("text") => object
-            .get("data")
-            .and_then(|data| data.get("text"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        Value::Object(object) if object.get("type").and_then(Value::as_str) == Some("text") => {
+            object
+                .get("data")
+                .and_then(|data| data.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        }
         _ => String::new(),
     }
 }

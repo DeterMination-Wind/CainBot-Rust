@@ -82,8 +82,9 @@ impl WebUiSyncStore {
     pub async fn load(&self) -> Result<()> {
         match fs::read_to_string(&self.file_path).await {
             Ok(text) => {
-                let parsed: WebUiSyncData = serde_json::from_str(&text)
-                    .with_context(|| format!("解析 WebUI 同步文件失败: {}", self.file_path.display()))?;
+                let parsed: WebUiSyncData = serde_json::from_str(&text).with_context(|| {
+                    format!("解析 WebUI 同步文件失败: {}", self.file_path.display())
+                })?;
                 *self.state.lock().await = parsed;
                 self.apply_journal().await?;
                 Ok(())
@@ -92,7 +93,8 @@ impl WebUiSyncStore {
                 self.apply_journal().await?;
                 self.save().await
             }
-            Err(error) => Err(error).with_context(|| format!("读取 WebUI 同步文件失败: {}", self.file_path.display())),
+            Err(error) => Err(error)
+                .with_context(|| format!("读取 WebUI 同步文件失败: {}", self.file_path.display())),
         }
     }
 
@@ -100,7 +102,11 @@ impl WebUiSyncStore {
     pub async fn upsert_msav_task(&self, task: MsavTask) -> Result<MsavTask> {
         let normalized = normalize_task(task)?;
         let mut state = self.state.lock().await;
-        if let Some(index) = state.msav_tasks.iter().position(|item| item.id == normalized.id) {
+        if let Some(index) = state
+            .msav_tasks
+            .iter()
+            .position(|item| item.id == normalized.id)
+        {
             let existing = &mut state.msav_tasks[index];
             *existing = MsavTask {
                 updated_at: now_iso(),
@@ -115,11 +121,15 @@ impl WebUiSyncStore {
                 },
             );
         }
-        state.msav_tasks.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        state
+            .msav_tasks
+            .sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
         state.msav_tasks.truncate(200);
         drop(state);
-        self.append_journal(&WebUiJournalOp::UpsertMsavTask { task: normalized.clone() })
-            .await?;
+        self.append_journal(&WebUiJournalOp::UpsertMsavTask {
+            task: normalized.clone(),
+        })
+        .await?;
         Ok(normalized)
     }
 
@@ -137,7 +147,9 @@ impl WebUiSyncStore {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(error).with_context(|| format!("删除 WebUI journal 失败: {}", self.journal_path.display()));
+                return Err(error).with_context(|| {
+                    format!("删除 WebUI journal 失败: {}", self.journal_path.display())
+                });
             }
         }
         Ok(())
@@ -148,7 +160,9 @@ impl WebUiSyncStore {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => {
-                return Err(error).with_context(|| format!("读取 WebUI journal 失败: {}", self.journal_path.display()));
+                return Err(error).with_context(|| {
+                    format!("读取 WebUI journal 失败: {}", self.journal_path.display())
+                });
             }
         };
         let reader = BufReader::new(journal_file);
@@ -157,8 +171,9 @@ impl WebUiSyncStore {
             if line.trim().is_empty() {
                 continue;
             }
-            let op: WebUiJournalOp = serde_json::from_str(&line)
-                .with_context(|| format!("解析 WebUI journal 失败: {}", self.journal_path.display()))?;
+            let op: WebUiJournalOp = serde_json::from_str(&line).with_context(|| {
+                format!("解析 WebUI journal 失败: {}", self.journal_path.display())
+            })?;
             let mut state = self.state.lock().await;
             apply_webui_journal_op(&mut state, op)?;
         }
@@ -246,12 +261,18 @@ fn apply_webui_journal_op(state: &mut WebUiSyncData, op: WebUiJournalOp) -> Resu
     match op {
         WebUiJournalOp::UpsertMsavTask { task } => {
             let normalized = normalize_task(task)?;
-            if let Some(index) = state.msav_tasks.iter().position(|item| item.id == normalized.id) {
+            if let Some(index) = state
+                .msav_tasks
+                .iter()
+                .position(|item| item.id == normalized.id)
+            {
                 state.msav_tasks[index] = normalized;
             } else {
                 state.msav_tasks.insert(0, normalized);
             }
-            state.msav_tasks.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            state
+                .msav_tasks
+                .sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
             state.msav_tasks.truncate(200);
             Ok(())
         }

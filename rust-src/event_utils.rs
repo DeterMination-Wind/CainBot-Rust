@@ -22,18 +22,33 @@ pub fn create_context_from_event(event: &Value) -> EventContext {
         group_id: if message_type == "group" {
             event
                 .get("group_id")
-                .and_then(|value| value.as_i64().map(|item| item.to_string()).or_else(|| value.as_str().map(ToString::to_string)))
+                .and_then(|value| {
+                    value
+                        .as_i64()
+                        .map(|item| item.to_string())
+                        .or_else(|| value.as_str().map(ToString::to_string))
+                })
                 .unwrap_or_default()
         } else {
             String::new()
         },
         user_id: event
             .get("user_id")
-            .and_then(|value| value.as_i64().map(|item| item.to_string()).or_else(|| value.as_str().map(ToString::to_string)))
+            .and_then(|value| {
+                value
+                    .as_i64()
+                    .map(|item| item.to_string())
+                    .or_else(|| value.as_str().map(ToString::to_string))
+            })
             .unwrap_or_default(),
         self_id: event
             .get("self_id")
-            .and_then(|value| value.as_i64().map(|item| item.to_string()).or_else(|| value.as_str().map(ToString::to_string)))
+            .and_then(|value| {
+                value
+                    .as_i64()
+                    .map(|item| item.to_string())
+                    .or_else(|| value.as_str().map(ToString::to_string))
+            })
             .unwrap_or_default(),
         message_type,
     }
@@ -48,7 +63,8 @@ pub fn get_sender_name(event: &Value) -> String {
         .filter(|item| !item.is_empty())
         .or_else(|| {
             event.get("user_id").and_then(|value| {
-                value.as_i64()
+                value
+                    .as_i64()
                     .map(|item| item.to_string())
                     .or_else(|| value.as_str().map(ToString::to_string))
             })
@@ -91,7 +107,12 @@ pub fn plain_text_from_message(message: &Value, raw_message: Option<&str>) -> St
 pub fn event_mentions_self(event: &Value, bot_display_name: &str) -> bool {
     let self_id = event
         .get("self_id")
-        .and_then(|value| value.as_i64().map(|item| item.to_string()).or_else(|| value.as_str().map(ToString::to_string)))
+        .and_then(|value| {
+            value
+                .as_i64()
+                .map(|item| item.to_string())
+                .or_else(|| value.as_str().map(ToString::to_string))
+        })
         .unwrap_or_default();
     if !self_id.is_empty() {
         let segments = normalize_message_segments(event.get("message").unwrap_or(&Value::Null));
@@ -100,13 +121,21 @@ pub fn event_mentions_self(event: &Value, bot_display_name: &str) -> bool {
                 && segment
                     .get("data")
                     .and_then(|data| data.get("qq"))
-                    .and_then(|value| value.as_i64().map(|item| item.to_string()).or_else(|| value.as_str().map(ToString::to_string)))
+                    .and_then(|value| {
+                        value
+                            .as_i64()
+                            .map(|item| item.to_string())
+                            .or_else(|| value.as_str().map(ToString::to_string))
+                    })
                     .map(|qq| qq == self_id)
                     .unwrap_or(false)
         }) {
             return true;
         }
-        let raw_message = event.get("raw_message").and_then(Value::as_str).unwrap_or_default();
+        let raw_message = event
+            .get("raw_message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if raw_message.contains(&format!("[CQ:at,qq={self_id}")) {
             return true;
         }
@@ -117,7 +146,12 @@ pub fn event_mentions_self(event: &Value, bot_display_name: &str) -> bool {
 pub fn event_mentions_other_user(event: &Value, bot_display_name: &str) -> bool {
     let self_id = event
         .get("self_id")
-        .and_then(|value| value.as_i64().map(|item| item.to_string()).or_else(|| value.as_str().map(ToString::to_string)))
+        .and_then(|value| {
+            value
+                .as_i64()
+                .map(|item| item.to_string())
+                .or_else(|| value.as_str().map(ToString::to_string))
+        })
         .unwrap_or_default();
     for segment in normalize_message_segments(event.get("message").unwrap_or(&Value::Null)) {
         if segment.get("type").and_then(Value::as_str) != Some("at") {
@@ -126,7 +160,12 @@ pub fn event_mentions_other_user(event: &Value, bot_display_name: &str) -> bool 
         let qq = segment
             .get("data")
             .and_then(|data| data.get("qq"))
-            .and_then(|value| value.as_i64().map(|item| item.to_string()).or_else(|| value.as_str().map(ToString::to_string)))
+            .and_then(|value| {
+                value
+                    .as_i64()
+                    .map(|item| item.to_string())
+                    .or_else(|| value.as_str().map(ToString::to_string))
+            })
             .unwrap_or_default();
         if !qq.is_empty() && qq != self_id {
             return true;
@@ -156,19 +195,60 @@ pub fn is_question_intent_text(text: &str) -> bool {
     if compact.contains('?') || compact.contains('？') {
         return true;
     }
-    if ["谁", "什么", "怎么", "咋", "如何", "为什么", "为啥", "哪里", "哪儿", "哪个", "哪位", "是否", "是不是"]
-        .iter()
-        .any(|prefix| compact.starts_with(prefix))
+    if [
+        "谁",
+        "什么",
+        "怎么",
+        "咋",
+        "如何",
+        "为什么",
+        "为啥",
+        "哪里",
+        "哪儿",
+        "哪个",
+        "哪位",
+        "是否",
+        "是不是",
+    ]
+    .iter()
+    .any(|prefix| compact.starts_with(prefix))
     {
         return true;
     }
     [
-        "请问", "求问", "求助", "求解", "请教", "帮忙", "help", "报错", "错误", "bug", "故障",
-        "没反应", "不生效", "无效", "失效", "什么意思", "是什么", "是啥", "怎么弄", "怎么做",
-        "怎么打", "怎么过", "怎么配", "怎么改", "在哪", "还是",
+        "请问",
+        "求问",
+        "求助",
+        "求解",
+        "请教",
+        "帮忙",
+        "help",
+        "报错",
+        "错误",
+        "bug",
+        "故障",
+        "没反应",
+        "不生效",
+        "无效",
+        "失效",
+        "什么意思",
+        "是什么",
+        "是啥",
+        "怎么弄",
+        "怎么做",
+        "怎么打",
+        "怎么过",
+        "怎么配",
+        "怎么改",
+        "在哪",
+        "还是",
     ]
     .iter()
-    .any(|needle| compact.to_ascii_lowercase().contains(&needle.to_ascii_lowercase()))
+    .any(|needle| {
+        compact
+            .to_ascii_lowercase()
+            .contains(&needle.to_ascii_lowercase())
+    })
 }
 
 pub fn parse_command_from_event(event: &Value) -> Option<ParsedCommand> {
@@ -182,6 +262,7 @@ pub fn build_help_text(bot_display_name: &str) -> String {
         "/status 发送 btop 实时状态截图（1280x1280）".to_string(),
         "#status 同 /status".to_string(),
         "/chat <问题> 显式发起问答".to_string(),
+        "/agent <任务> 显式拉起主动工作流".to_string(),
         "/tr <文本> 翻译文本或结合引用消息翻译".to_string(),
         "/e 状态 查看当前群开关与 prompt 状态".to_string(),
         "/e 过滤 <要求> 修改过滤 prompt".to_string(),
@@ -198,7 +279,10 @@ pub fn ensure_message_event(event: &Value) -> Result<bool> {
 }
 
 fn normalize_message_segments(message: &Value) -> Vec<&Value> {
-    message.as_array().map(|items| items.iter().collect()).unwrap_or_default()
+    message
+        .as_array()
+        .map(|items| items.iter().collect())
+        .unwrap_or_default()
 }
 
 fn strip_cq_codes(text: &str) -> String {
@@ -236,7 +320,12 @@ fn text_looks_like_direct_bot_mention(text: &str, display_name: &str) -> bool {
     }
     for token in normalized_text.split_whitespace() {
         let stripped = token
-            .trim_matches(|ch: char| matches!(ch, ':' | '：' | ',' | '，' | '.' | '。' | '!' | '！' | '?' | '？'))
+            .trim_matches(|ch: char| {
+                matches!(
+                    ch,
+                    ':' | '：' | ',' | '，' | '.' | '。' | '!' | '！' | '?' | '？'
+                )
+            })
             .trim_start_matches('@')
             .trim_start_matches('>');
         if stripped.eq_ignore_ascii_case(normalized_display_name) {
@@ -250,7 +339,10 @@ fn text_looks_like_direct_bot_mention(text: &str, display_name: &str) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{event_mentions_other_user, event_mentions_self, is_question_intent_text, plain_text_from_event};
+    use super::{
+        event_mentions_other_user, event_mentions_self, is_question_intent_text,
+        plain_text_from_event,
+    };
 
     #[test]
     fn detects_self_mention_from_segment() {
