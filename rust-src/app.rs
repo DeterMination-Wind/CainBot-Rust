@@ -755,7 +755,7 @@ async fn handle_message_event(
                         },
                     )
                     .await?;
-                    let result = chat_session_manager.chat(&context, &input).await?;
+                    let result = chat_session_manager.chat(&context, &input, "fallback").await?;
                     send_chat_result_if_present(
                         chat_session_manager,
                         logger,
@@ -767,7 +767,6 @@ async fn handle_message_event(
                         reply_message_id.as_deref(),
                         &result,
                         &text,
-                        "fallback",
                     )
                     .await?;
                     let _ = qa_client;
@@ -813,7 +812,7 @@ async fn handle_message_event(
                             },
                         )
                         .await?;
-                        let result = chat_session_manager.chat(&context, &input).await?;
+                        let result = chat_session_manager.chat(&context, &input, "suppress").await?;
                         send_chat_result_if_present(
                             chat_session_manager,
                             logger,
@@ -825,7 +824,6 @@ async fn handle_message_event(
                             reply_message_id.as_deref(),
                             &result,
                             &text,
-                            "suppress",
                         )
                         .await?;
                         chat_session_manager
@@ -963,7 +961,9 @@ async fn execute_command(
                 ))
                 .await;
             let source_text = chat_input.runtime_context.timeline_text.clone();
-            let result = chat_session_manager.chat(context, &chat_input).await?;
+            let result = chat_session_manager
+                .chat(context, &chat_input, "fallback")
+                .await?;
             send_chat_result_if_present(
                 chat_session_manager,
                 logger,
@@ -975,7 +975,6 @@ async fn execute_command(
                 reply_message_id,
                 &result,
                 &source_text,
-                "fallback",
             )
             .await?;
         }
@@ -1618,7 +1617,6 @@ async fn send_chat_result_if_present(
     reply_message_id: Option<&str>,
     result: &crate::chat_session_manager::ChatResult,
     source_text: &str,
-    on_low_information: &str,
 ) -> Result<()> {
     let target_id = if context.message_type == "group" {
         context.group_id.as_str()
@@ -1683,76 +1681,19 @@ async fn send_chat_result_if_present(
         return Ok(());
     }
 
+    if result.notice == "review-suppressed" {
+        return Ok(());
+    }
+
+    if result.text.trim().is_empty() {
+        return Ok(());
+    }
+
     if let Some(workflow_agent_manager) = workflow_agent_manager
         && workflow_agent_manager
             .maybe_handoff_from_chat(context, event, source_text, &result.text)
             .await?
     {
-        return Ok(());
-    }
-
-    if result.notice == "review-suppressed" {
-        return Ok(());
-    }
-
-    if result.notice == "low-information-reviewed" {
-        if result.text.trim().is_empty() {
-            return Ok(());
-        }
-        reply_text_with_markdown_image(
-            chat_session_manager,
-            napcat_client,
-            logger,
-            context,
-            target_id,
-            reply_message_id,
-            &result.text,
-        )
-        .await?;
-        return Ok(());
-    }
-
-    let review = chat_session_manager
-        .review_low_information_reply(source_text, &result.text, on_low_information)
-        .await?;
-    if review.start_group_file_download && context.message_type == "group" {
-        let request_text = if review.request_text.trim().is_empty() {
-            source_text.trim().to_string()
-        } else {
-            review.request_text.trim().to_string()
-        };
-        let handoff = group_file_download_worker
-            .start_group_download_flow_from_tool(
-                context,
-                reply_message_id.unwrap_or_default(),
-                &request_text,
-                &json!({ "request_text": request_text }),
-            )
-            .await?;
-        if handoff.get("started").and_then(Value::as_bool) == Some(true) {
-            return Ok(());
-        }
-        if let Some(reason) = handoff
-            .get("reason")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-        {
-            reply_text_with_markdown_image(
-                chat_session_manager,
-                napcat_client,
-                logger,
-                context,
-                target_id,
-                reply_message_id,
-                reason,
-            )
-            .await?;
-        }
-        return Ok(());
-    }
-
-    if review.text.trim().is_empty() {
         return Ok(());
     }
 
@@ -1763,7 +1704,7 @@ async fn send_chat_result_if_present(
         context,
         target_id,
         reply_message_id,
-        &review.text,
+        &result.text,
     )
     .await?;
     Ok(())

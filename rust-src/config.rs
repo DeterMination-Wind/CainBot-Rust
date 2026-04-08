@@ -341,15 +341,15 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
             codex_command: get_string(&raw, &["issueRepair", "codexCommand"])
                 .unwrap_or_else(|| "codex".to_string()),
             model: get_string(&raw, &["issueRepair", "model"])
-                .unwrap_or_else(|| "gpt-5.4-high".to_string()),
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
             classify_model: get_string(&raw, &["issueRepair", "classifyModel"])
-                .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
             consent_model: get_string(&raw, &["issueRepair", "consentModel"])
-                .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
             followup_model: get_string(&raw, &["issueRepair", "followupModel"])
-                .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
             satisfaction_model: get_string(&raw, &["issueRepair", "satisfactionModel"])
-                .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
             publish_group_id: get_string(&raw, &["issueRepair", "publishGroupId"])
                 .unwrap_or_default(),
             offer_group_ids: get_array_of_strings(&raw, &["issueRepair", "offerGroupIds"]),
@@ -371,13 +371,13 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
             codex_command: get_string(&raw, &["workflowAgent", "codexCommand"])
                 .unwrap_or_else(|| "codex".to_string()),
             model: get_string(&raw, &["workflowAgent", "model"])
-                .unwrap_or_else(|| "gpt-5.4-high".to_string()),
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
             classify_model: get_string(&raw, &["workflowAgent", "classifyModel"])
-                .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
             followup_model: get_string(&raw, &["workflowAgent", "followupModel"])
-                .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
             satisfaction_model: get_string(&raw, &["workflowAgent", "satisfactionModel"])
-                .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
             codex_timeout_ms: get_i64(&raw, &["workflowAgent", "codexTimeoutMs"])
                 .unwrap_or(1_800_000)
                 .max(60_000) as u64,
@@ -385,7 +385,7 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
         translation: TranslationConfig {
             enabled: get_bool(&raw, &["translation", "enabled"]).unwrap_or(true),
             model: get_string(&raw, &["translation", "model"])
-                .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
             target_language: get_string(&raw, &["translation", "targetLanguage"])
                 .unwrap_or_else(|| "简体中文".to_string()),
             temperature: get_f64(&raw, &["translation", "temperature"]).unwrap_or(0.2),
@@ -420,7 +420,7 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
                 api_key: get_string(&raw, &["qa", "apiKey"])
                     .unwrap_or_else(|| shared_ai_api_key.clone()),
                 model: get_string(&raw, &["qa", "answer", "model"])
-                    .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                    .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
                 temperature: get_f64(&raw, &["qa", "answer", "temperature"]).unwrap_or(0.4),
                 request_timeout_ms: get_i64(&raw, &["qa", "requestTimeoutMs"]).unwrap_or(90_000)
                     as u64,
@@ -438,17 +438,17 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
             },
             filter: QaFilterConfig {
                 model: get_string(&raw, &["qa", "filter", "model"])
-                    .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                    .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
                 prompt: filter_prompt,
             },
             prompt_review: QaPromptReviewConfig {
                 model: get_string(&raw, &["qa", "promptReview", "model"])
-                    .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                    .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
                 system_prompt: prompt_review_prompt,
             },
             answer: QaAnswerConfig {
                 model: get_string(&raw, &["qa", "answer", "model"])
-                    .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                    .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
                 temperature: get_f64(&raw, &["qa", "answer", "temperature"]).unwrap_or(0.4),
                 max_context_chars: get_i64(&raw, &["qa", "answer", "maxContextChars"])
                     .unwrap_or(80_000)
@@ -518,7 +518,7 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
             },
             topic_closure: QaTopicClosureConfig {
                 model: get_string(&raw, &["qa", "topicClosure", "model"])
-                    .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                    .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
                 temperature: get_f64(&raw, &["qa", "topicClosure", "temperature"]).unwrap_or(0.2),
                 idle_minutes: get_i64(&raw, &["qa", "topicClosure", "idleMinutes"])
                     .unwrap_or(15)
@@ -531,7 +531,7 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
             hallucination_check: QaHallucinationCheckConfig {
                 enabled: get_bool(&raw, &["qa", "hallucinationCheck", "enabled"]).unwrap_or(false),
                 model: get_string(&raw, &["qa", "hallucinationCheck", "model"])
-                    .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                    .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
                 max_tool_rounds: get_i64(&raw, &["qa", "hallucinationCheck", "maxToolRounds"])
                     .unwrap_or(3)
                     .max(1) as usize,
@@ -539,9 +539,9 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
                     .unwrap_or(0.1),
             },
             shutdown_vote_filter_model: get_string(&raw, &["qa", "shutdownVoteFilterModel"])
-                .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
             low_information_filter_model: get_string(&raw, &["qa", "lowInformationFilterModel"])
-                .unwrap_or_else(|| "gpt-5.4-mini".to_string()),
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
         },
     };
 

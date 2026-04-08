@@ -35,11 +35,11 @@
     "ownerName": "DeterMination",
     "codexRoot": "../codex",
     "codexCommand": "codex",
-    "model": "gpt-5.4-high",
-    "classifyModel": "gpt-5.4-mini",
-    "consentModel": "gpt-5.4-mini",
-    "followupModel": "gpt-5.4-mini",
-    "satisfactionModel": "gpt-5.4-mini",
+    "model": "gpt-5.3-codex",
+    "classifyModel": "gpt-5.3-codex",
+    "consentModel": "gpt-5.3-codex",
+    "followupModel": "gpt-5.3-codex",
+    "satisfactionModel": "gpt-5.3-codex",
     "publishGroupId": "188709300",
     "offerGroupIds": [
       "188709300"
@@ -54,10 +54,10 @@
     "triggerGroupIds": [],
     "workDir": ".",
     "codexCommand": "codex",
-    "model": "gpt-5.4-high",
-    "classifyModel": "gpt-5.4-mini",
-    "followupModel": "gpt-5.4-mini",
-    "satisfactionModel": "gpt-5.4-mini",
+    "model": "gpt-5.3-codex",
+    "classifyModel": "gpt-5.3-codex",
+    "followupModel": "gpt-5.3-codex",
+    "satisfactionModel": "gpt-5.3-codex",
     "codexTimeoutMs": 1800000
   },
   "ai": {
@@ -66,7 +66,7 @@
   },
   "translation": {
     "enabled": true,
-    "model": "gpt-5.4-mini",
+    "model": "gpt-5.3-codex",
     "targetLanguage": "简体中文",
     "temperature": 0.2,
     "promptFile": "./prompts/translation-system-prompt.txt"
@@ -86,15 +86,15 @@
     "failureCooldownMs": 60000,
     "failureCooldownThreshold": 2,
     "filter": {
-      "model": "gpt-5.4-mini",
+      "model": "gpt-5.3-codex",
       "promptFile": "./prompts/qa-filter-prompt.txt"
     },
     "promptReview": {
-      "model": "gpt-5.4-mini",
+      "model": "gpt-5.3-codex",
       "promptFile": "./prompts/qa-prompt-review.txt"
     },
     "answer": {
-      "model": "gpt-5.4-mini",
+      "model": "gpt-5.3-codex",
       "temperature": 0.4,
       "maxContextChars": 80000,
       "maxToolRounds": 4,
@@ -144,7 +144,7 @@
       }
     },
     "topicClosure": {
-      "model": "gpt-5.4-mini",
+      "model": "gpt-5.3-codex",
       "temperature": 0.2,
       "idleMinutes": 15,
       "messageWindow": 30,
@@ -152,7 +152,7 @@
     },
     "hallucinationCheck": {
       "enabled": true,
-      "model": "openai/gpt-oss-120b",
+      "model": "gpt-5.3-codex",
       "maxToolRounds": 3,
       "temperature": 0.1
     }
