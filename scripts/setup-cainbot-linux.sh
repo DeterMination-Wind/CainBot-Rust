@@ -32,6 +32,7 @@ EOF
 chmod 644 "${PROFILE_FILE}"
 
 mkdir -p "${PROJECT_DIR}/data/logs"
+sed -i 's/\r$//' "${PROJECT_DIR}/run-cain-bot.sh"
 chmod +x "${PROJECT_DIR}/run-cain-bot.sh"
 
 cat > "${SERVICE_FILE}" <<EOF
@@ -42,6 +43,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=${PROJECT_DIR}
+Environment=HOME=/root
 Environment=PATH=/opt/node24/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=${PROJECT_DIR}/run-cain-bot.sh
 Restart=always
@@ -53,5 +55,6 @@ EOF
 
 systemctl daemon-reload
 echo "Node 已安装到 ${NODE_LINK}"
+echo "run-cain-bot.sh 已标准化为 LF 并授予执行权限"
 echo "systemd 服务文件已写入 ${SERVICE_FILE}"
 echo "接下来可执行：systemctl enable --now cainbot"
