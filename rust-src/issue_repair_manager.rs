@@ -414,6 +414,7 @@ impl IssueRepairManager {
                 CompleteOptions {
                     model: Some(self.config.classify_model.clone()),
                     temperature: Some(0.1),
+                    allow_expensive_fallback: false,
                 },
             )
             .await?;
@@ -455,6 +456,7 @@ impl IssueRepairManager {
                 CompleteOptions {
                     model: Some(self.config.consent_model.clone()),
                     temperature: Some(0.1),
+                    allow_expensive_fallback: false,
                 },
             )
             .await?;
@@ -587,6 +589,7 @@ impl IssueRepairManager {
                     CompleteOptions {
                         model: Some(self.config.followup_model.clone()),
                         temperature: Some(0.1),
+                        allow_expensive_fallback: false,
                     },
                 )
                 .await?;
@@ -690,6 +693,7 @@ impl IssueRepairManager {
                 CompleteOptions {
                     model: Some(self.config.satisfaction_model.clone()),
                     temperature: Some(0.1),
+                    allow_expensive_fallback: false,
                 },
             )
             .await?;

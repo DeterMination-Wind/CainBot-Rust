@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::chat_session_manager::ChatSessionManager;
 use crate::codex_bridge_server::CodexBridgeServer;
-use crate::config::{Config, load_config};
+use crate::config::{ChatProviderConfig, Config, load_config};
 use crate::event_utils::{
     build_help_text, create_context_from_event, ensure_message_event, event_mentions_other_user,
     event_mentions_self, get_sender_name, is_question_intent_text, parse_command_from_event,
@@ -21,7 +21,7 @@ use crate::issue_repair_manager::IssueRepairManager;
 use crate::logger::Logger;
 use crate::message_input::{BuildChatInputOptions, build_chat_input, build_translation_input};
 use crate::napcat_client::{NapCatClient, NapCatClientConfig};
-use crate::openai_chat_client::{OpenAiChatClient, OpenAiChatClientConfig};
+use crate::openai_chat_client::{OpenAiChatClient, OpenAiChatClientConfig, OpenAiProviderConfig};
 use crate::openai_translator::{OpenAiTranslator, OpenAiTranslatorConfig};
 use crate::runtime_config_store::{RuntimeConfigDefaults, RuntimeConfigStore};
 use crate::state_store::StateStore;
@@ -41,7 +41,7 @@ const TOPUP_RESULT_RECEIVER_USER_ID: &str = "2712706502";
 const TOPUP_CODE_LENGTH_SAMPLE: &str = "221d10a8549244c0bc087a14d1210659";
 const TOPUP_CODE_EXPECTED_LENGTH: usize = TOPUP_CODE_LENGTH_SAMPLE.len();
 const TOPUP_API_BASE_URL: &str = "http://new.xem8k5.top:3000";
-const TOPUP_API_TOKEN: &str = "lWQz89o/Hbuu0Pk2rYpPlSL8aDJxRws=";
+const TOPUP_API_TOKEN: &str = "S379n+GJkVaxLyMG7Kfb5Jc4+uoUDg==";
 const TOPUP_API_USER_ID: &str = "11";
 
 pub struct AppRuntime {
@@ -125,18 +125,30 @@ impl AppRuntime {
 
         // 可选服务按配置启用，避免“入口一启动就把所有重量级模块常驻进内存”。
         let qa_client = if config.qa.client.enabled {
+            let (primary_provider, alternate_providers) =
+                build_qa_provider_priority(&config.qa.client);
             Some(OpenAiChatClient::new(
                 OpenAiChatClientConfig {
                     enabled: config.qa.client.enabled,
-                    base_url: config.qa.client.base_url.clone(),
-                    api_key: config.qa.client.api_key.clone(),
-                    model: config.qa.client.model.clone(),
-                    temperature: config.qa.client.temperature,
-                    request_timeout_ms: config.qa.client.request_timeout_ms,
-                    retry_attempts: config.qa.client.retry_attempts,
-                    retry_delay_ms: config.qa.client.retry_delay_ms,
-                    failure_cooldown_ms: config.qa.client.failure_cooldown_ms,
-                    failure_cooldown_threshold: config.qa.client.failure_cooldown_threshold,
+                    provider_label: primary_provider.name.clone(),
+                    prefer_provider_model: !config.qa.client.provider_priority.is_empty(),
+                    base_url: primary_provider.base_url,
+                    api_key: primary_provider.api_key,
+                    model: primary_provider.model,
+                    temperature: primary_provider.temperature,
+                    request_timeout_ms: primary_provider.request_timeout_ms,
+                    retry_attempts: primary_provider.retry_attempts,
+                    retry_delay_ms: primary_provider.retry_delay_ms,
+                    failure_cooldown_ms: primary_provider.failure_cooldown_ms,
+                    failure_cooldown_threshold: primary_provider.failure_cooldown_threshold,
+                    alternate_providers,
+                    expensive_fallback_base_url: config
+                        .qa
+                        .client
+                        .expensive_fallback_base_url
+                        .clone(),
+                    expensive_fallback_api_key: config.qa.client.expensive_fallback_api_key.clone(),
+                    expensive_fallback_model: config.qa.client.expensive_fallback_model.clone(),
                 },
                 logger.clone(),
             )?)
@@ -427,6 +439,50 @@ impl AppRuntime {
         codex_bridge_server.stop().await?;
         self.logger.flush().await?;
         Ok(())
+    }
+}
+
+fn build_qa_provider_priority(
+    client: &crate::config::ChatClientConfig,
+) -> (OpenAiProviderConfig, Vec<OpenAiProviderConfig>) {
+    let providers = if client.provider_priority.is_empty() {
+        vec![build_openai_provider_from_client(client, None)]
+    } else {
+        client
+            .provider_priority
+            .iter()
+            .map(|provider| build_openai_provider_from_client(client, Some(provider)))
+            .collect::<Vec<_>>()
+    };
+    let primary = providers
+        .first()
+        .cloned()
+        .unwrap_or_else(|| build_openai_provider_from_client(client, None));
+    let alternates = providers.into_iter().skip(1).collect::<Vec<_>>();
+    (primary, alternates)
+}
+
+fn build_openai_provider_from_client(
+    client: &crate::config::ChatClientConfig,
+    provider: Option<&ChatProviderConfig>,
+) -> OpenAiProviderConfig {
+    OpenAiProviderConfig {
+        name: provider.and_then(|item| item.name.clone()),
+        base_url: provider
+            .map(|item| item.base_url.clone())
+            .unwrap_or_else(|| client.base_url.clone()),
+        api_key: provider
+            .map(|item| item.api_key.clone())
+            .unwrap_or_else(|| client.api_key.clone()),
+        model: provider
+            .map(|item| item.model.clone())
+            .unwrap_or_else(|| client.model.clone()),
+        temperature: client.temperature,
+        request_timeout_ms: client.request_timeout_ms,
+        retry_attempts: client.retry_attempts,
+        retry_delay_ms: client.retry_delay_ms,
+        failure_cooldown_ms: client.failure_cooldown_ms,
+        failure_cooldown_threshold: client.failure_cooldown_threshold,
     }
 }
 
@@ -731,7 +787,7 @@ async fn handle_message_event(
                         },
                     )
                     .await?;
-                    let result = chat_session_manager.chat(&context, &input).await?;
+                    let result = chat_session_manager.chat(&context, &input, true).await?;
                     send_chat_result_if_present(
                         chat_session_manager,
                         logger,
@@ -789,7 +845,7 @@ async fn handle_message_event(
                             },
                         )
                         .await?;
-                        let result = chat_session_manager.chat(&context, &input).await?;
+                        let result = chat_session_manager.chat(&context, &input, false).await?;
                         send_chat_result_if_present(
                             chat_session_manager,
                             logger,
@@ -919,7 +975,9 @@ async fn execute_command(
                 ))
                 .await;
             let source_text = chat_input.runtime_context.timeline_text.clone();
-            let result = chat_session_manager.chat(context, &chat_input).await?;
+            let result = chat_session_manager
+                .chat(context, &chat_input, true)
+                .await?;
             send_chat_result_if_present(
                 chat_session_manager,
                 logger,
@@ -2577,6 +2635,7 @@ async fn classify_shutdown_vote_intent(
             crate::openai_chat_client::CompleteOptions {
                 model: Some(config.qa.shutdown_vote_filter_model.clone()),
                 temperature: Some(0.1),
+                allow_expensive_fallback: false,
             },
         )
         .await?;

@@ -61,7 +61,7 @@
     "codexTimeoutMs": 1800000
   },
   "ai": {
-    "baseUrl": "http://127.0.0.1:15721/v1",
+    "baseUrl": "http://new.xem8k5.top:3000/v1",
     "apiKey": "YOUR_API_KEY"
   },
   "translation": {
@@ -80,6 +80,23 @@
     "externalExclusiveGroupsRefreshMs": 5000,
     "externalExclusiveGroupsStaleMs": 90000,
     "passHintText": "如果此问题无人回答，可以试试 at 我再问，或者输入 /chat 来询问 bot。",
+    "providerPriority": [
+      {
+        "name": "openrouter qwen3.6-plus",
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "apiKey": "YOUR_OPENROUTER_KEY",
+        "model": "qwen/qwen3.6-plus"
+      },
+      {
+        "name": "openrouter trinity",
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "apiKey": "YOUR_OPENROUTER_KEY",
+        "model": "arcee-ai/trinity-large-preview:free"
+      }
+    ],
+    "expensiveFallbackBaseUrl": "",
+    "expensiveFallbackApiKey": "",
+    "expensiveFallbackModel": "",
     "requestTimeoutMs": 90000,
     "retryAttempts": 3,
     "retryDelayMs": 1500,

@@ -38,6 +38,13 @@ pub struct LowInformationReplyReview {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct HallucinationReplyReview {
+    pub approved: bool,
+    pub feedback: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct GroupPromptStatus {
     pub enabled: bool,
@@ -221,7 +228,12 @@ impl ChatSessionManager {
         Ok(())
     }
 
-    pub async fn chat(&self, context: &EventContext, input: &ChatInput) -> Result<ChatResult> {
+    pub async fn chat(
+        &self,
+        context: &EventContext,
+        input: &ChatInput,
+        allow_expensive_fallback: bool,
+    ) -> Result<ChatResult> {
         if !input.has_content() || input.history_text.trim().is_empty() {
             bail!("聊天内容不能为空");
         }
@@ -322,35 +334,201 @@ impl ChatSessionManager {
             parts.extend(input.images.iter().cloned());
             Value::Array(parts)
         };
-        let completion = self
-            .chat_client
-            .complete(
-                &[
-                    ChatMessage {
-                        role: "system".to_string(),
-                        content: Value::String(system_prompt),
+        let mut working_messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: Value::String(system_prompt),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: user_content,
+            },
+        ];
+        let review_source_text = if !input.runtime_context.timeline_text.trim().is_empty() {
+            input.runtime_context.timeline_text.trim().to_string()
+        } else if !input.text.trim().is_empty() {
+            input.text.trim().to_string()
+        } else {
+            input.history_text.trim().to_string()
+        };
+        let on_low_information = "suppress";
+        let mut low_information_retry_attempts = 0usize;
+        let mut hallucination_retry_attempts = 0usize;
+
+        loop {
+            let completion = self
+                .chat_client
+                .complete(
+                    &working_messages,
+                    CompleteOptions {
+                        model: Some(self.config.answer.model.clone()),
+                        temperature: Some(self.config.answer.temperature),
+                        allow_expensive_fallback,
                     },
-                    ChatMessage {
-                        role: "user".to_string(),
-                        content: user_content,
-                    },
-                ],
-                CompleteOptions {
-                    model: Some(self.config.answer.model.clone()),
-                    temperature: Some(self.config.answer.temperature),
-                },
-            )
-            .await?;
-        if let Some(handoff) = parse_group_file_download_handoff(&completion) {
-            if context.message_type != "group" {
-                let fallback_text = "文件下载流程仅支持群聊。请在对应群里 @ 我并说明版本与平台，我会直接走下载状态机。";
+                )
+                .await?;
+            if let Some(handoff) = parse_group_file_download_handoff(&completion) {
+                if context.message_type != "group" {
+                    let fallback_text = "文件下载流程仅支持群聊。请在对应群里 @ 我并说明版本与平台，我会直接走下载状态机。";
+                    let assistant_entry = json!({
+                        "role": "assistant",
+                        "kind": "answer",
+                        "messageId": "",
+                        "userId": context.self_id,
+                        "sender": "Cain",
+                        "text": fallback_text,
+                        "time": Utc::now().to_rfc3339(),
+                        "createdAt": Utc::now().to_rfc3339(),
+                    });
+                    self.state_store
+                        .append_chat_session_entry(
+                            &session_key,
+                            assistant_entry,
+                            self.config.answer.max_timeline_messages,
+                        )
+                        .await?;
+                    return Ok(ChatResult {
+                        text: fallback_text.to_string(),
+                        notice: String::new(),
+                        group_file_download_request: None,
+                    });
+                }
+                let handoff_entry = json!({
+                    "role": "assistant",
+                    "kind": "tool-handoff",
+                    "messageId": "",
+                    "userId": context.self_id,
+                    "sender": "Cain",
+                    "text": "[已转交群文件下载流程]",
+                    "time": Utc::now().to_rfc3339(),
+                    "createdAt": Utc::now().to_rfc3339(),
+                });
+                self.state_store
+                    .append_chat_session_entry(
+                        &session_key,
+                        handoff_entry,
+                        self.config.answer.max_timeline_messages,
+                    )
+                    .await?;
+                return Ok(ChatResult {
+                    text: String::new(),
+                    notice: "group-file-download-started".to_string(),
+                    group_file_download_request: Some(handoff),
+                });
+            }
+            let answer_text = completion.trim().to_string();
+            if answer_text.is_empty() {
+                self.logger
+                    .warn(format!(
+                        "聊天主模型返回空内容，抑制本次回复：source={}",
+                        review_source_text.chars().take(120).collect::<String>()
+                    ))
+                    .await;
+                return Ok(ChatResult {
+                    text: String::new(),
+                    notice: "review-suppressed".to_string(),
+                    group_file_download_request: None,
+                });
+            }
+
+            self.logger
+                .info(format!(
+                    "低信息检查开始：attempt={}, source={}, reply={}",
+                    low_information_retry_attempts + 1,
+                    review_source_text.chars().take(120).collect::<String>(),
+                    answer_text.chars().take(120).collect::<String>()
+                ))
+                .await;
+            let low_information_review = self
+                .review_low_information_reply(&review_source_text, &answer_text, on_low_information)
+                .await?;
+            if low_information_review.start_group_file_download {
+                return Ok(ChatResult {
+                    text: String::new(),
+                    notice: "group-file-download-started".to_string(),
+                    group_file_download_request: Some(GroupFileDownloadRequest {
+                        request_text: if low_information_review.request_text.trim().is_empty() {
+                            review_source_text.clone()
+                        } else {
+                            low_information_review.request_text.trim().to_string()
+                        },
+                        request: json!({
+                            "request_text": if low_information_review.request_text.trim().is_empty() {
+                                review_source_text.clone()
+                            } else {
+                                low_information_review.request_text.trim().to_string()
+                            }
+                        }),
+                    }),
+                });
+            }
+
+            let reviewed_answer = low_information_review.text.trim().to_string();
+            if reviewed_answer.is_empty() {
+                low_information_retry_attempts += 1;
+                self.logger
+                    .info(format!(
+                        "低信息检查打回主模型重答：attempt={}, feedback={}",
+                        low_information_retry_attempts,
+                        if low_information_review.reason.trim().is_empty() {
+                            "no-feedback"
+                        } else {
+                            low_information_review.reason.trim()
+                        }
+                    ))
+                    .await;
+                working_messages.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: Value::String(answer_text),
+                });
+                working_messages.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: Value::String(build_low_information_retry_prompt(
+                        low_information_review.reason.as_str(),
+                    )),
+                });
+                continue;
+            }
+            self.logger
+                .info(format!(
+                    "低信息检查通过：{}",
+                    if low_information_review.reason.trim().is_empty() {
+                        "no-reason"
+                    } else {
+                        low_information_review.reason.trim()
+                    }
+                ))
+                .await;
+
+            self.logger
+                .info(format!(
+                    "幻觉检查开始：attempt={}, source={}, reply={}",
+                    hallucination_retry_attempts + 1,
+                    review_source_text.chars().take(120).collect::<String>(),
+                    reviewed_answer.chars().take(120).collect::<String>()
+                ))
+                .await;
+            let hallucination_review = self
+                .review_hallucination_reply(&review_source_text, &reviewed_answer)
+                .await?;
+            if hallucination_review.approved {
+                self.logger
+                    .info(format!(
+                        "幻觉检查通过：{}",
+                        if hallucination_review.reason.trim().is_empty() {
+                            "no-reason"
+                        } else {
+                            hallucination_review.reason.trim()
+                        }
+                    ))
+                    .await;
                 let assistant_entry = json!({
                     "role": "assistant",
                     "kind": "answer",
                     "messageId": "",
                     "userId": context.self_id,
                     "sender": "Cain",
-                    "text": fallback_text,
+                    "text": reviewed_answer,
                     "time": Utc::now().to_rfc3339(),
                     "createdAt": Utc::now().to_rfc3339(),
                 });
@@ -361,63 +539,38 @@ impl ChatSessionManager {
                         self.config.answer.max_timeline_messages,
                     )
                     .await?;
+
                 return Ok(ChatResult {
-                    text: fallback_text.to_string(),
-                    notice: String::new(),
+                    text: reviewed_answer,
+                    notice: "low-information-reviewed".to_string(),
                     group_file_download_request: None,
                 });
             }
-            let handoff_entry = json!({
-                "role": "assistant",
-                "kind": "tool-handoff",
-                "messageId": "",
-                "userId": context.self_id,
-                "sender": "Cain",
-                "text": "[已转交群文件下载流程]",
-                "time": Utc::now().to_rfc3339(),
-                "createdAt": Utc::now().to_rfc3339(),
+
+            hallucination_retry_attempts += 1;
+            self.logger
+                .info(format!(
+                    "幻觉检查打回主模型重答：attempt={}, feedback={}",
+                    hallucination_retry_attempts,
+                    if hallucination_review.feedback.trim().is_empty() {
+                        "no-feedback"
+                    } else {
+                        hallucination_review.feedback.trim()
+                    }
+                ))
+                .await;
+            working_messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: Value::String(reviewed_answer),
             });
-            self.state_store
-                .append_chat_session_entry(
-                    &session_key,
-                    handoff_entry,
-                    self.config.answer.max_timeline_messages,
-                )
-                .await?;
-            return Ok(ChatResult {
-                text: String::new(),
-                notice: "group-file-download-started".to_string(),
-                group_file_download_request: Some(handoff),
+            working_messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: Value::String(build_hallucination_retry_prompt(
+                    hallucination_review.feedback.as_str(),
+                    hallucination_review.reason.as_str(),
+                )),
             });
         }
-        let answer_text = completion.trim().to_string();
-        if answer_text.is_empty() {
-            bail!("模型返回空内容");
-        }
-
-        let assistant_entry = json!({
-            "role": "assistant",
-            "kind": "answer",
-            "messageId": "",
-            "userId": context.self_id,
-            "sender": "Cain",
-            "text": answer_text,
-            "time": Utc::now().to_rfc3339(),
-            "createdAt": Utc::now().to_rfc3339(),
-        });
-        self.state_store
-            .append_chat_session_entry(
-                &session_key,
-                assistant_entry,
-                self.config.answer.max_timeline_messages,
-            )
-            .await?;
-
-        Ok(ChatResult {
-            text: completion.trim().to_string(),
-            notice: String::new(),
-            group_file_download_request: None,
-        })
     }
 
     pub async fn render_markdown_image(&self, text: &str) -> Result<Option<String>> {
@@ -474,6 +627,7 @@ impl ChatSessionManager {
                 CompleteOptions {
                     model: Some(self.config.filter.model.clone()),
                     temperature: Some(0.1),
+                    allow_expensive_fallback: false,
                 },
             )
             .await?;
@@ -529,6 +683,7 @@ impl ChatSessionManager {
                 CompleteOptions {
                     model: Some(self.config.topic_closure.model.clone()),
                     temperature: Some(self.config.topic_closure.temperature),
+                    allow_expensive_fallback: false,
                 },
             )
             .await?;
@@ -672,6 +827,7 @@ impl ChatSessionManager {
                 CompleteOptions {
                     model: Some(self.config.filter.model.clone()),
                     temperature: Some(0.1),
+                    allow_expensive_fallback: false,
                 },
             )
             .await?;
@@ -766,6 +922,7 @@ impl ChatSessionManager {
                 CompleteOptions {
                     model: Some(self.config.low_information_filter_model.clone()),
                     temperature: Some(0.1),
+                    allow_expensive_fallback: false,
                 },
             )
             .await;
@@ -841,6 +998,107 @@ impl ChatSessionManager {
         Ok(LowInformationReplyReview {
             reason,
             ..Default::default()
+        })
+    }
+
+    pub async fn review_hallucination_reply(
+        &self,
+        source_text: &str,
+        reply_text: &str,
+    ) -> Result<HallucinationReplyReview> {
+        if !self.config.hallucination_check.enabled {
+            self.logger.info("幻觉检查已关闭，跳过。").await;
+            return Ok(HallucinationReplyReview {
+                approved: true,
+                reason: "checker-disabled".to_string(),
+                ..Default::default()
+            });
+        }
+
+        let normalized_reply = reply_text.trim();
+        if normalized_reply.is_empty() {
+            return Ok(HallucinationReplyReview {
+                approved: false,
+                reason: "empty-reply".to_string(),
+                ..Default::default()
+            });
+        }
+        let normalized_source = source_text.trim();
+        if normalized_source.is_empty() {
+            return Ok(HallucinationReplyReview {
+                approved: true,
+                reason: "empty-source".to_string(),
+                ..Default::default()
+            });
+        }
+
+        let raw = self
+            .chat_client
+            .complete(
+                &[
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: Value::String([
+                            "你是 Cain 的回答事实校对器。",
+                            "你的任务是检查候选回答是否存在幻觉（即声称了上下文中没有依据的具体事实）。",
+                            "幻觉包括：声称某文件/字段/版本/release 存在但上下文中未确认、给出和上下文矛盾的数值或路径、凭空编造不在上下文中的具体细节。",
+                            "如果候选回答已经足够稳妥或只是闲聊/观点，直接 approved=true，不要为了改而改。",
+                            "只输出 JSON：{\"approved\":boolean,\"feedback\":\"如果有幻觉，简短说明哪里不对，最多80字；没有则留空\",\"reason\":\"简短原因\"}",
+                            "不要使用 Markdown。"
+                        ].join("\n")),
+                    },
+                    ChatMessage {
+                        role: "user".to_string(),
+                        content: Value::String(format!(
+                            "用户原话：{}\n候选回答：{}",
+                            normalized_source, normalized_reply
+                        )),
+                    },
+                ],
+                CompleteOptions {
+                    model: Some(self.config.hallucination_check.model.clone()),
+                    temperature: Some(self.config.hallucination_check.temperature),
+                    allow_expensive_fallback: false,
+                },
+            )
+            .await;
+        let raw = match raw {
+            Ok(raw) => raw,
+            Err(error) => {
+                self.logger
+                    .warn(format!("幻觉检查失败，回退原回答：{error:#}"))
+                    .await;
+                return Ok(HallucinationReplyReview {
+                    approved: true,
+                    reason: "checker-error".to_string(),
+                    ..Default::default()
+                });
+            }
+        };
+
+        let parsed = extract_json_object(&raw);
+        let approved = parsed
+            .get("approved")
+            .or_else(|| parsed.get("allow"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let feedback = parsed
+            .get("feedback")
+            .or_else(|| parsed.get("fallback"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let reason = parsed
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        Ok(HallucinationReplyReview {
+            approved,
+            feedback,
+            reason,
         })
     }
 
@@ -992,6 +1250,7 @@ impl ChatSessionManager {
                 CompleteOptions {
                     model: Some(self.config.prompt_review.model.clone()),
                     temperature: Some(0.2),
+                    allow_expensive_fallback: false,
                 },
             )
             .await?;
@@ -1215,6 +1474,47 @@ fn build_low_information_fallback(source_text: &str, reply_text: &str) -> String
         return "还没定位到具体位置。".to_string();
     }
     "还没定位到具体答案。".to_string()
+}
+
+fn build_low_information_retry_prompt(feedback: &str) -> String {
+    let normalized_feedback = feedback.trim();
+    [
+        if normalized_feedback.is_empty() {
+            "系统质检纠偏：你上一条回答被低信息质检器打回。".to_string()
+        } else {
+            format!(
+                "系统质检纠偏：你上一条回答被低信息质检器打回，原因：{}",
+                normalized_feedback
+            )
+        },
+        "不要复述问题，不要说“还没定位到”“我先去查”“需要更多上下文”“请先读取文件”等空话。".to_string(),
+        "下一条回答必须直接给出当前上下文里已经能确认的具体字段、路径、对象名、数值、版本结论或可执行步骤。".to_string(),
+        "如果当前上下文仍不足以确认这些具体信息，就只保留已经能确认的部分，不要输出泛泛结论。".to_string(),
+    ]
+    .join("\n")
+}
+
+fn build_hallucination_retry_prompt(feedback: &str, reason: &str) -> String {
+    let normalized_feedback = feedback.trim();
+    let normalized_reason = reason.trim();
+    [
+        if normalized_feedback.is_empty() && normalized_reason.is_empty() {
+            "系统校对纠偏：你上一条回答被事实校对器打回。".to_string()
+        } else if normalized_feedback.is_empty() {
+            format!(
+                "系统校对纠偏：你上一条回答被事实校对器打回，原因：{}",
+                normalized_reason
+            )
+        } else {
+            format!(
+                "系统校对纠偏：你上一条回答被事实校对器打回，原因：{}",
+                normalized_feedback
+            )
+        },
+        "请基于已有上下文重新组织回答，去掉无法确认的具体事实。".to_string(),
+        "如果确实不确定，就明确说不确定，不要编造字段、版本号、路径、数值。".to_string(),
+    ]
+    .join("\n")
 }
 
 fn looks_like_group_file_download_request(text: &str) -> bool {

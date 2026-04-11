@@ -133,6 +133,18 @@ pub struct ChatClientConfig {
     pub retry_delay_ms: u64,
     pub failure_cooldown_ms: u64,
     pub failure_cooldown_threshold: usize,
+    pub provider_priority: Vec<ChatProviderConfig>,
+    pub expensive_fallback_base_url: Option<String>,
+    pub expensive_fallback_api_key: Option<String>,
+    pub expensive_fallback_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatProviderConfig {
+    pub name: Option<String>,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -435,6 +447,27 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
                 failure_cooldown_threshold: get_i64(&raw, &["qa", "failureCooldownThreshold"])
                     .unwrap_or(2)
                     .max(1) as usize,
+                provider_priority: get_value(&raw, &["qa", "providerPriority"])
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| {
+                                let base_url = get_string(item, &["baseUrl"])?;
+                                let model = get_string(item, &["model"])?;
+                                Some(ChatProviderConfig {
+                                    name: get_string(item, &["name"]),
+                                    base_url,
+                                    api_key: get_string(item, &["apiKey"]).unwrap_or_default(),
+                                    model,
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                expensive_fallback_base_url: get_string(&raw, &["qa", "expensiveFallbackBaseUrl"]),
+                expensive_fallback_api_key: get_string(&raw, &["qa", "expensiveFallbackApiKey"]),
+                expensive_fallback_model: get_string(&raw, &["qa", "expensiveFallbackModel"]),
             },
             filter: QaFilterConfig {
                 model: get_string(&raw, &["qa", "filter", "model"])

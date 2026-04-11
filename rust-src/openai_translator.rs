@@ -65,6 +65,7 @@ impl OpenAiTranslator {
                 CompleteOptions {
                     model: Some(self.config.model.clone()),
                     temperature: Some(self.config.temperature),
+                    allow_expensive_fallback: false,
                 },
             )
             .await

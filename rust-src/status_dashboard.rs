@@ -252,16 +252,18 @@ async fn ensure_btop_xterm_client() -> Result<()> {
 }
 
 async fn ensure_btop_tmux_session() -> Result<()> {
+    ensure_linux_command_exists("tmux").await?;
+
     let has = Command::new("tmux")
         .args(["has-session", "-t", BTOP_SESSION_NAME])
         .output()
         .await
         .context("执行 tmux has-session 失败")?;
     if !has.status.success() {
-        let status_text = String::from_utf8_lossy(&has.stderr).trim().to_string();
-        if !status_text.is_empty() && !status_text.contains("can't find session") {
-            anyhow::bail!("检测 btop tmux 会话失败: {status_text}");
-        }
+        // `tmux has-session` 在服务端未启动时会返回类似：
+        // "error connecting to /tmp/tmux-0/default (No such file or directory)"
+        // 这属于可恢复场景，直接尝试创建会话即可。
+        let has_session_stderr = String::from_utf8_lossy(&has.stderr).trim().to_string();
         let created = Command::new("tmux")
             .args([
                 "new-session",
@@ -281,7 +283,12 @@ async fn ensure_btop_tmux_session() -> Result<()> {
             .context("启动 btop tmux 会话失败")?;
         if !created.status.success() {
             let stderr = String::from_utf8_lossy(&created.stderr).trim().to_string();
-            anyhow::bail!("启动 btop tmux 会话失败: {stderr}");
+            if has_session_stderr.is_empty() {
+                anyhow::bail!("启动 btop tmux 会话失败: {stderr}");
+            }
+            anyhow::bail!(
+                "启动 btop tmux 会话失败: {stderr}（has-session stderr: {has_session_stderr}）"
+            );
         }
     }
 
