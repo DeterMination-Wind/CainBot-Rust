@@ -327,7 +327,7 @@ impl ChatSessionManager {
         &self,
         context: &EventContext,
         input: &ChatInput,
-        allow_expensive_fallback: bool,
+        on_low_information: &str,
     ) -> Result<ChatResult> {
         if !input.has_content() || input.history_text.trim().is_empty() {
             bail!("聊天内容不能为空");
@@ -402,7 +402,6 @@ impl ChatSessionManager {
         } else {
             input.history_text.trim().to_string()
         };
-        let on_low_information = "suppress";
         let mut low_information_retry_attempts = 0usize;
         let mut hallucination_retry_attempts = 0usize;
         let mut tool_round_limit = self.config.answer.max_tool_rounds.max(1);
@@ -412,7 +411,6 @@ impl ChatSessionManager {
                 .complete_chat_turn_with_tools(
                     context,
                     &mut working_messages,
-                    allow_expensive_fallback,
                     tool_round_limit,
                 )
                 .await?;
@@ -609,7 +607,6 @@ impl ChatSessionManager {
         &self,
         context: &EventContext,
         working_messages: &mut Vec<ChatMessage>,
-        allow_expensive_fallback: bool,
         max_tool_rounds: usize,
     ) -> Result<ToolDrivenCompletion> {
         let tool_limit = max_tool_rounds.max(1);
@@ -624,7 +621,6 @@ impl ChatSessionManager {
                     CompleteOptions {
                         model: Some(self.config.answer.model.clone()),
                         temperature: Some(self.config.answer.temperature),
-                        allow_expensive_fallback,
                     },
                 )
                 .await?;
@@ -1275,7 +1271,6 @@ impl ChatSessionManager {
                 CompleteOptions {
                     model: Some(self.config.filter.model.clone()),
                     temperature: Some(0.1),
-                    allow_expensive_fallback: false,
                 },
             )
             .await?;
@@ -1331,7 +1326,6 @@ impl ChatSessionManager {
                 CompleteOptions {
                     model: Some(self.config.topic_closure.model.clone()),
                     temperature: Some(self.config.topic_closure.temperature),
-                    allow_expensive_fallback: false,
                 },
             )
             .await?;
@@ -1475,7 +1469,6 @@ impl ChatSessionManager {
                 CompleteOptions {
                     model: Some(self.config.filter.model.clone()),
                     temperature: Some(0.1),
-                    allow_expensive_fallback: false,
                 },
             )
             .await?;
@@ -1570,7 +1563,6 @@ impl ChatSessionManager {
                 CompleteOptions {
                     model: Some(self.config.low_information_filter_model.clone()),
                     temperature: Some(0.1),
-                    allow_expensive_fallback: false,
                 },
             )
             .await;
@@ -1706,7 +1698,6 @@ impl ChatSessionManager {
                 CompleteOptions {
                     model: Some(self.config.hallucination_check.model.clone()),
                     temperature: Some(self.config.hallucination_check.temperature),
-                    allow_expensive_fallback: false,
                 },
             )
             .await;
@@ -1964,7 +1955,6 @@ impl ChatSessionManager {
                 CompleteOptions {
                     model: Some(self.config.prompt_review.model.clone()),
                     temperature: Some(0.2),
-                    allow_expensive_fallback: false,
                 },
             )
             .await?;
