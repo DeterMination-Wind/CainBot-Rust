@@ -259,7 +259,10 @@ async fn ensure_btop_tmux_session() -> Result<()> {
         .context("执行 tmux has-session 失败")?;
     if !has.status.success() {
         let status_text = String::from_utf8_lossy(&has.stderr).trim().to_string();
-        if !status_text.is_empty() && !status_text.contains("can't find session") {
+        // tmux 在“还没有 server / session”时会返回非 0，并带上
+        // `no server running on /tmp/tmux-*/default`。这里必须把它视为冷启动，
+        // 否则后台维护和 `/status` 会在每次启动后都被这条假错误打断。
+        if !status_text.is_empty() && !tmux_stderr_indicates_missing_session(&status_text) {
             anyhow::bail!("检测 btop tmux 会话失败: {status_text}");
         }
         let created = Command::new("tmux")
@@ -281,7 +284,10 @@ async fn ensure_btop_tmux_session() -> Result<()> {
             .context("启动 btop tmux 会话失败")?;
         if !created.status.success() {
             let stderr = String::from_utf8_lossy(&created.stderr).trim().to_string();
-            anyhow::bail!("启动 btop tmux 会话失败: {stderr}");
+            if status_text.is_empty() {
+                anyhow::bail!("启动 btop tmux 会话失败: {stderr}");
+            }
+            anyhow::bail!("启动 btop tmux 会话失败: {stderr}（has-session stderr: {status_text}）");
         }
     }
 
@@ -296,6 +302,12 @@ async fn ensure_btop_tmux_session() -> Result<()> {
         .output()
         .await
         .context("检查 btop pane 状态失败")?;
+    if !pane_dead.status.success() {
+        let stderr = String::from_utf8_lossy(&pane_dead.stderr)
+            .trim()
+            .to_string();
+        anyhow::bail!("检查 btop pane 状态失败: {stderr}");
+    }
     let dead_flag = String::from_utf8_lossy(&pane_dead.stdout)
         .trim()
         .to_string();
@@ -339,6 +351,11 @@ async fn ensure_btop_tmux_session() -> Result<()> {
         anyhow::bail!("调整 btop tmux 窗口尺寸失败: {stderr}");
     }
     Ok(())
+}
+
+fn tmux_stderr_indicates_missing_session(stderr: &str) -> bool {
+    let normalized = stderr.trim().to_ascii_lowercase();
+    normalized.contains("can't find session") || normalized.contains("no server running on")
 }
 
 fn build_status_output_path(output_dir: &Path, kind: &str) -> PathBuf {
@@ -2041,7 +2058,7 @@ fn format_duration(total_secs: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::create_status_dashboard_image;
+    use super::{create_status_dashboard_image, tmux_stderr_indicates_missing_session};
 
     #[tokio::test]
     async fn creates_status_dashboard_png() {
@@ -2057,5 +2074,18 @@ mod tests {
     async fn render_probe_prints_status_path() {
         let output = create_status_dashboard_image().await.expect("status image");
         println!("status: {}", output.display());
+    }
+
+    #[test]
+    fn treats_missing_tmux_server_as_missing_session() {
+        assert!(tmux_stderr_indicates_missing_session(
+            "no server running on /tmp/tmux-0/default"
+        ));
+        assert!(tmux_stderr_indicates_missing_session(
+            "can't find session: cainbot_btop"
+        ));
+        assert!(!tmux_stderr_indicates_missing_session(
+            "unknown option -- bad"
+        ));
     }
 }

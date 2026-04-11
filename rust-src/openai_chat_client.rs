@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use crate::logger::Logger;
 use crate::utils::{join_url, sleep_ms};
 
+const TRANSPORT_SUPPRESS_MS: u64 = 30_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -64,7 +66,10 @@ impl OpenAiChatClient {
         })
     }
 
-    // 先保留原版最关键的两条传输链路：chat/completions 与 responses。
+    // 这里故意保留原 MJS 的双传输链路，并继续只走流式输出。
+    // 用户这边的 XEM8K5/cc-switch 代理长期只能稳定处理 SSE；
+    // 另外当低信息/幻觉检查把主模型打回时，同一轮还会继续复用这个客户端。
+    // 所以传输优先级、短时熔断和冷却策略必须尽量对齐原版，不能为了“简化”把兼容层删掉。
     pub async fn complete(
         &self,
         messages: &[ChatMessage],
@@ -73,9 +78,10 @@ impl OpenAiChatClient {
         self.validate()?;
         self.ensure_not_in_cooldown().await?;
         let transports = self.available_transports().await;
+        let proxy_managed_failover = is_cc_switch_proxy(&self.config.base_url);
         let mut last_error = None;
 
-        for transport in transports {
+        for (index, transport) in transports.iter().enumerate() {
             let result = if transport == "responses" {
                 self.complete_via_responses(messages, &options).await
             } else {
@@ -88,14 +94,35 @@ impl OpenAiChatClient {
                     self.transport_suppressed_until
                         .lock()
                         .await
-                        .remove(&transport);
+                        .remove(transport.as_str());
                     return Ok(text);
                 }
                 Err(error) => {
                     self.logger
                         .warn(format!("聊天接口 {transport} 失败：{error:#}"))
                         .await;
+                    if proxy_managed_failover
+                        && transport == "chat"
+                        && should_suppress_transport(transport, &error)
+                    {
+                        self.suppress_transport(transport, TRANSPORT_SUPPRESS_MS)
+                            .await;
+                    }
                     last_error = Some(error);
+                    let has_alternate_transport = index + 1 < transports.len();
+                    if has_alternate_transport
+                        && should_fallback_transport(last_error.as_ref().expect("last error"))
+                    {
+                        let next_transport = &transports[index + 1];
+                        self.logger
+                            .warn(format!(
+                                "聊天接口 {transport} 不稳定，切换到 {next_transport}：{}",
+                                last_error.as_ref().expect("last error").to_string()
+                            ))
+                            .await;
+                        continue;
+                    }
+                    break;
                 }
             }
         }
@@ -104,15 +131,29 @@ impl OpenAiChatClient {
             bail!("聊天接口调用失败");
         };
 
-        if is_retryable_error(&error) {
+        if is_retryable_error(&error) || has_retryable_http_status(&error) {
             let mut streak = self.retryable_failure_streak.lock().await;
             *streak += 1;
-            if *streak >= self.config.failure_cooldown_threshold.max(1) {
+            if proxy_managed_failover {
+                self.logger
+                    .warn(format!(
+                        "聊天接口失败，CC Switch 代理已接管整流，跳过本地冷却：{error:#}"
+                    ))
+                    .await;
+            } else if *streak >= self.config.failure_cooldown_threshold.max(1) {
                 *self.cooldown_until.lock().await = Some(
                     Instant::now()
                         + Duration::from_millis(self.config.failure_cooldown_ms.max(1_000)),
                 );
                 *self.cooldown_reason.lock().await = format!("{error:#}");
+            } else {
+                self.logger
+                    .warn(format!(
+                        "聊天接口连续失败 {}/{}, 暂不进入冷却：{error:#}",
+                        *streak,
+                        self.config.failure_cooldown_threshold.max(1)
+                    ))
+                    .await;
             }
         } else {
             *self.retryable_failure_streak.lock().await = 0;
@@ -237,12 +278,16 @@ impl OpenAiChatClient {
         Ok(())
     }
 
+    async fn suppress_transport(&self, transport: &str, duration_ms: u64) {
+        let until = Instant::now() + Duration::from_millis(duration_ms.max(1_000));
+        self.transport_suppressed_until
+            .lock()
+            .await
+            .insert(transport.to_string(), until);
+    }
+
     async fn available_transports(&self) -> Vec<String> {
-        let preferred = if is_cc_switch_proxy(&self.config.base_url) {
-            vec!["chat".to_string(), "responses".to_string()]
-        } else {
-            vec!["chat".to_string(), "responses".to_string()]
-        };
+        let preferred = preferred_transports(&self.config.base_url);
         let suppressed = self.transport_suppressed_until.lock().await.clone();
         let available = preferred
             .iter()
@@ -669,12 +714,45 @@ fn is_cc_switch_proxy(base_url: &str) -> bool {
         && lower.contains("/v1")
 }
 
+fn preferred_transports(base_url: &str) -> Vec<String> {
+    if is_cc_switch_proxy(base_url) {
+        vec!["responses".to_string(), "chat".to_string()]
+    } else {
+        vec!["chat".to_string(), "responses".to_string()]
+    }
+}
+
 fn is_retryable_error(error: &anyhow::Error) -> bool {
     let text = format!("{error:#}").to_ascii_lowercase();
     text.contains("network")
         || text.contains("socket")
         || text.contains("timeout")
         || text.contains("timed out")
+}
+
+fn has_retryable_http_status(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    [
+        "http 408", "http 425", "http 429", "http 500", "http 502", "http 503", "http 504",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn is_invalid_response_error(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains("聊天接口未返回可用文本")
+        || text.contains("聊天接口返回了空流")
+        || text.contains("解析 chat/completions 流式事件失败")
+        || text.contains("解析 responses 流式事件失败")
+}
+
+fn should_fallback_transport(error: &anyhow::Error) -> bool {
+    is_retryable_error(error) || has_retryable_http_status(error)
+}
+
+fn should_suppress_transport(transport: &str, error: &anyhow::Error) -> bool {
+    transport == "chat" && (is_retryable_error(error) || is_invalid_response_error(error))
 }
 
 fn normalize_completion_text(text: &str) -> String {
@@ -757,8 +835,9 @@ impl MaybeText {
 mod tests {
     use super::{
         extract_chat_stream_delta, extract_responses_stream_delta, find_sse_event_boundary,
-        value_to_text_piece,
+        has_retryable_http_status, preferred_transports, value_to_text_piece,
     };
+    use anyhow::anyhow;
     use serde_json::json;
 
     #[test]
@@ -803,5 +882,27 @@ mod tests {
     fn finds_sse_boundary_for_crlf_frames() {
         let buffer = b"data: {\"delta\":\"x\"}\r\n\r\nrest";
         assert_eq!(find_sse_event_boundary(buffer), Some((19, 4)));
+    }
+
+    #[test]
+    fn prefers_responses_for_cc_switch_proxy() {
+        assert_eq!(
+            preferred_transports("http://127.0.0.1:15721/v1"),
+            vec!["responses".to_string(), "chat".to_string()]
+        );
+        assert_eq!(
+            preferred_transports("http://new.xem8k5.top:3000/v1"),
+            vec!["chat".to_string(), "responses".to_string()]
+        );
+    }
+
+    #[test]
+    fn detects_retryable_http_status_from_error_text() {
+        assert!(has_retryable_http_status(&anyhow!(
+            "聊天接口 responses 返回 HTTP 502: upstream bad gateway"
+        )));
+        assert!(!has_retryable_http_status(&anyhow!(
+            "聊天接口 responses 返回 HTTP 401: invalid token"
+        )));
     }
 }

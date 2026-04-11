@@ -21,6 +21,8 @@ use crate::state_store::StateStore;
 
 const TOOL_REQUEST_START: &str = "<<<CAIN_CODEX_TOOL_START>>>";
 const TOOL_REQUEST_END: &str = "<<<CAIN_CODEX_TOOL_END>>>";
+// 用户明确要求：低信息/幻觉模型把主模型打回后，主模型必须允许再调用最多 10 次工具，
+// 直到拿到新证据再输出下一轮文本，而不是沿用首轮较小的工具预算继续硬答。
 const CHAT_REPAIR_TOOL_ROUND_LIMIT: usize = 10;
 const DEFAULT_GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const CODEX_MAX_DIRECTORY_ENTRIES: usize = 200;
@@ -406,6 +408,9 @@ impl ChatSessionManager {
         let mut hallucination_retry_attempts = 0usize;
         let mut tool_round_limit = self.config.answer.max_tool_rounds.max(1);
 
+        // 这里故意保持“先审后发”的闭环：
+        // 低信息检查或幻觉检查任一不通过，就继续把主模型打回重答，
+        // 在真正通过前不向外发送任何消息，也不把失败稿落成 assistant 回复。
         loop {
             let completion = self
                 .complete_chat_turn_with_tools(
@@ -677,6 +682,8 @@ impl ChatSessionManager {
             let tool_call_count = tool_calls.len();
             let mut tool_results = Vec::<Value>::new();
 
+            // 每次打回后的“修复轮”都可能需要重新查文件、读发布页或启动下载链路，
+            // 所以这里按工具调用次数精确计数，而不是简单按模型回合数截断。
             for request in tool_calls.into_iter().take(remaining) {
                 let tool_name = request
                     .get("tool")
