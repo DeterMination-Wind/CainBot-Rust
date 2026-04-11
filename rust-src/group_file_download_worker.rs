@@ -177,11 +177,20 @@ enum DownloadMode {
     LocalBuild,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseChannel {
+    Stable,
+    Prerelease,
+    Any,
+}
+
 #[derive(Debug, Clone)]
 struct DownloadRequest {
     repo: Option<RepoChoice>,
     mode: DownloadMode,
     tag_query: Option<String>,
+    release_keyword: Option<String>,
+    release_channel: ReleaseChannel,
     commit_hash: Option<String>,
     exact_commit_build: bool,
     platform_hint: PlatformHint,
@@ -228,6 +237,8 @@ struct GithubRelease {
     tag_name: String,
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    body: String,
     #[serde(default)]
     html_url: String,
     #[serde(default)]
@@ -506,6 +517,8 @@ impl GroupFileDownloadWorker {
                 }),
                 mode: DownloadMode::Release,
                 tag_query: None,
+                release_keyword: None,
+                release_channel: parse_release_channel_from_text(&normalized_request_text),
                 commit_hash: None,
                 exact_commit_build: false,
                 platform_hint: detect_platform_hint(&normalized_request_text),
@@ -1483,22 +1496,69 @@ impl GroupFileDownloadWorker {
         if query.eq_ignore_ascii_case("latest") || query == "最新版" {
             query.clear();
         }
+        let release_keyword = request
+            .release_keyword
+            .clone()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
 
-        if query.is_empty() {
+        if query.is_empty()
+            && release_keyword.is_empty()
+            && request.release_channel != ReleaseChannel::Prerelease
+        {
             let release = self.fetch_release_latest(repo).await?;
+            return Ok(ReleaseResolution::Selected(release));
+        }
+        if query.is_empty()
+            && release_keyword.is_empty()
+            && request.release_channel == ReleaseChannel::Prerelease
+        {
+            let release = self
+                .fetch_releases(repo, RELEASE_MATCH_SCAN_LIMIT)
+                .await?
+                .into_iter()
+                .filter(|release| release.prerelease && !release.assets.is_empty())
+                .max_by(|left, right| release_sort_value(left).cmp(&release_sort_value(right)))
+                .ok_or_else(|| anyhow::anyhow!("未找到可下载的 pre-release：{}", repo.repo_key()))?;
             return Ok(ReleaseResolution::Selected(release));
         }
 
         let releases = self.fetch_releases(repo, RELEASE_MATCH_SCAN_LIMIT).await?;
         let mut scored = releases
             .into_iter()
-            .map(|release| (score_release(&release, &query), release))
-            .filter(|(score, release)| *score > 0 && !release.assets.is_empty())
+            .filter(|release| release_matches_channel(release, request.release_channel))
+            .filter(|release| !release.assets.is_empty())
+            .map(|release| {
+                (
+                    score_release_candidate(
+                        &release,
+                        &query,
+                        request.release_keyword.as_deref(),
+                        request.release_channel,
+                    ),
+                    release,
+                )
+            })
+            .filter(|(score, _)| *score > 0)
             .collect::<Vec<_>>();
         scored.sort_by(|left, right| right.0.cmp(&left.0));
         if scored.is_empty() {
-            let exact = self.fetch_release_by_tag(repo, &query).await?;
-            return Ok(ReleaseResolution::Selected(exact));
+            if !query.is_empty() && release_keyword.is_empty() {
+                let exact = self.fetch_release_by_tag(repo, &query).await?;
+                if release_matches_channel(&exact, request.release_channel) && !exact.assets.is_empty() {
+                    return Ok(ReleaseResolution::Selected(exact));
+                }
+            }
+            bail!(
+                "未找到匹配的 {}release：{}",
+                if request.release_channel == ReleaseChannel::Prerelease {
+                    "pre-"
+                } else {
+                    ""
+                },
+                repo.repo_key()
+            );
         }
         if scored.len() == 1
             || scored[0].0 >= scored.get(1).map(|item| item.0).unwrap_or(0) + 40
@@ -3148,7 +3208,7 @@ fn infer_download_request(text: &str, request: Option<&Value>) -> Option<Downloa
         .or_else(|| parse_repo_choice_from_text(&normalized_text))
         .or_else(|| detect_default_repo(&normalized_text));
 
-    let tag_query = request
+    let mut tag_query = request
         .and_then(|item| {
             item.get("version_query")
                 .or_else(|| item.get("version"))
@@ -3159,6 +3219,17 @@ fn infer_download_request(text: &str, request: Option<&Value>) -> Option<Downloa
         .filter(|item| !item.is_empty())
         .map(ToString::to_string)
         .or_else(|| parse_version_query_from_text(&normalized_text));
+
+    let release_keyword = request
+        .and_then(|item| {
+            item.get("release_keyword")
+                .or_else(|| item.get("releaseKeyword"))
+                .or_else(|| item.get("keyword"))
+        })
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToString::to_string);
 
     let commit_hash = request
         .and_then(|item| {
@@ -3178,6 +3249,33 @@ fn infer_download_request(text: &str, request: Option<&Value>) -> Option<Downloa
         .and_then(Value::as_str)
         .map(|item| item.trim().to_ascii_lowercase())
         .unwrap_or_default();
+
+    let latest_prerelease_requested = request
+        .and_then(|item| {
+            item.get("latest_prerelease")
+                .or_else(|| item.get("latestPrerelease"))
+        })
+        .and_then(value_to_bool)
+        .unwrap_or(false);
+
+    let mut release_channel = request
+        .and_then(|item| {
+            item.get("release_channel")
+                .or_else(|| item.get("releaseChannel"))
+                .or_else(|| item.get("channel"))
+        })
+        .and_then(Value::as_str)
+        .and_then(parse_release_channel)
+        .unwrap_or_else(|| parse_release_channel_from_text(&normalized_text));
+    if latest_prerelease_requested
+        || tag_query
+            .as_deref()
+            .map(is_latest_prerelease_query)
+            .unwrap_or(false)
+    {
+        release_channel = ReleaseChannel::Prerelease;
+        tag_query = Some("latest".to_string());
+    }
 
     let mode = if requested_mode == "commit-build" || requested_mode == "commit" {
         DownloadMode::CommitBuild
@@ -3217,6 +3315,8 @@ fn infer_download_request(text: &str, request: Option<&Value>) -> Option<Downloa
 
     let has_explicit_fields = repo.is_some()
         || tag_query.is_some()
+        || release_keyword.is_some()
+        || release_channel != ReleaseChannel::Any
         || commit_hash.is_some()
         || !local_release_choices.is_empty()
         || !requested_mode.is_empty();
@@ -3236,6 +3336,8 @@ fn infer_download_request(text: &str, request: Option<&Value>) -> Option<Downloa
         repo,
         mode,
         tag_query,
+        release_keyword,
+        release_channel,
         commit_hash,
         exact_commit_build,
         platform_hint,
@@ -3321,6 +3423,9 @@ fn detect_default_repo(text: &str) -> Option<RepoChoice> {
 
 fn parse_version_query_from_text(text: &str) -> Option<String> {
     let lower = text.to_ascii_lowercase();
+    if is_latest_prerelease_query(&lower) {
+        return Some("latest".to_string());
+    }
     if lower.contains("最新版") || lower.contains("最新版本") || lower.contains("latest") {
         return Some("latest".to_string());
     }
@@ -3341,6 +3446,52 @@ fn parse_version_query_from_text(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn parse_release_channel(input: &str) -> Option<ReleaseChannel> {
+    let lower = input.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    if matches!(
+        lower.as_str(),
+        "stable" | "release" | "正式版" | "正式" | "stable-release"
+    ) {
+        return Some(ReleaseChannel::Stable);
+    }
+    if matches!(
+        lower.as_str(),
+        "prerelease" | "pre-release" | "pre" | "preview" | "预发布" | "预览版"
+    ) {
+        return Some(ReleaseChannel::Prerelease);
+    }
+    if matches!(lower.as_str(), "any" | "all" | "任意" | "全部") {
+        return Some(ReleaseChannel::Any);
+    }
+    None
+}
+
+fn parse_release_channel_from_text(text: &str) -> ReleaseChannel {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("pre-release")
+        || lower.contains("prerelease")
+        || lower.contains("预发布")
+        || lower.contains("预览版")
+    {
+        return ReleaseChannel::Prerelease;
+    }
+    ReleaseChannel::Any
+}
+
+fn is_latest_prerelease_query(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("latest prerelease")
+        || lower.contains("latest pre-release")
+        || lower.contains("latest preview")
+        || lower.contains("最新 pre-release")
+        || lower.contains("最新 prerelease")
+        || lower.contains("最新预发布")
+        || lower.contains("最新预览版")
 }
 
 fn parse_commit_hash_from_text(text: &str) -> Option<String> {
@@ -3660,6 +3811,41 @@ fn contains_any(text: &str, patterns: &[&str]) -> bool {
     patterns.iter().any(|item| text.contains(item))
 }
 
+fn release_matches_channel(release: &GithubRelease, channel: ReleaseChannel) -> bool {
+    match channel {
+        ReleaseChannel::Stable => !release.prerelease,
+        ReleaseChannel::Prerelease => release.prerelease,
+        ReleaseChannel::Any => true,
+    }
+}
+
+fn score_release_candidate(
+    release: &GithubRelease,
+    query: &str,
+    release_keyword: Option<&str>,
+    channel: ReleaseChannel,
+) -> i64 {
+    if !release_matches_channel(release, channel) {
+        return 0;
+    }
+    let query_score = score_release(release, query);
+    let keyword_score = score_release_keyword(release, release_keyword.unwrap_or_default());
+    if !query.trim().is_empty() && query_score <= 0 {
+        return 0;
+    }
+    if let Some(keyword) = release_keyword
+        && !keyword.trim().is_empty()
+        && keyword_score <= 0
+    {
+        return 0;
+    }
+    let mut score = query_score + keyword_score;
+    if query.trim().is_empty() && release_keyword.is_some() {
+        score += 40;
+    }
+    score
+}
+
 fn score_release(release: &GithubRelease, query: &str) -> i64 {
     let normalized_query = query.trim().to_ascii_lowercase();
     if normalized_query.is_empty() {
@@ -3691,6 +3877,27 @@ fn score_release(release: &GithubRelease, query: &str) -> i64 {
     }
     if release.prerelease && !normalized_query.contains("pre") && !normalized_query.contains("rc") {
         score -= 20;
+    }
+    score
+}
+
+fn score_release_keyword(release: &GithubRelease, keyword: &str) -> i64 {
+    let normalized_keyword = keyword.trim().to_ascii_lowercase();
+    if normalized_keyword.is_empty() {
+        return 0;
+    }
+    let tag = release.tag_name.trim().to_ascii_lowercase();
+    let name = release.name.trim().to_ascii_lowercase();
+    let body = release.body.trim().to_ascii_lowercase();
+    let mut score = 0i64;
+    if !tag.is_empty() && tag.contains(&normalized_keyword) {
+        score += 150;
+    }
+    if !name.is_empty() && name.contains(&normalized_keyword) {
+        score += 180;
+    }
+    if !body.is_empty() && body.contains(&normalized_keyword) {
+        score += 120;
     }
     score
 }
