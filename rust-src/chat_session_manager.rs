@@ -4,11 +4,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use chrono::{Local, TimeZone, Utc};
+use scraper::{Html, Selector};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::task;
 use tokio::fs;
 use tokio::sync::Mutex;
+use tokio::task;
 
 use crate::config::QaConfig;
 use crate::event_utils::{EventContext, get_sender_name, plain_text_from_message};
@@ -32,6 +33,7 @@ const CODEX_MAX_FILE_LINES: usize = 400;
 const CODEX_MAX_PROJECT_HINT_CHARS: usize = 12_000;
 const MAX_GITHUB_RELEASES: usize = 30;
 const MAX_GITHUB_COMMITS: usize = 100;
+const MAX_WEB_SEARCH_RESULTS: usize = 10;
 
 #[derive(Debug, Clone)]
 pub struct ChatResult {
@@ -140,6 +142,14 @@ struct GithubCommitToolAuthor {
     name: String,
     #[serde(default)]
     date: String,
+}
+
+#[derive(Debug, Clone)]
+struct WebSearchResultItem {
+    title: String,
+    url: String,
+    display_url: String,
+    snippet: String,
 }
 
 #[derive(Debug, Clone)]
@@ -413,11 +423,7 @@ impl ChatSessionManager {
         // 在真正通过前不向外发送任何消息，也不把失败稿落成 assistant 回复。
         loop {
             let completion = self
-                .complete_chat_turn_with_tools(
-                    context,
-                    &mut working_messages,
-                    tool_round_limit,
-                )
+                .complete_chat_turn_with_tools(context, &mut working_messages, tool_round_limit)
                 .await?;
             let answer_text = match completion {
                 ToolDrivenCompletion::Text(text) => text,
@@ -770,7 +776,13 @@ impl ChatSessionManager {
             "append_bot_memory" => Ok(ChatToolExecution::Value(
                 self.execute_append_bot_memory(request).await?,
             )),
-            "start_group_file_download" => self.execute_start_group_file_download(context, request).await,
+            "search_web" => Ok(ChatToolExecution::Value(
+                self.execute_search_web(request).await?,
+            )),
+            "start_group_file_download" => {
+                self.execute_start_group_file_download(context, request)
+                    .await
+            }
             "read_github_repo_releases" => Ok(ChatToolExecution::Value(
                 self.execute_read_github_repo_releases(request).await?,
             )),
@@ -808,7 +820,8 @@ impl ChatSessionManager {
 
     async fn execute_list_codex_directory(&self, request: &Value) -> Result<Value> {
         let root = self.codex_root()?;
-        let requested_path = get_string_field(request, &["path", "dir"]).unwrap_or_else(|| ".".to_string());
+        let requested_path =
+            get_string_field(request, &["path", "dir"]).unwrap_or_else(|| ".".to_string());
         let max_entries = clamp_usize(
             get_usize_field(request, &["max_entries", "limit"]).unwrap_or(50),
             1,
@@ -828,10 +841,7 @@ impl ChatSessionManager {
         while let Some(entry) = reader.next_entry().await? {
             let file_name = entry.file_name().to_string_lossy().to_string();
             let entry_metadata = entry.metadata().await?;
-            let entry_relative = relative_display_path(
-                &root,
-                &absolute_path.join(&file_name),
-            );
+            let entry_relative = relative_display_path(&root, &absolute_path.join(&file_name));
             entries.push((entry_metadata.is_dir(), file_name, entry_relative));
         }
         entries.sort_by(|left, right| {
@@ -897,8 +907,13 @@ impl ChatSessionManager {
             200,
             CODEX_MAX_FILE_CHARS,
         );
-        let (content, start_line, end_line, truncated) =
-            slice_file_excerpt(&text, requested_start, requested_end, max_chars, CODEX_MAX_FILE_LINES);
+        let (content, start_line, end_line, truncated) = slice_file_excerpt(
+            &text,
+            requested_start,
+            requested_end,
+            max_chars,
+            CODEX_MAX_FILE_LINES,
+        );
         Ok(json!({
             "tool": "read_codex_file",
             "ok": true,
@@ -930,11 +945,7 @@ impl ChatSessionManager {
             .map(str::trim)
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>();
-        let content = trim_text(
-            &normalized.join("\n"),
-            max_chars,
-            "\n...(长期记忆已截断)",
-        );
+        let content = trim_text(&normalized.join("\n"), max_chars, "\n...(长期记忆已截断)");
         Ok(json!({
             "tool": "read_bot_memory",
             "ok": true,
@@ -996,16 +1007,115 @@ impl ChatSessionManager {
         if request_text.trim().is_empty() {
             bail!("start_group_file_download 缺少 request_text");
         }
-        request_object.insert("request_text".to_string(), Value::String(request_text.clone()));
-        Ok(ChatToolExecution::GroupFileDownload(GroupFileDownloadRequest {
-            request_text,
-            request: Value::Object(request_object),
+        request_object.insert(
+            "request_text".to_string(),
+            Value::String(request_text.clone()),
+        );
+        Ok(ChatToolExecution::GroupFileDownload(
+            GroupFileDownloadRequest {
+                request_text,
+                request: Value::Object(request_object),
+            },
+        ))
+    }
+
+    async fn execute_search_web(&self, request: &Value) -> Result<Value> {
+        let config = &self.config.answer.web_search;
+        if !config.enabled {
+            bail!("联网搜索工具未启用");
+        }
+        let query = get_string_field(request, &["query", "q", "keyword"])
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("search_web 缺少 query"))?;
+        let limit = clamp_usize(
+            get_usize_field(request, &["limit", "max_results", "maxResults"])
+                .unwrap_or(config.max_results),
+            1,
+            config.max_results.max(1).min(MAX_WEB_SEARCH_RESULTS),
+        );
+        let results = self.search_web_with_config(&query, limit).await?;
+        Ok(json!({
+            "tool": "search_web",
+            "ok": true,
+            "engine": config.engine,
+            "query": query,
+            "returnedCount": results.len(),
+            "results": results
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    json!({
+                        "index": index + 1,
+                        "title": item.title,
+                        "url": item.url,
+                        "display_url": item.display_url,
+                        "snippet": item.snippet,
+                    })
+                })
+                .collect::<Vec<_>>()
         }))
+    }
+
+    async fn search_web_with_config(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<WebSearchResultItem>> {
+        let config = &self.config.answer.web_search;
+        let engine = config.engine.trim().to_ascii_lowercase();
+        let mut url = reqwest::Url::parse(config.base_url.trim())
+            .with_context(|| format!("联网搜索地址无效：{}", config.base_url.trim()))?;
+        match engine.as_str() {
+            "bing" => {
+                url.query_pairs_mut().append_pair("q", query.trim());
+            }
+            "duckduckgo_html" => {
+                url.query_pairs_mut().append_pair("q", query.trim());
+            }
+            _ => bail!("暂不支持的联网搜索引擎：{}", config.engine),
+        }
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(
+                config.request_timeout_ms.max(1_000),
+            ))
+            .build()
+            .context("创建联网搜索客户端失败")?;
+        let response = client
+            .get(url)
+            .header("Accept", "text/html,application/xhtml+xml")
+            .header("User-Agent", config.user_agent.trim())
+            .send()
+            .await
+            .context("联网搜索请求失败")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = trim_text(
+                &response.text().await.unwrap_or_default(),
+                500,
+                " ...(搜索错误正文已截断)",
+            );
+            bail!("联网搜索返回 HTTP {status}: {body}");
+        }
+        let html = response.text().await.context("读取联网搜索响应失败")?;
+        // 这里故意优先走免鉴权的通用搜索页，避免再给 bot 引入一套额外搜索密钥配置；
+        // 若某个站点在目标机房不可达，就切换 engine/base_url，不影响工具协议本身。
+        let results = match engine.as_str() {
+            "bing" => parse_bing_html_results(&html, limit),
+            "duckduckgo_html" => parse_duckduckgo_html_results(&html, limit),
+            _ => unreachable!("unsupported engine checked above"),
+        };
+        if results.is_empty() {
+            bail!("联网搜索未返回可用结果");
+        }
+        Ok(results)
     }
 
     async fn execute_read_github_repo_releases(&self, request: &Value) -> Result<Value> {
         let repo = parse_github_repo_specifier(
-            get_string_field(request, &["repo", "repository", "url"]).unwrap_or_default().as_str(),
+            get_string_field(request, &["repo", "repository", "url"])
+                .unwrap_or_default()
+                .as_str(),
         )?;
         let max_releases = clamp_usize(
             get_usize_field(request, &["max_releases", "maxReleases"]).unwrap_or(10),
@@ -1024,7 +1134,10 @@ impl ChatSessionManager {
             let page_items: Vec<GithubReleaseToolPayload> = self
                 .github_api_get_json(
                     &format!("/repos/{}/{}/releases", repo.owner, repo.repo),
-                    &[("per_page", per_page.to_string()), ("page", page.to_string())],
+                    &[
+                        ("per_page", per_page.to_string()),
+                        ("page", page.to_string()),
+                    ],
                 )
                 .await?;
             if page_items.is_empty() {
@@ -1103,7 +1216,9 @@ impl ChatSessionManager {
 
     async fn execute_read_github_repo_commits(&self, request: &Value) -> Result<Value> {
         let repo = parse_github_repo_specifier(
-            get_string_field(request, &["repo", "repository", "url"]).unwrap_or_default().as_str(),
+            get_string_field(request, &["repo", "repository", "url"])
+                .unwrap_or_default()
+                .as_str(),
         )?;
         let max_commits = clamp_usize(
             get_usize_field(request, &["max_commits", "maxCommits"]).unwrap_or(30),
@@ -1212,7 +1327,10 @@ impl ChatSessionManager {
         if let Some(token) = token {
             request_builder = request_builder.bearer_auth(token.trim());
         }
-        let response = request_builder.send().await.context("GitHub API 请求失败")?;
+        let response = request_builder
+            .send()
+            .await
+            .context("GitHub API 请求失败")?;
         if !response.status().is_success() {
             let status = response.status();
             let body = trim_text(
@@ -1803,7 +1921,8 @@ impl ChatSessionManager {
                 "可用只读代码工具：inspect_codex_project、list_codex_directory、search_codex_files、read_codex_file。".to_string(),
             );
             lines.push(
-                "如果要确认仓库、文件、字段、路径、源码实现，优先先调工具，不要直接凭记忆下结论。".to_string(),
+                "如果要确认仓库、文件、字段、路径、源码实现，优先先调工具，不要直接凭记忆下结论。"
+                    .to_string(),
             );
         }
         if self
@@ -1815,6 +1934,12 @@ impl ChatSessionManager {
             .unwrap_or(false)
         {
             lines.push("可用记忆工具：read_bot_memory、append_bot_memory。".to_string());
+        }
+        if self.config.answer.web_search.enabled {
+            lines.push(
+                "可用联网搜索工具：search_web。涉及最新动态、新闻、官网说明、外部资料时先搜再答。"
+                    .to_string(),
+            );
         }
         lines.push(
             "可用 GitHub 工具：read_github_repo_releases、read_github_repo_commits。涉及版本、release、tag、pre-release、commit 时先查再答。"
@@ -1845,7 +1970,8 @@ impl ChatSessionManager {
                 "严格输出 {}{{\"tool\":\"工具名\",\"参数\":\"值\"}}{}",
                 TOOL_REQUEST_START, TOOL_REQUEST_END
             ),
-            "优先一次调用一个工具；拿到结果后要么继续调下一个工具，要么直接输出最终回复。".to_string(),
+            "优先一次调用一个工具；拿到结果后要么继续调下一个工具，要么直接输出最终回复。"
+                .to_string(),
         ];
         parts.extend(lines);
         Some(parts.join("\n"))
@@ -2090,7 +2216,11 @@ fn relative_display_path(root: &Path, target: &Path) -> String {
 fn resolve_codex_relative_path(root: &Path, requested_path: &str) -> Result<(PathBuf, String)> {
     let mut absolute = root.to_path_buf();
     let normalized = requested_path.trim();
-    let requested = if normalized.is_empty() { "." } else { normalized };
+    let requested = if normalized.is_empty() {
+        "."
+    } else {
+        normalized
+    };
     for component in Path::new(requested).components() {
         match component {
             std::path::Component::CurDir => {}
@@ -2106,8 +2236,7 @@ fn resolve_codex_relative_path(root: &Path, requested_path: &str) -> Result<(Pat
 }
 
 fn build_tool_result_prompt(results: &[Value], used: usize, limit: usize) -> String {
-    let pretty = serde_json::to_string_pretty(results)
-        .unwrap_or_else(|_| "[]".to_string());
+    let pretty = serde_json::to_string_pretty(results).unwrap_or_else(|_| "[]".to_string());
     let trimmed = trim_text(&pretty, 14_000, "\n...(工具结果已截断)");
     [
         format!("系统工具结果：本轮已执行 {used}/{limit} 次工具。"),
@@ -2319,8 +2448,8 @@ fn parse_github_repo_specifier(input: &str) -> Result<GithubRepoSpecifier> {
     } else {
         format!("https://{normalized}")
     };
-    let parsed =
-        reqwest::Url::parse(&repo_url).with_context(|| format!("无法解析 GitHub 仓库：{normalized}"))?;
+    let parsed = reqwest::Url::parse(&repo_url)
+        .with_context(|| format!("无法解析 GitHub 仓库：{normalized}"))?;
     let parts = parsed
         .path_segments()
         .map(|segments| {
@@ -2401,7 +2530,130 @@ fn build_group_download_request_text_from_tool_request(
     }
 }
 
-fn inspect_codex_project_blocking(root: PathBuf, project: String, path_hint: String) -> Result<Value> {
+fn parse_duckduckgo_html_results(html: &str, limit: usize) -> Vec<WebSearchResultItem> {
+    let document = Html::parse_document(html);
+    let result_selector = Selector::parse("div.result").expect("valid result selector");
+    let title_selector = Selector::parse("a.result__a").expect("valid title selector");
+    let snippet_selector = Selector::parse(".result__snippet").expect("valid snippet selector");
+    let display_url_selector = Selector::parse(".result__url").expect("valid url selector");
+
+    document
+        .select(&result_selector)
+        .filter_map(|result| {
+            let title_node = result.select(&title_selector).next()?;
+            let title = collapse_html_text(title_node.text().collect::<Vec<_>>().join(" "));
+            let raw_href = title_node.value().attr("href").unwrap_or_default();
+            let url = normalize_web_search_result_url(raw_href);
+            if title.is_empty() || url.is_empty() {
+                return None;
+            }
+            let snippet = result
+                .select(&snippet_selector)
+                .next()
+                .map(|node| collapse_html_text(node.text().collect::<Vec<_>>().join(" ")))
+                .unwrap_or_default();
+            let display_url = result
+                .select(&display_url_selector)
+                .next()
+                .map(|node| collapse_html_text(node.text().collect::<Vec<_>>().join(" ")))
+                .filter(|item| !item.is_empty())
+                .unwrap_or_else(|| url.clone());
+            Some(WebSearchResultItem {
+                title,
+                url,
+                display_url,
+                snippet,
+            })
+        })
+        .take(limit.max(1))
+        .collect()
+}
+
+fn parse_bing_html_results(html: &str, limit: usize) -> Vec<WebSearchResultItem> {
+    let document = Html::parse_document(html);
+    let result_selector = Selector::parse("li.b_algo").expect("valid result selector");
+    let title_selector = Selector::parse("h2 a").expect("valid title selector");
+    let snippet_selector = Selector::parse(".b_caption p").expect("valid snippet selector");
+    let display_url_selector = Selector::parse(".b_attribution cite").expect("valid url selector");
+
+    document
+        .select(&result_selector)
+        .filter_map(|result| {
+            let title_node = result.select(&title_selector).next()?;
+            let title = collapse_html_text(title_node.text().collect::<Vec<_>>().join(" "));
+            let url = title_node
+                .value()
+                .attr("href")
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if title.is_empty() || url.is_empty() {
+                return None;
+            }
+            let snippet = result
+                .select(&snippet_selector)
+                .next()
+                .map(|node| collapse_html_text(node.text().collect::<Vec<_>>().join(" ")))
+                .unwrap_or_default();
+            let display_url = result
+                .select(&display_url_selector)
+                .next()
+                .map(|node| collapse_html_text(node.text().collect::<Vec<_>>().join(" ")))
+                .filter(|item| !item.is_empty())
+                .unwrap_or_else(|| url.clone());
+            Some(WebSearchResultItem {
+                title,
+                url,
+                display_url,
+                snippet,
+            })
+        })
+        .take(limit.max(1))
+        .collect()
+}
+
+fn normalize_web_search_result_url(raw_href: &str) -> String {
+    let trimmed = raw_href.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let candidate = if trimmed.starts_with("//") {
+        format!("https:{trimmed}")
+    } else if trimmed.starts_with('/') {
+        format!("https://duckduckgo.com{trimmed}")
+    } else {
+        trimmed.to_string()
+    };
+    let Ok(parsed) = reqwest::Url::parse(&candidate) else {
+        return candidate;
+    };
+    if parsed
+        .host_str()
+        .map(|host| host.eq_ignore_ascii_case("duckduckgo.com"))
+        .unwrap_or(false)
+        && parsed.path().starts_with("/l/")
+        && let Some(target) = parsed.query_pairs().find_map(|(key, value)| {
+            if key == "uddg" {
+                Some(value.into_owned())
+            } else {
+                None
+            }
+        })
+    {
+        return target;
+    }
+    parsed.to_string()
+}
+
+fn collapse_html_text(text: String) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn inspect_codex_project_blocking(
+    root: PathBuf,
+    project: String,
+    path_hint: String,
+) -> Result<Value> {
     let target_path = if !path_hint.trim().is_empty() {
         let (absolute, _) = resolve_codex_relative_path(&root, &path_hint)?;
         absolute
@@ -2496,22 +2748,23 @@ fn find_codex_project_dir(root: &Path, query: &str) -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("未找到项目目录：{query}"))
 }
 
-fn collect_directory_entries(root: &Path, target_path: &Path, max_entries: usize) -> Result<Vec<Value>> {
+fn collect_directory_entries(
+    root: &Path,
+    target_path: &Path,
+    max_entries: usize,
+) -> Result<Vec<Value>> {
     let mut entries = std::fs::read_dir(target_path)
         .with_context(|| format!("读取目录失败：{}", target_path.display()))?
         .collect::<Result<Vec<_>, _>>()?;
     entries.sort_by(|left, right| {
         let left_path = left.path();
         let right_path = right.path();
-        right_path
-            .is_dir()
-            .cmp(&left_path.is_dir())
-            .then_with(|| {
-                left.file_name()
-                    .to_string_lossy()
-                    .to_lowercase()
-                    .cmp(&right.file_name().to_string_lossy().to_lowercase())
-            })
+        right_path.is_dir().cmp(&left_path.is_dir()).then_with(|| {
+            left.file_name()
+                .to_string_lossy()
+                .to_lowercase()
+                .cmp(&right.file_name().to_string_lossy().to_lowercase())
+        })
     });
     Ok(entries
         .into_iter()
@@ -2548,11 +2801,7 @@ fn collect_project_context_files(root: &Path, target_path: &Path) -> Result<Vec<
         }
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         let excerpt = trim_text(
-            &content
-                .lines()
-                .take(120)
-                .collect::<Vec<_>>()
-                .join("\n"),
+            &content.lines().take(120).collect::<Vec<_>>().join("\n"),
             CODEX_MAX_PROJECT_HINT_CHARS,
             "\n...(项目上下文已截断)",
         );
@@ -3048,4 +3297,66 @@ async fn append_memory_entry(path: &Path, entry: &str) -> Result<bool> {
     next.push('\n');
     fs::write(path, next).await?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        normalize_web_search_result_url, parse_bing_html_results, parse_duckduckgo_html_results,
+    };
+
+    #[test]
+    fn decodes_duckduckgo_redirect_url() {
+        let normalized = normalize_web_search_result_url(
+            "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs%3Fa%3D1",
+        );
+        assert_eq!(normalized, "https://example.com/docs?a=1");
+    }
+
+    #[test]
+    fn parses_duckduckgo_html_results() {
+        let html = r#"
+        <html>
+          <body>
+            <div class="result">
+              <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Frelease">Example Release</a>
+              <a class="result__snippet">Latest release notes and changelog.</a>
+              <span class="result__url">example.com/release</span>
+            </div>
+          </body>
+        </html>
+        "#;
+        let results = parse_duckduckgo_html_results(html, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Example Release");
+        assert_eq!(results[0].url, "https://example.com/release");
+        assert_eq!(results[0].display_url, "example.com/release");
+        assert_eq!(results[0].snippet, "Latest release notes and changelog.");
+    }
+
+    #[test]
+    fn parses_bing_html_results() {
+        let html = r#"
+        <html>
+          <body>
+            <ol id="b_results">
+              <li class="b_algo">
+                <h2><a href="https://example.com/docs">Example Docs</a></h2>
+                <div class="b_caption"><p>Official documentation and release notes.</p></div>
+                <div class="b_attribution"><cite>https://example.com/docs</cite></div>
+              </li>
+            </ol>
+          </body>
+        </html>
+        "#;
+        let results = parse_bing_html_results(html, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Example Docs");
+        assert_eq!(results[0].url, "https://example.com/docs");
+        assert_eq!(results[0].display_url, "https://example.com/docs");
+        assert_eq!(
+            results[0].snippet,
+            "Official documentation and release notes."
+        );
+    }
 }

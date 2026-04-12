@@ -113,6 +113,14 @@
       "memoryModel": "",
       "recordGroupMemory": true,
       "enableCodexReadonlyTools": true,
+      "webSearch": {
+        "enabled": true,
+        "engine": "bing",
+        "baseUrl": "https://www.bing.com/search",
+        "requestTimeoutMs": 15000,
+        "maxResults": 6,
+        "userAgent": "Mozilla/5.0 (compatible; NapCatCainBot/0.1; +https://github.com/DeterMination-Wind/CainBot-Rust)"
+      },
       "github": {
         "enabled": true,
         "apiBaseUrl": "https://api.github.com",

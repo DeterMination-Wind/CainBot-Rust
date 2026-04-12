@@ -23,3 +23,4 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 font8x8 = "0.3"
 ab_glyph = "0.2"
 imageproc = { version = "0.25", default-features = false }
+scraper = "0.24"

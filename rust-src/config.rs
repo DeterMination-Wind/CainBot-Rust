@@ -168,6 +168,17 @@ pub struct QaAnswerConfig {
     pub memory_model: String,
     pub record_group_memory: bool,
     pub enable_codex_readonly_tools: bool,
+    pub web_search: QaWebSearchConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QaWebSearchConfig {
+    pub enabled: bool,
+    pub engine: String,
+    pub base_url: String,
+    pub request_timeout_ms: u64,
+    pub max_results: usize,
+    pub user_agent: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -515,6 +526,27 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
                     &["qa", "answer", "enableCodexReadonlyTools"],
                 )
                 .unwrap_or(true),
+                web_search: QaWebSearchConfig {
+                    enabled: get_bool(&raw, &["qa", "answer", "webSearch", "enabled"])
+                        .unwrap_or(true),
+                    engine: get_string(&raw, &["qa", "answer", "webSearch", "engine"])
+                        .unwrap_or_else(|| "bing".to_string()),
+                    base_url: get_string(&raw, &["qa", "answer", "webSearch", "baseUrl"])
+                        .unwrap_or_else(|| "https://www.bing.com/search".to_string()),
+                    request_timeout_ms: get_i64(
+                        &raw,
+                        &["qa", "answer", "webSearch", "requestTimeoutMs"],
+                    )
+                    .unwrap_or(15_000)
+                    .max(1_000) as u64,
+                    max_results: get_i64(&raw, &["qa", "answer", "webSearch", "maxResults"])
+                        .unwrap_or(6)
+                        .clamp(1, 10) as usize,
+                    user_agent: get_string(&raw, &["qa", "answer", "webSearch", "userAgent"])
+                        .unwrap_or_else(|| {
+                            "Mozilla/5.0 (compatible; NapCatCainBot/0.1; +https://github.com/DeterMination-Wind/CainBot-Rust)".to_string()
+                        }),
+                },
             },
             topic_closure: QaTopicClosureConfig {
                 model: get_string(&raw, &["qa", "topicClosure", "model"])
