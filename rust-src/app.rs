@@ -755,7 +755,7 @@ async fn handle_message_event(
                         },
                     )
                     .await?;
-                    let result = chat_session_manager.chat(&context, &input, "fallback").await?;
+                    let result = chat_session_manager.chat(&context, &input).await?;
                     send_chat_result_if_present(
                         chat_session_manager,
                         logger,
@@ -812,7 +812,7 @@ async fn handle_message_event(
                             },
                         )
                         .await?;
-                        let result = chat_session_manager.chat(&context, &input, "suppress").await?;
+                        let result = chat_session_manager.chat(&context, &input).await?;
                         send_chat_result_if_present(
                             chat_session_manager,
                             logger,
@@ -961,9 +961,7 @@ async fn execute_command(
                 ))
                 .await;
             let source_text = chat_input.runtime_context.timeline_text.clone();
-            let result = chat_session_manager
-                .chat(context, &chat_input, "fallback")
-                .await?;
+            let result = chat_session_manager.chat(context, &chat_input).await?;
             send_chat_result_if_present(
                 chat_session_manager,
                 logger,

@@ -335,12 +335,7 @@ impl ChatSessionManager {
         Ok(())
     }
 
-    pub async fn chat(
-        &self,
-        context: &EventContext,
-        input: &ChatInput,
-        on_low_information: &str,
-    ) -> Result<ChatResult> {
+    pub async fn chat(&self, context: &EventContext, input: &ChatInput) -> Result<ChatResult> {
         if !input.has_content() || input.history_text.trim().is_empty() {
             bail!("聊天内容不能为空");
         }
@@ -475,7 +470,7 @@ impl ChatSessionManager {
                 ))
                 .await;
             let low_information_review = self
-                .review_low_information_reply(&review_source_text, &answer_text, on_low_information)
+                .review_low_information_reply(&review_source_text, &answer_text)
                 .await?;
             if low_information_review.start_group_file_download {
                 return Ok(ChatResult {
@@ -1639,7 +1634,6 @@ impl ChatSessionManager {
         &self,
         source_text: &str,
         reply_text: &str,
-        on_low_information: &str,
     ) -> Result<LowInformationReplyReview> {
         let normalized_reply = reply_text.trim();
         if normalized_reply.is_empty() {
@@ -1670,18 +1664,16 @@ impl ChatSessionManager {
                             "如果这类问题本来就应该先读文件或调工具确认，而拟发送回复里既没有真实读取结果，也没有具体字段/路径/对象名/版本结论，也一律 allow=false。",
                             "如果用户原话本身是要安装包、jar、zip、apk、客户端、最新版文件、release 资产、插件包、服务器插件，而拟发送回复只是“帮你交给下载流程”“等我给你找文件”“我去走下载流程”这种口头承诺但没有真实调用，那么应判定 allow=false，并设置 start_group_file_download=true。",
                             "出现 start_group_file_download=true 时，request_text 默认填写用户原话；除非用户原话缺关键信息且你能更精确重写，否则不要改写。",
-                            "只输出 JSON：{\"allow\":boolean,\"fallback\":\"可选的替代短句\",\"reason\":\"简短原因\",\"start_group_file_download\":boolean,\"request_text\":\"可选，默认用用户原话\"}",
-                            "fallback 只在 allow=false 且需要替代短句时填写，否则留空。",
-                            "如果当前模式是 fallback，并且这条回复属于“先去查文档/先去读文件”的空话，fallback 应改成一句更硬的纠偏短句，明确要求先读取对应文件或工具结果后再回答，不要复述原空话。"
+                            "低信息回复被打回后，主模型会继续重答；在真正通过前，不会向外发送任何兜底短句。",
+                            "只输出 JSON：{\"allow\":boolean,\"reason\":\"简短原因\",\"start_group_file_download\":boolean,\"request_text\":\"可选，默认用用户原话\"}",
                         ].join("\n")),
                     },
                     ChatMessage {
                         role: "user".to_string(),
                         content: Value::String(format!(
-                            "用户原话：{}\n拟发送回复：{}\n低信息时的处理模式：{}",
+                            "用户原话：{}\n拟发送回复：{}",
                             normalized_source,
                             normalized_reply,
-                            if on_low_information == "fallback" { "fallback" } else { "suppress" }
                         )),
                     },
                 ],
@@ -1753,13 +1745,8 @@ impl ChatSessionManager {
                 ..Default::default()
             });
         }
-        if on_low_information == "fallback" {
-            return Ok(LowInformationReplyReview {
-                text: build_low_information_fallback(normalized_source, normalized_reply),
-                reason,
-                ..Default::default()
-            });
-        }
+        // 用户明确要求：低信息模型只能“打回重答”，不能产出“还没定位到具体答案”之类的
+        // 兜底短句，否则外层会把它当成通过稿继续发送。
         Ok(LowInformationReplyReview {
             reason,
             ..Default::default()
@@ -3134,56 +3121,6 @@ fn looks_like_correction_candidate(text: &str) -> bool {
     ]
     .iter()
     .any(|pattern| lowercase.contains(pattern))
-}
-
-fn build_low_information_fallback(source_text: &str, reply_text: &str) -> String {
-    let combined = format!("{}\n{}", source_text.trim(), reply_text.trim()).to_lowercase();
-    if [
-        "mindustry",
-        "mindustryx",
-        "mdt",
-        "牡丹亭",
-        "datapatch",
-        "方块",
-        "建筑",
-        "炮塔",
-        "单位",
-        "物品",
-        "液体",
-        "状态",
-        "星球",
-        "天气",
-        "字段",
-        "超速",
-        "投影",
-        "穹顶",
-    ]
-    .iter()
-    .any(|pattern| combined.contains(pattern))
-    {
-        return "还没定位到具体字段。".to_string();
-    }
-    if [
-        "模组",
-        "mod",
-        "插件",
-        "脚本",
-        "源码",
-        "仓库",
-        "项目",
-        "目录",
-        "构建",
-        "编译",
-        "报错",
-        "服务端",
-        "服务器",
-    ]
-    .iter()
-    .any(|pattern| combined.contains(pattern))
-    {
-        return "还没定位到具体位置。".to_string();
-    }
-    "还没定位到具体答案。".to_string()
 }
 
 fn build_low_information_retry_prompt(feedback: &str) -> String {
