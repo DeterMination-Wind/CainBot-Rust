@@ -34,6 +34,7 @@ const CODEX_MAX_PROJECT_HINT_CHARS: usize = 12_000;
 const MAX_GITHUB_RELEASES: usize = 30;
 const MAX_GITHUB_COMMITS: usize = 100;
 const MAX_WEB_SEARCH_RESULTS: usize = 10;
+const MAX_WEB_PAGE_CHARS: usize = 20_000;
 
 #[derive(Debug, Clone)]
 pub struct ChatResult {
@@ -774,6 +775,9 @@ impl ChatSessionManager {
             "search_web" => Ok(ChatToolExecution::Value(
                 self.execute_search_web(request).await?,
             )),
+            "read_web_page" => Ok(ChatToolExecution::Value(
+                self.execute_read_web_page(request).await?,
+            )),
             "start_group_file_download" => {
                 self.execute_start_group_file_download(context, request)
                     .await
@@ -1049,6 +1053,71 @@ impl ChatSessionManager {
                     })
                 })
                 .collect::<Vec<_>>()
+        }))
+    }
+
+    async fn execute_read_web_page(&self, request: &Value) -> Result<Value> {
+        let config = &self.config.answer.web_search;
+        if !config.enabled {
+            bail!("联网搜索工具未启用");
+        }
+        let url = get_string_field(request, &["url", "link"])
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("read_web_page 缺少 url"))?;
+        let parsed = reqwest::Url::parse(&url).with_context(|| format!("网页地址无效：{url}"))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            bail!("read_web_page 仅支持 http/https 网页");
+        }
+        let max_chars = clamp_usize(
+            get_usize_field(request, &["max_chars", "maxChars"]).unwrap_or(8_000),
+            500,
+            MAX_WEB_PAGE_CHARS,
+        );
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(
+                config.request_timeout_ms.max(1_000),
+            ))
+            .build()
+            .context("创建网页读取客户端失败")?;
+        let response = client
+            .get(parsed.clone())
+            .header("Accept", "text/html,application/xhtml+xml,text/plain")
+            .header("User-Agent", config.user_agent.trim())
+            .send()
+            .await
+            .context("网页读取请求失败")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = trim_text(
+                &response.text().await.unwrap_or_default(),
+                500,
+                " ...(网页错误正文已截断)",
+            );
+            bail!("网页读取返回 HTTP {status}: {body}");
+        }
+        let final_url = response.url().to_string();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = response.text().await.context("读取网页响应失败")?;
+        let (title, content) = parse_web_page_content(&body, &content_type);
+        let trimmed_content = trim_text(&content, max_chars, "\n...(网页正文已截断)");
+        if trimmed_content.trim().is_empty() {
+            bail!("网页正文为空或无法提取可读内容");
+        }
+        Ok(json!({
+            "tool": "read_web_page",
+            "ok": true,
+            "url": url,
+            "finalUrl": final_url,
+            "contentType": content_type,
+            "title": title,
+            "truncated": trimmed_content.len() < content.len(),
+            "content": trimmed_content
         }))
     }
 
@@ -1661,6 +1730,7 @@ impl ChatSessionManager {
                             "如果回复给出了具体做法、具体定位、明确结论、有效下一步，判定 allow=true。",
                             "当用户在问“怎么改/怎么做/在哪里/哪个字段”时，像“改对应字段”“看对应对象”“去改相关配置”这类话都算低信息空话。",
                             "像“需要查文档再确认”“请提供更多上下文/配置名称我才能定位”“还没能读取对应文件/JSON，因此不敢确定”“收到，先读取某文件”这类把工作往后推、但没有给出读取结果的回复，一律判定 allow=false。",
+                            "如果用户明确要求联网搜索、查询今天/最新/新闻，而回复只是说“搜索结果无效”“没抓到”“换个关键词再试”，却没有继续换关键词重搜或读取搜索结果页链接正文，也一律 allow=false。",
                             "如果这类问题本来就应该先读文件或调工具确认，而拟发送回复里既没有真实读取结果，也没有具体字段/路径/对象名/版本结论，也一律 allow=false。",
                             "如果用户原话本身是要安装包、jar、zip、apk、客户端、最新版文件、release 资产、插件包、服务器插件，而拟发送回复只是“帮你交给下载流程”“等我给你找文件”“我去走下载流程”这种口头承诺但没有真实调用，那么应判定 allow=false，并设置 start_group_file_download=true。",
                             "出现 start_group_file_download=true 时，request_text 默认填写用户原话；除非用户原话缺关键信息且你能更精确重写，否则不要改写。",
@@ -1924,7 +1994,7 @@ impl ChatSessionManager {
         }
         if self.config.answer.web_search.enabled {
             lines.push(
-                "可用联网搜索工具：search_web。涉及最新动态、新闻、官网说明、外部资料时先搜再答。"
+                "可用联网工具：search_web、read_web_page。涉及今天、最新动态、新闻、官网说明、外部资料时必须先搜；需要引用网页正文时继续读取页面，不要停在搜索结果页。"
                     .to_string(),
             );
         }
@@ -2554,6 +2624,65 @@ fn parse_duckduckgo_html_results(html: &str, limit: usize) -> Vec<WebSearchResul
         })
         .take(limit.max(1))
         .collect()
+}
+
+fn parse_web_page_content(body: &str, content_type: &str) -> (String, String) {
+    if !content_type.to_ascii_lowercase().contains("html") {
+        return (String::new(), collapse_html_text(body.to_string()));
+    }
+    let document = Html::parse_document(body);
+    let title_selector = Selector::parse("title").expect("valid title selector");
+    let title = document
+        .select(&title_selector)
+        .next()
+        .map(|node| collapse_html_text(node.text().collect::<Vec<_>>().join(" ")))
+        .unwrap_or_default();
+    (title, extract_best_web_page_text(&document))
+}
+
+fn extract_best_web_page_text(document: &Html) -> String {
+    let root_selector = Selector::parse(
+        "main, article, [role='main'], #content, .content, .article, .post, .entry-content, body",
+    )
+    .expect("valid root selector");
+    let block_selector = Selector::parse("h1, h2, h3, p, li").expect("valid block selector");
+    let mut best = String::new();
+    for root in document.select(&root_selector).take(12) {
+        let candidate = extract_web_page_blocks(root, &block_selector);
+        if candidate.len() > best.len() {
+            best = candidate;
+        }
+    }
+    if best.trim().is_empty() {
+        let body_selector = Selector::parse("body").expect("valid body selector");
+        if let Some(body) = document.select(&body_selector).next() {
+            return collapse_html_text(body.text().collect::<Vec<_>>().join(" "));
+        }
+    }
+    best
+}
+
+fn extract_web_page_blocks(
+    root: scraper::element_ref::ElementRef<'_>,
+    block_selector: &Selector,
+) -> String {
+    let mut seen = HashSet::<String>::new();
+    let mut blocks = Vec::<String>::new();
+    for node in root.select(block_selector) {
+        let text = collapse_html_text(node.text().collect::<Vec<_>>().join(" "));
+        if text.len() < 8 || !seen.insert(text.clone()) {
+            continue;
+        }
+        blocks.push(text);
+        if blocks.join("\n").len() >= MAX_WEB_PAGE_CHARS {
+            break;
+        }
+    }
+    if blocks.is_empty() {
+        collapse_html_text(root.text().collect::<Vec<_>>().join(" "))
+    } else {
+        blocks.join("\n")
+    }
 }
 
 fn parse_bing_html_results(html: &str, limit: usize) -> Vec<WebSearchResultItem> {
@@ -3240,6 +3369,7 @@ async fn append_memory_entry(path: &Path, entry: &str) -> Result<bool> {
 mod tests {
     use super::{
         normalize_web_search_result_url, parse_bing_html_results, parse_duckduckgo_html_results,
+        parse_web_page_content,
     };
 
     #[test]
@@ -3295,5 +3425,25 @@ mod tests {
             results[0].snippet,
             "Official documentation and release notes."
         );
+    }
+
+    #[test]
+    fn parses_web_page_content() {
+        let html = r#"
+        <html>
+          <head><title>Example News</title></head>
+          <body>
+            <main>
+              <h1>Example News</h1>
+              <p>First paragraph with key facts.</p>
+              <p>Second paragraph with more details.</p>
+            </main>
+          </body>
+        </html>
+        "#;
+        let (title, content) = parse_web_page_content(html, "text/html; charset=utf-8");
+        assert_eq!(title, "Example News");
+        assert!(content.contains("First paragraph with key facts."));
+        assert!(content.contains("Second paragraph with more details."));
     }
 }
