@@ -152,7 +152,6 @@ pub struct QaAnswerConfig {
     pub model: String,
     pub temperature: f64,
     pub max_context_chars: usize,
-    pub max_tool_rounds: usize,
     pub session_ttl_ms: u64,
     pub max_timeline_messages: usize,
     pub context_window_messages: usize,
@@ -464,9 +463,6 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
                 max_context_chars: get_i64(&raw, &["qa", "answer", "maxContextChars"])
                     .unwrap_or(80_000)
                     .max(2_000) as usize,
-                max_tool_rounds: get_i64(&raw, &["qa", "answer", "maxToolRounds"])
-                    .unwrap_or(4)
-                    .max(1) as usize,
                 session_ttl_ms: get_i64(&raw, &["qa", "answer", "sessionTtlMs"])
                     .unwrap_or(86_400_000)
                     .max(60_000) as u64,
@@ -539,9 +535,11 @@ pub async fn load_config(config_path: impl AsRef<Path>) -> Result<LoadedConfig> 
                     )
                     .unwrap_or(15_000)
                     .max(1_000) as u64,
+                    // 这里的 maxResults 只作为默认值，不再限制主模型单次 search_web
+                    // 能请求的结果数量；真正的运行时上限由工具实现控制。
                     max_results: get_i64(&raw, &["qa", "answer", "webSearch", "maxResults"])
-                        .unwrap_or(6)
-                        .clamp(1, 10) as usize,
+                        .unwrap_or(12)
+                        .clamp(1, 20) as usize,
                     user_agent: get_string(&raw, &["qa", "answer", "webSearch", "userAgent"])
                         .unwrap_or_else(|| {
                             "Mozilla/5.0 (compatible; NapCatCainBot/0.1; +https://github.com/DeterMination-Wind/CainBot-Rust)".to_string()

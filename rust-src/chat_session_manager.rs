@@ -22,9 +22,6 @@ use crate::state_store::StateStore;
 
 const TOOL_REQUEST_START: &str = "<<<CAIN_CODEX_TOOL_START>>>";
 const TOOL_REQUEST_END: &str = "<<<CAIN_CODEX_TOOL_END>>>";
-// 用户明确要求：低信息/幻觉模型把主模型打回后，主模型必须允许再调用最多 10 次工具，
-// 直到拿到新证据再输出下一轮文本，而不是沿用首轮较小的工具预算继续硬答。
-const CHAT_REPAIR_TOOL_ROUND_LIMIT: usize = 10;
 const DEFAULT_GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const CODEX_MAX_DIRECTORY_ENTRIES: usize = 200;
 const CODEX_MAX_SEARCH_RESULTS: usize = 60;
@@ -33,7 +30,7 @@ const CODEX_MAX_FILE_LINES: usize = 400;
 const CODEX_MAX_PROJECT_HINT_CHARS: usize = 12_000;
 const MAX_GITHUB_RELEASES: usize = 30;
 const MAX_GITHUB_COMMITS: usize = 100;
-const MAX_WEB_SEARCH_RESULTS: usize = 10;
+const MAX_WEB_SEARCH_RESULTS: usize = 20;
 const MAX_WEB_PAGE_CHARS: usize = 20_000;
 
 #[derive(Debug, Clone)]
@@ -412,14 +409,13 @@ impl ChatSessionManager {
         };
         let mut low_information_retry_attempts = 0usize;
         let mut hallucination_retry_attempts = 0usize;
-        let mut tool_round_limit = self.config.answer.max_tool_rounds.max(1);
 
         // 这里故意保持“先审后发”的闭环：
         // 低信息检查或幻觉检查任一不通过，就继续把主模型打回重答，
         // 在真正通过前不向外发送任何消息，也不把失败稿落成 assistant 回复。
         loop {
             let completion = self
-                .complete_chat_turn_with_tools(context, &mut working_messages, tool_round_limit)
+                .complete_chat_turn_with_tools(context, &mut working_messages)
                 .await?;
             let answer_text = match completion {
                 ToolDrivenCompletion::Text(text) => text,
@@ -518,7 +514,6 @@ impl ChatSessionManager {
                         low_information_review.reason.as_str(),
                     )),
                 });
-                tool_round_limit = CHAT_REPAIR_TOOL_ROUND_LIMIT;
                 continue;
             }
             self.logger
@@ -602,7 +597,6 @@ impl ChatSessionManager {
                     hallucination_review.reason.as_str(),
                 )),
             });
-            tool_round_limit = CHAT_REPAIR_TOOL_ROUND_LIMIT;
         }
     }
 
@@ -614,11 +608,10 @@ impl ChatSessionManager {
         &self,
         context: &EventContext,
         working_messages: &mut Vec<ChatMessage>,
-        max_tool_rounds: usize,
     ) -> Result<ToolDrivenCompletion> {
-        let tool_limit = max_tool_rounds.max(1);
         let mut used_tool_calls = 0usize;
-        let mut forced_text_attempts = 0usize;
+        let mut last_tool_batch_signature = String::new();
+        let mut repeated_tool_batch_count = 0usize;
 
         loop {
             let completion = self
@@ -655,38 +648,31 @@ impl ChatSessionManager {
                 return Ok(ToolDrivenCompletion::Text(completion.trim().to_string()));
             }
 
-            if used_tool_calls >= tool_limit {
-                forced_text_attempts += 1;
-                self.logger
-                    .info(format!(
-                        "聊天工具额度已用完，强制主模型直接输出文本：attempt={}, limit={}",
-                        forced_text_attempts, tool_limit
-                    ))
-                    .await;
-                if forced_text_attempts >= 3 {
-                    return Ok(ToolDrivenCompletion::Text(
-                        strip_marked_tool_calls(&completion).trim().to_string(),
-                    ));
-                }
+            let current_signature = normalize_tool_batch_signature(&tool_calls);
+            if current_signature == last_tool_batch_signature {
+                repeated_tool_batch_count += 1;
+            } else {
+                repeated_tool_batch_count = 1;
+                last_tool_batch_signature = current_signature;
+            }
+            // 用户要求取消“总次数预算”，这里仅拦截连续重复同一批工具请求的无进展循环，
+            // 避免模型把 search_web/read_web_page 原样重放到卡死。
+            if repeated_tool_batch_count >= 3 {
                 working_messages.push(ChatMessage {
                     role: "assistant".to_string(),
                     content: Value::String(completion),
                 });
                 working_messages.push(ChatMessage {
                     role: "user".to_string(),
-                    content: Value::String(build_tool_limit_retry_prompt(tool_limit)),
+                    content: Value::String(build_repeated_tool_retry_prompt()),
                 });
                 continue;
             }
 
-            forced_text_attempts = 0;
-            let remaining = tool_limit.saturating_sub(used_tool_calls);
-            let tool_call_count = tool_calls.len();
             let mut tool_results = Vec::<Value>::new();
 
-            // 每次打回后的“修复轮”都可能需要重新查文件、读发布页或启动下载链路，
-            // 所以这里按工具调用次数精确计数，而不是简单按模型回合数截断。
-            for request in tool_calls.into_iter().take(remaining) {
+            // 主聊天模型不再受总调用次数预算限制；只要还在产生新工具动作，就继续补证据。
+            for request in tool_calls {
                 let tool_name = request
                     .get("tool")
                     .and_then(Value::as_str)
@@ -696,9 +682,8 @@ impl ChatSessionManager {
                     .to_string();
                 self.logger
                     .info(format!(
-                        "聊天工具调用：round={}/{}, tool={}",
+                        "聊天工具调用：count={}, tool={}",
                         used_tool_calls + 1,
-                        tool_limit,
                         tool_name
                     ))
                     .await;
@@ -716,28 +701,13 @@ impl ChatSessionManager {
                 }
             }
 
-            if tool_call_count > remaining {
-                tool_results.push(json!({
-                    "tool": "tool_budget",
-                    "ok": false,
-                    "error": format!(
-                        "本轮工具额度不足，已执行 {} 次，剩余调用已拒绝。下一条请优先基于已有结果直接输出文本。",
-                        remaining
-                    )
-                }));
-            }
-
             working_messages.push(ChatMessage {
                 role: "assistant".to_string(),
                 content: Value::String(completion),
             });
             working_messages.push(ChatMessage {
                 role: "user".to_string(),
-                content: Value::String(build_tool_result_prompt(
-                    &tool_results,
-                    used_tool_calls,
-                    tool_limit,
-                )),
+                content: Value::String(build_tool_result_prompt(&tool_results, used_tool_calls)),
             });
         }
     }
@@ -1029,9 +999,9 @@ impl ChatSessionManager {
             .ok_or_else(|| anyhow::anyhow!("search_web 缺少 query"))?;
         let limit = clamp_usize(
             get_usize_field(request, &["limit", "max_results", "maxResults"])
-                .unwrap_or(config.max_results),
+                .unwrap_or(config.max_results.max(1)),
             1,
-            config.max_results.max(1).min(MAX_WEB_SEARCH_RESULTS),
+            MAX_WEB_SEARCH_RESULTS,
         );
         let results = self.search_web_with_config(&query, limit).await?;
         Ok(json!({
@@ -1039,6 +1009,7 @@ impl ChatSessionManager {
             "ok": true,
             "engine": config.engine,
             "query": query,
+            "requestedCount": limit,
             "returnedCount": results.len(),
             "results": results
                 .into_iter()
@@ -1128,51 +1099,88 @@ impl ChatSessionManager {
     ) -> Result<Vec<WebSearchResultItem>> {
         let config = &self.config.answer.web_search;
         let engine = config.engine.trim().to_ascii_lowercase();
-        let mut url = reqwest::Url::parse(config.base_url.trim())
-            .with_context(|| format!("联网搜索地址无效：{}", config.base_url.trim()))?;
-        match engine.as_str() {
-            "bing" => {
-                url.query_pairs_mut().append_pair("q", query.trim());
-            }
-            "duckduckgo_html" => {
-                url.query_pairs_mut().append_pair("q", query.trim());
-            }
-            _ => bail!("暂不支持的联网搜索引擎：{}", config.engine),
-        }
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(
                 config.request_timeout_ms.max(1_000),
             ))
             .build()
             .context("创建联网搜索客户端失败")?;
-        let response = client
-            .get(url)
-            .header("Accept", "text/html,application/xhtml+xml")
-            .header("User-Agent", config.user_agent.trim())
-            .send()
-            .await
-            .context("联网搜索请求失败")?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = trim_text(
-                &response.text().await.unwrap_or_default(),
-                500,
-                " ...(搜索错误正文已截断)",
-            );
-            bail!("联网搜索返回 HTTP {status}: {body}");
-        }
-        let html = response.text().await.context("读取联网搜索响应失败")?;
-        // 这里故意优先走免鉴权的通用搜索页，避免再给 bot 引入一套额外搜索密钥配置；
-        // 若某个站点在目标机房不可达，就切换 engine/base_url，不影响工具协议本身。
-        let results = match engine.as_str() {
-            "bing" => parse_bing_html_results(&html, limit),
-            "duckduckgo_html" => parse_duckduckgo_html_results(&html, limit),
-            _ => unreachable!("unsupported engine checked above"),
+        let page_size = match engine.as_str() {
+            "bing" => 10usize,
+            "duckduckgo_html" => limit.max(1),
+            _ => bail!("暂不支持的联网搜索引擎：{}", config.engine),
         };
-        if results.is_empty() {
+        let max_pages = ((limit.max(1) - 1) / page_size) + 1;
+        let mut collected = Vec::<WebSearchResultItem>::new();
+        let mut seen = HashSet::<String>::new();
+
+        // 允许单次 search_web 返回超过首页的候选结果，避免模型永远卡在前 10 条。
+        for page_index in 0..max_pages {
+            let offset = page_index * page_size;
+            let mut url = reqwest::Url::parse(config.base_url.trim())
+                .with_context(|| format!("联网搜索地址无效：{}", config.base_url.trim()))?;
+            match engine.as_str() {
+                "bing" => {
+                    url.query_pairs_mut().append_pair("q", query.trim());
+                    if offset > 0 {
+                        url.query_pairs_mut()
+                            .append_pair("first", &(offset + 1).to_string());
+                    }
+                }
+                "duckduckgo_html" => {
+                    url.query_pairs_mut().append_pair("q", query.trim());
+                }
+                _ => unreachable!("unsupported engine checked above"),
+            }
+            let response = client
+                .get(url)
+                .header("Accept", "text/html,application/xhtml+xml")
+                .header("User-Agent", config.user_agent.trim())
+                .send()
+                .await
+                .context("联网搜索请求失败")?;
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = trim_text(
+                    &response.text().await.unwrap_or_default(),
+                    500,
+                    " ...(搜索错误正文已截断)",
+                );
+                bail!("联网搜索返回 HTTP {status}: {body}");
+            }
+            let html = response.text().await.context("读取联网搜索响应失败")?;
+            // 这里故意优先走免鉴权的通用搜索页，避免再给 bot 引入一套额外搜索密钥配置；
+            // 若某个站点在目标机房不可达，就切换 engine/base_url，不影响工具协议本身。
+            let page_results = match engine.as_str() {
+                "bing" => parse_bing_html_results(&html, page_size),
+                "duckduckgo_html" => parse_duckduckgo_html_results(&html, limit),
+                _ => unreachable!("unsupported engine checked above"),
+            };
+            let mut appended = 0usize;
+            for item in page_results {
+                let dedupe_key = format!(
+                    "{}\n{}",
+                    item.url.trim().to_ascii_lowercase(),
+                    item.title.trim().to_ascii_lowercase()
+                );
+                if !seen.insert(dedupe_key) {
+                    continue;
+                }
+                collected.push(item);
+                appended += 1;
+                if collected.len() >= limit {
+                    break;
+                }
+            }
+            if collected.len() >= limit || appended == 0 || engine == "duckduckgo_html" {
+                break;
+            }
+        }
+
+        if collected.is_empty() {
             bail!("联网搜索未返回可用结果");
         }
-        Ok(results)
+        Ok(collected)
     }
 
     async fn execute_read_github_repo_releases(&self, request: &Value) -> Result<Value> {
@@ -1994,7 +2002,7 @@ impl ChatSessionManager {
         }
         if self.config.answer.web_search.enabled {
             lines.push(
-                "可用联网工具：search_web、read_web_page。涉及今天、最新动态、新闻、官网说明、外部资料时必须先搜；需要引用网页正文时继续读取页面，不要停在搜索结果页。"
+                "可用联网工具：search_web、read_web_page。涉及今天、最新动态、新闻、官网说明、外部资料时必须先搜；需要引用网页正文时继续读取页面，不要停在搜索结果页。若首轮结果是百科、专题、旧文或不够用，就继续改写 query、提高 max_results、再搜主流媒体/官网站点。"
                     .to_string(),
             );
         }
@@ -2292,27 +2300,31 @@ fn resolve_codex_relative_path(root: &Path, requested_path: &str) -> Result<(Pat
     Ok((absolute, relative))
 }
 
-fn build_tool_result_prompt(results: &[Value], used: usize, limit: usize) -> String {
+fn build_tool_result_prompt(results: &[Value], used: usize) -> String {
     let pretty = serde_json::to_string_pretty(results).unwrap_or_else(|_| "[]".to_string());
     let trimmed = trim_text(&pretty, 14_000, "\n...(工具结果已截断)");
     [
-        format!("系统工具结果：本轮已执行 {used}/{limit} 次工具。"),
+        format!("系统工具结果：累计已执行 {used} 次工具。"),
         "```json".to_string(),
         trimmed,
         "```".to_string(),
-        if used < limit {
-            "如果还缺关键信息，可以继续调用工具；如果信息已足够，直接输出新的完整回复。".to_string()
-        } else {
-            "本轮工具额度已经用完，下一条禁止继续调用工具，必须直接输出新的完整回复。".to_string()
-        },
+        "如果还缺关键信息，可以继续调用工具；如果信息已足够，直接输出新的完整回复。".to_string(),
     ]
     .join("\n")
 }
 
-fn build_tool_limit_retry_prompt(limit: usize) -> String {
-    format!(
-        "本轮最多只能调用 {limit} 次工具，额度已经用完。下一条禁止再输出任何工具请求，必须直接给出新的完整回复。"
-    )
+fn normalize_tool_batch_signature(tool_calls: &[Value]) -> String {
+    serde_json::to_string(tool_calls).unwrap_or_default()
+}
+
+fn build_repeated_tool_retry_prompt() -> String {
+    [
+        "系统纠偏：你刚刚连续重复了同一组工具请求，已经陷入无进展循环。".to_string(),
+        "禁止原样重复同一个 query、同一批 URL 或同一组工具参数。".to_string(),
+        "如果这是今天/最新/新闻/官网/外部资料类问题，就继续调用 search_web 或 read_web_page，但必须改写 query、提高 max_results、换站点或读取新的候选页正文。".to_string(),
+        "如果现有证据已经足够，就直接输出答案，不要再回报计划、字段清单、0 条结果或工具参数。".to_string(),
+    ]
+    .join("\n")
 }
 
 fn parse_tool_calls(content: &str) -> Vec<Value> {
@@ -2413,25 +2425,6 @@ fn parse_single_tool_object(text: &str) -> Option<Value> {
         .map(str::trim)
         .filter(|item| !item.is_empty())?;
     Some(parsed)
-}
-
-fn strip_marked_tool_calls(content: &str) -> String {
-    let mut result = String::new();
-    let mut cursor = 0usize;
-    while let Some(start_rel) = content[cursor..].find(TOOL_REQUEST_START) {
-        let start = cursor + start_rel;
-        result.push_str(&content[cursor..start]);
-        let content_start = start + TOOL_REQUEST_START.len();
-        let Some(end_rel) = content[content_start..].find(TOOL_REQUEST_END) else {
-            cursor = content.len();
-            break;
-        };
-        cursor = content_start + end_rel + TOOL_REQUEST_END.len();
-    }
-    if cursor < content.len() {
-        result.push_str(&content[cursor..]);
-    }
-    result
 }
 
 fn slice_file_excerpt(
@@ -3264,8 +3257,9 @@ fn build_low_information_retry_prompt(feedback: &str) -> String {
             )
         },
         "不要复述问题，不要说“还没定位到”“我先去查”“需要更多上下文”“请先读取文件”等空话。".to_string(),
-        "下一条回答必须直接给出当前上下文里已经能确认的具体字段、路径、对象名、数值、版本结论或可执行步骤。".to_string(),
-        "如果当前上下文仍不足以确认这些具体信息，就只保留已经能确认的部分，不要输出泛泛结论。".to_string(),
+        "下一条回答必须直接给出实际结果；禁止只回报工具字段、检索参数、0 条结果、计划步骤或“我还需要继续查”。".to_string(),
+        "如果用户要今天/最新/新闻/官网说明/外部资料，而现有证据还不够，就先继续调用 search_web 或 read_web_page 拿到新证据，再输出正文；优先改写 query、提高 max_results、改用 site: 精搜并读取新页面。".to_string(),
+        "只有在工具已经报出明确错误且无法继续获取新证据时，才允许说明失败原因；否则不要把工作往后推。".to_string(),
     ]
     .join("\n")
 }
@@ -3287,7 +3281,8 @@ fn build_hallucination_retry_prompt(feedback: &str, reason: &str) -> String {
                 normalized_feedback
             )
         },
-        "请基于已有上下文重新组织回答，去掉无法确认的具体事实。".to_string(),
+        "请基于已有证据重新组织回答，去掉无法确认的具体事实。".to_string(),
+        "如果这是今天/最新/新闻/官网说明/外部资料类问题，且现有证据不足以支持结论，就继续调用 search_web 或 read_web_page 补证据后再答。".to_string(),
         "如果确实不确定，就明确说不确定，不要编造字段、版本号、路径、数值。".to_string(),
     ]
     .join("\n")

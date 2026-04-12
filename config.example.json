@@ -97,7 +97,6 @@
       "model": "gpt-5.3-codex",
       "temperature": 0.4,
       "maxContextChars": 80000,
-      "maxToolRounds": 4,
       "sessionTtlMs": 86400000,
       "maxTimelineMessages": 80,
       "contextWindowMessages": 30,
@@ -118,7 +117,7 @@
         "engine": "bing",
         "baseUrl": "https://www.bing.com/search",
         "requestTimeoutMs": 15000,
-        "maxResults": 6,
+        "maxResults": 12,
         "userAgent": "Mozilla/5.0 (compatible; NapCatCainBot/0.1; +https://github.com/DeterMination-Wind/CainBot-Rust)"
       },
       "github": {
