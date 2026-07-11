@@ -1,4 +1,10 @@
 # CainBot Rust
+<h1 align="center">
+  <a href="https://github.com/DeterMination-Wind/CainBot-Rust/releases/latest"><img src="https://img.shields.io/github/v/release/DeterMination-Wind/CainBot-Rust?display_name=release&label=Latest%20Release&color=green"></a>
+  <a href="https://github.com/DeterMination-Wind/CainBot-Rust/releases"><img src="https://img.shields.io/github/downloads/DeterMination-Wind/CainBot-Rust/total?label=Downloads&color=blue"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/DeterMination-Wind/CainBot-Rust?label=License"></a>
+  <a href="https://github.com/DeterMination-Wind/CainBot-Rust"><img src="https://img.shields.io/github/stars/DeterMination-Wind/CainBot-Rust?style=flat&label=Star%20this%20mod!&color=yellow"></a>
+</h1>
 
 [![Rust Edition](https://img.shields.io/badge/rust-edition%202024-orange)](Cargo.toml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
